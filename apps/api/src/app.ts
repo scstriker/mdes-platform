@@ -152,17 +152,18 @@ export function createApp(bindDeps: MiddlewareHandler<AppEnv>) {
 
     const valid = [];
     const errors = [...parsed.errors];
-    for (let i = 0; i < parsed.rows.length; i++) {
-      const row = parsed.rows[i];
+    for (const row of parsed.rows) {
       if (!knownSet.has(row.indicator_id)) {
         errors.push({
-          line: i + 2,
+          line: row.line,
           message: `unknown indicator_id: ${row.indicator_id}`,
         });
         continue;
       }
       valid.push(row);
     }
+    // Report errors in file order, not grouped by which check failed.
+    errors.sort((a, b) => a.line - b.line);
 
     const status =
       valid.length === 0
