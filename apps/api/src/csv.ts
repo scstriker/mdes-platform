@@ -1,3 +1,6 @@
+export type JsonValue = string | number | boolean | null | JsonValue[] | JsonObject;
+export type JsonObject = { [key: string]: JsonValue };
+
 export type CsvRow = {
   indicator_id: string;
   period: string;
@@ -5,7 +8,7 @@ export type CsvRow = {
   value_num: number | null;
   value_text: string | null;
   unit: string;
-  dims: Record<string, unknown>;
+  dims: JsonObject;
 };
 
 export type CsvParseResult = {
@@ -100,12 +103,12 @@ export function parseObservationCsv(text: string, maxRows = 5000): CsvParseResul
     }
 
     const rawDims = get("dims");
-    let dims: Record<string, unknown> = {};
+    let dims: JsonObject = {};
     if (rawDims) {
       try {
         const parsed = JSON.parse(rawDims);
         if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-          dims = parsed as Record<string, unknown>;
+          dims = parsed as JsonObject;
         } else {
           errors.push({ line: lineNo, message: "dims must be a JSON object" });
           return;

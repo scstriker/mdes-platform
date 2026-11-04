@@ -4,6 +4,7 @@ import type { MiddlewareHandler } from "hono";
 import type { Sql } from "./db";
 import { checkHealth } from "./db";
 import { parseObservationCsv } from "./csv";
+import type { CsvRow } from "./csv";
 
 export type AppEnv = {
   Bindings: {
@@ -18,6 +19,11 @@ export type AppEnv = {
     importMaxRows: number;
   };
 };
+
+// Observations per multi-row INSERT. Each row binds 8 parameters, so a chunk
+// binds 8,000 — far below Postgres's 65,535 limit — and a CSV at the default
+// IMPORT_MAX_ROWS (5,000) needs 5 INSERT statements instead of 5,000.
+export const OBSERVATION_INSERT_CHUNK_SIZE = 1000;
 
 export function createApp(bindDeps: MiddlewareHandler<AppEnv>) {
   const app = new Hono<AppEnv>();
@@ -150,7 +156,7 @@ export function createApp(bindDeps: MiddlewareHandler<AppEnv>) {
     const known = await sql<{ id: string }[]>`select id from indicator`;
     const knownSet = new Set(known.map((r) => r.id));
 
-    const valid = [];
+    const valid: CsvRow[] = [];
     const errors = [...parsed.errors];
     for (let i = 0; i < parsed.rows.length; i++) {
       const row = parsed.rows[i];
@@ -171,39 +177,49 @@ export function createApp(bindDeps: MiddlewareHandler<AppEnv>) {
           ? "completed_with_errors"
           : "completed";
 
-    const [batch] = await sql<{ id: string }[]>`
-      insert into import_batch (filename, status, row_ok, row_err, errors_json)
-      values (
-        ${filename},
-        ${status},
-        ${valid.length},
-        ${errors.length},
-        ${sql.json(errors)}
-      )
-      returning id
-    `;
+    // All-or-nothing: if any insert fails, the rollback removes the batch row
+    // and every observation already written for it.
+    const batchId = await sql.begin(async (tx) => {
+      const [batch] = await tx<{ id: string }[]>`
+        insert into import_batch (filename, status, row_ok, row_err, errors_json)
+        values (
+          ${filename},
+          ${status},
+          ${valid.length},
+          ${errors.length},
+          ${tx.json(errors)}
+        )
+        returning id
+      `;
 
-    if (valid.length > 0) {
-      for (const row of valid) {
-        await sql`
-          insert into observation (
-            indicator_id, period, geo, dims, value_num, value_text, unit, batch_id
-          ) values (
-            ${row.indicator_id},
-            ${row.period},
-            ${row.geo},
-            ${sql.json(row.dims)},
-            ${row.value_num},
-            ${row.value_text},
-            ${row.unit},
-            ${batch.id}
-          )
+      for (let i = 0; i < valid.length; i += OBSERVATION_INSERT_CHUNK_SIZE) {
+        const chunk = valid.slice(i, i + OBSERVATION_INSERT_CHUNK_SIZE).map((row) => ({
+          ...row,
+          // Explicitly jsonb so dims is stored as an object; passing a JSON
+          // string here would store a double-encoded jsonb string instead.
+          dims: tx.json(row.dims),
+          batch_id: batch.id,
+        }));
+        await tx`
+          insert into observation ${tx(
+            chunk,
+            "indicator_id",
+            "period",
+            "geo",
+            "dims",
+            "value_num",
+            "value_text",
+            "unit",
+            "batch_id",
+          )}
         `;
       }
-    }
+
+      return batch.id;
+    });
 
     return c.json({
-      batch_id: batch.id,
+      batch_id: batchId,
       status,
       row_ok: valid.length,
       row_err: errors.length,
