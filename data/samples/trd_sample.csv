@@ -1,0 +1,11 @@
+indicator_id,period,geo,value_num,unit,value_text,dims
+TRD-001,2024-01,CN,128.5,亿元,,"{""trade_type"":""import""}"
+TRD-001,2024-02,CN,131.2,亿元,,"{""trade_type"":""import""}"
+TRD-001,2024-03,CN,125.8,亿元,,"{""trade_type"":""import""}"
+TRD-002,2024-01,CN,96.4,亿元,,"{""trade_type"":""export""}"
+TRD-002,2024-02,CN,101.1,亿元,,"{""trade_type"":""export""}"
+TRD-005,2024-01,CN,22.3,亿元,,"{""partner"":""US""}"
+TRD-005,2024-01,CN,18.7,亿元,,"{""partner"":""DE""}"
+TRD-005,2024-01,CN,15.2,亿元,,"{""partner"":""JP""}"
+TRD-006,2024,CN,0.42,,,"{""metric"":""CR3""}"
+TRD-007,2024,CN,0.38,,,"{""metric"":""CR3""}"

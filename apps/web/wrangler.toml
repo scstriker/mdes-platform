@@ -1,0 +1,6 @@
+name = "mdes-web"
+compatibility_date = "2026-11-04"
+pages_build_output_dir = "dist"
+
+# After Pages project is created, set API base via Pages env:
+# VITE_API_BASE=https://mdes-api.<account>.workers.dev

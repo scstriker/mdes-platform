@@ -1,0 +1,12 @@
+name = "mdes-api"
+main = "src/worker.ts"
+compatibility_date = "2026-11-04"
+compatibility_flags = ["nodejs_compat"]
+
+[[hyperdrive]]
+binding = "HYPERDRIVE"
+id = "d56f8011fd1446e5bb4d6908b414d304"
+
+[vars]
+EMBEDDING_DIMS = "1536"
+IMPORT_MAX_ROWS = "5000"

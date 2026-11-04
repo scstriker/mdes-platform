@@ -1,0 +1,16 @@
+{
+  "name": "mdes-platform",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "dev:db": "docker compose up -d db",
+    "dev:api": "npm run dev -w @mdes/api",
+    "dev:web": "npm run dev -w @mdes/web",
+    "seed": "npm run seed -w @mdes/api",
+    "test": "npm run test -w @mdes/api",
+    "build": "npm run build -w @mdes/web && npm run build -w @mdes/api"
+  }
+}

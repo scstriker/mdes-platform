@@ -1,0 +1,15 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_USER: mdes
+      POSTGRES_PASSWORD: mdes
+      POSTGRES_DB: mdes
+    volumes:
+      - mdes_pg:/var/lib/postgresql/data
+      - ./apps/api/sql/001_init.sql:/docker-entrypoint-initdb.d/001_init.sql:ro
+
+volumes:
+  mdes_pg:
