@@ -69,12 +69,12 @@ Accepted（2026-11-04，仓库所有者选定）
 1. **清理**
    - 删除未引用的 CSS 与页面；
    - token 改为直接引用设计系统里的正本；
-   - 修复窄屏导航、页脚遮挡、滚动容器；
    - 仓库根目录增加 `CLAUDE.md` / `AGENTS.md`，指向 ITEI 规范；
    - 用 Playwright 截取基线图。
 2. **基础设施**
    - Tailwind v4 主题；
    - shadcn 初始化与换皮；
+   - 新的页面外框（页眉、页脚、窄屏 TabBar、滚动容器），一并解决「现状」里的窄屏导航、页脚遮挡、宽屏滚动条和暗色标志问题，不在旧代码上单独修；
    - ITEI 组件层，以及用来逐个核对组件的 `/__design` 验收页；
    - ECharts 主题；
    - React Router 7 路由与 TanStack Query。
