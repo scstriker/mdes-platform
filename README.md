@@ -39,6 +39,19 @@ node scripts/make-demo-csv.mjs > /tmp/trd_demo.csv
 npm test
 ```
 
+### 界面验收（端到端）
+
+上面四步已写成 Playwright 端到端测试，另含外框、出错与竞态回归、axe 无障碍检查（WCAG 2.1 AA，桌面 / 手机 × 浅色 / 深色）：
+
+```bash
+npm run dev:db   # 需要 pgvector
+npm run e2e
+```
+
+`npm run e2e` 自己起 API（8788 端口，独立库 `mdes_e2e`，每次重建数据）和 Web（5174 端口），不影响正在运行的开发服务与开发库。
+
+### 单元与集成测试
+
 `npm test` 依次跑 `packages/shared`（CSV 解析）、`apps/api`（API 集成测试）和 `apps/web`（客户端、token、样式规则）。API 集成测试连本地 pgvector 里的独立库 `mdes_test`（自动创建，不碰开发库）；没起 `npm run dev:db` 时这一组会跳过并提示。
 
 ## 线上 Demo（已部署）

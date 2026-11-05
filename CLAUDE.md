@@ -22,9 +22,10 @@ npm run dev:web     # http://127.0.0.1:5173
 npm run tokens      # tokens.json 改动后重新生成 token 产物
 npm test
 npm run build
+npm run e2e          # Playwright：README 验收 + 外框 + 回归 + axe（需 pgvector，独立端口与独立库）
 ```
 
-每完成一块改动都跑 `npm test` 和 `npm run build`；界面改动用 Playwright 截图自查（桌面 1440 / 手机 390，浅色 / 深色）。
+每完成一块改动都跑 `npm test` 和 `npm run build`，界面改动再跑 `npm run e2e`；界面改动用 Playwright 截图自查（桌面 1440 / 手机 390，浅色 / 深色）。
 
 - 重构前的界面基线：`docs/screenshots/baseline/`
 - 组件验收截图（与 showcase.html 并排）：`node apps/web/scripts/design-screenshots.cjs`，输出到 `docs/screenshots/phase1/`

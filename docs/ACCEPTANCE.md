@@ -6,25 +6,26 @@ Traceability: FR → AC → verification.
 
 - API 集成测试 `apps/api/tests/api.integration.test.ts`：连本地 pgvector 的独立库 `mdes_test`（`TEST_DATABASE_URL` 可改），自动建库、建表、灌指标；连不上时整组跳过并提示。先 `npm run dev:db` 再 `npm test`。
 - CSV 解析单元测试 `packages/shared/tests/csv.test.ts`。
-- 前端：API 客户端与错误文案 `apps/web/tests/api-errors.test.ts`。
+- 前端：API 客户端与错误文案 `apps/web/tests/api-errors.test.ts`；图表切片 `apps/web/tests/slice.test.ts`；目录筛选 `apps/web/tests/catalog-filter.test.ts`。
+- 端到端：`apps/web/e2e/`（`npm run e2e`），自带 API 与 Web，连独立库 `mdes_e2e`。
 
 ### AC-001 — 一期指标目录可见
 
 **Covers:** FR-001  
-**Verify:** 种子灌库后 `GET /api/indicators?phase=phase1` 返回 30 条；全部 99 条可按簇筛选；Web 目录页可见。  
-**Method:** automated API test（「AC-001」）+ manual UI
+**Verify:** 种子灌库后 `GET /api/indicators?phase=phase1` 返回 30 条；全部 99 条可按簇筛选；Web「指标目录」阶段选「一期」显示「共 30 项」。  
+**Method:** automated API test（「AC-001」）+ e2e（`01-readme-acceptance`「1.」）
 
 ### AC-002 — TRD 样例可导入
 
 **Covers:** FR-002  
-**Verify:** 上传 `data/samples/trd_sample.csv` 返回 200，`status=completed`、`row_ok=10`，10 行观测值带同一个批次号写入。  
-**Method:** automated API test（「AC-002」）+ manual UI
+**Verify:** 上传 `data/samples/trd_sample.csv` 返回 200，`status=completed`、`row_ok=10`，10 行观测值带同一个批次号写入；Web「数据导入」预校验 10 行可导入，导入后显示「导入完成，10 行全部写入」。  
+**Method:** automated API test（「AC-002」）+ e2e（「2.」）
 
 ### AC-003 — 观测值可查询
 
 **Covers:** FR-003  
-**Verify:** 导入后 `GET /api/observations?indicator_id=TRD-001` 返回 3 行，`total=3`，按期间倒序。  
-**Method:** automated API test（「AC-003」）
+**Verify:** 导入后 `GET /api/observations?indicator_id=TRD-001` 返回 3 行，`total=3`，按期间倒序；Web「观测值」选 TRD-001 查询显示「共 3 条」。  
+**Method:** automated API test（「AC-003」）+ e2e（「3.」）
 
 ### AC-004 — pgvector 就绪
 
@@ -77,3 +78,20 @@ Traceability: FR → AC → verification.
 - 5000 行文件一次导入成功（本地约 0.3 秒）。
 
 **Method:** automated API test（「POST /api/import/csv」）
+
+### AC-011 — 界面：外框、出错与竞态
+
+**Covers:** FR-001、FR-003、ADR-002  
+**Verify:**
+
+- 窄屏有底部 TabBar 可切换页面，内容不被挡住；桌面页脚文字不被斜切装饰遮住；宽屏由文档滚动、页眉吸顶；深色主题页眉用文字「ITEI」代替彩色标志。
+- 接口 500 或网络断开时显示原因与「重试」，不显示为空数据；先点的指标响应更慢也不会覆盖后打开的指标。
+- 指标档案图表先选切片：样例 TRD-005 三个贸易伙伴不被加总。
+
+**Method:** e2e（`02-shell`、`03-resilience`、`01-readme-acceptance`）
+
+### AC-012 — 无障碍
+
+**Covers:** NFR（可访问性，ADR-002 R4）  
+**Verify:** axe（WCAG 2.1 A / AA）检查概览、指标目录（表格 / 矩阵）、指标档案（数据 / 对比 / 规格 / 关联）、观测值、数据导入、`/__design`，桌面与手机、浅色与深色各一遍，无违规。  
+**Method:** e2e（`04-a11y`）

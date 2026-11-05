@@ -28,7 +28,7 @@ Local: Vite proxy → Node/Wrangler dev → DATABASE_URL → Docker pgvector
 - API: Hono + postgres.js（可部署 Workers；本地 Node adapter）
 - DB: PostgreSQL 16 + pgvector（本地 Docker / 云上 Neon + Hyperdrive）
 - Deploy: Wrangler（Pages + Worker + Hyperdrive）
-- Test: Vitest（CSV 解析、API 客户端与错误文案、token 同步、样式硬规则）
+- Test: Vitest（CSV 解析、API 集成、客户端与错误文案、切片规则、token 同步、样式硬规则）；Playwright 端到端（README 验收、外框、出错与竞态回归、axe 无障碍检查）
 
 ## 5. Modules
 

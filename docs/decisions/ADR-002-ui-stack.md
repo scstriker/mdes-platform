@@ -253,6 +253,12 @@ ITEI 的识别元素都保留：
 | 6 | `/__design` | 随生产包发布，不放进导航 | 部署后可以直接对照验收 |
 | 7 | shadcn 组件来源 | 当前环境的网络策略拦截 ui.shadcn.com，组件源码从 GitHub 上 shadcn 仓库（`apps/v4/registry/new-york-v4/ui`）手工复制，等同 CLI 添加；保留 `apps/web/components.json`，以后可照常用 CLI | 源码与 CLI 拉取的一致，换皮按「组件换皮清单」 |
 
+## 实施补记（阶段 4）
+
+- 端到端测试用 `@playwright/test`（与环境预装浏览器同版本 1.63.0），配置见 `apps/web/playwright.config.ts`：自带 API（8788）与 Web（5174），连独立库 `mdes_e2e`。
+- axe 检查用 `@axe-core/playwright`，许可证 MPL-2.0（不在 R4 优先的 MIT / Apache 之列）；只作为开发依赖跑测试，不进产品包。
+- axe 发现并已修复：页眉标志链接的可访问名称不含可见文字（WCAG 2.5.3）；段落里的链接只靠颜色区分（WCAG 1.4.1），`TextLink` 增加常显下划线的 `inline` 用法，用于正文中的链接。
+
 ## Decision Drivers
 
 1. ITEI 还原度（权重最高）：能否在 token 层强制规范，而不是靠人工自觉
