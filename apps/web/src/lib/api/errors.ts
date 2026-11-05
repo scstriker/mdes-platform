@@ -1,25 +1,15 @@
+import { ERROR_CODES } from "@mdes/shared";
+
 /**
- * API 错误码与中文文案（ADR-002「错误码与中文文案」）。
- * 服务端统一返回 { error: { code, message, params } }；CSV 行错误为 { line, code, params }。
- * 前端只按 code 出文案，message 只在遇到未知 code 时兜底。
+ * API 错误码的中文文案（ADR-002「错误码与中文文案」）。
+ * 服务端统一返回 { error: { code, message, params } }，message 是英文开发者说明；
+ * CSV 行错误为 { line, code, params }。界面文案只按 code 生成，遇到未知 code 时才用 message 兜底。
  */
 
 export type ApiErrorParams = Record<string, string | number | boolean | null | undefined>;
 
-/** 服务端错误码（ADR-002）与前端自有的错误码 */
-export const SERVER_ERROR_CODES = [
-  "FILE_REQUIRED",
-  "EMPTY_CSV",
-  "MISSING_HEADER",
-  "ROW_LIMIT_EXCEEDED",
-  "REQUIRED_FIELD_MISSING",
-  "INVALID_VALUE_NUM",
-  "VALUE_MISSING",
-  "DIMS_INVALID_JSON",
-  "DIMS_NOT_OBJECT",
-  "UNKNOWN_INDICATOR",
-  "NOT_FOUND",
-] as const;
+/** 服务端错误码（packages/shared）与前端自有的错误码 */
+export const SERVER_ERROR_CODES = ERROR_CODES;
 
 export const CLIENT_ERROR_CODES = ["NETWORK_ERROR", "HTTP_ERROR", "INVALID_RESPONSE", "UNKNOWN_ERROR"] as const;
 
@@ -52,7 +42,9 @@ const MESSAGES: Record<ErrorCode, (p: ApiErrorParams) => string> = {
   DIMS_INVALID_JSON: () => "维度（dims）不是合法的 JSON，请检查引号与括号",
   DIMS_NOT_OBJECT: () => '维度（dims）必须是 JSON 对象，例如 {"trade_type":"import"}',
   UNKNOWN_INDICATOR: (p) => `指标编号 ${text(p.indicator_id, "（空）")} 不存在，请核对指标目录后重试`,
-  NOT_FOUND: (p) => (p.id ? `未找到 ${p.id}，请确认编号是否正确` : "请求的内容不存在，请返回上一页重试"),
+  NOT_FOUND: (p) =>
+    p.id && p.resource !== "route" ? `未找到 ${p.id}，请确认编号是否正确` : "请求的内容不存在，请返回上一页重试",
+  INTERNAL_ERROR: () => "服务器内部错误，请稍后重试",
   NETWORK_ERROR: () => "无法连接服务器，请检查网络后重试",
   HTTP_ERROR: (p) => `服务器返回错误（HTTP ${text(p.status, "?")}），请稍后重试`,
   INVALID_RESPONSE: () => "服务器返回的数据无法解析，请稍后重试",
@@ -69,10 +61,10 @@ export function errorMessage(code: string, params: ApiErrorParams = {}, fallback
   return fallback || MESSAGES.UNKNOWN_ERROR(params);
 }
 
-export type RowError = { line: number; code: string; params?: ApiErrorParams; message?: string };
+export type RowErrorLike = { line: number; code: string; params?: ApiErrorParams; message?: string };
 
 /** CSV 行错误：「第 5 行：指标编号 TRD-099 不存在，请核对指标目录后重试」 */
-export function rowErrorMessage(err: RowError): string {
+export function rowErrorMessage(err: RowErrorLike): string {
   const body = errorMessage(err.code, err.params, err.message);
   return err.line > 0 ? `第 ${err.line} 行：${body}` : body;
 }
