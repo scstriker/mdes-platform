@@ -44,13 +44,13 @@ export function baseOption(t: ChartTheme, seriesCount: number): ChartOption {
     animationEasing: "cubicOut",
     aria: { enabled: true, decal: { show: false } },
     grid: { left: 8, right: 16, top: seriesCount > 1 ? 40 : 16, bottom: 8, containLabel: true },
+    // 图例沿用各序列的标记形状，序列不只靠颜色区分（深色主题下 chart-1 与 chart-2 很接近）
     legend: {
       show: seriesCount > 1,
       top: 0,
       left: 0,
-      icon: "rect",
-      itemWidth: 12,
-      itemHeight: 4,
+      itemWidth: 20,
+      itemHeight: 10,
       textStyle: axisText(t),
     },
     tooltip: {
@@ -66,6 +66,9 @@ export function baseOption(t: ChartTheme, seriesCount: number): ChartOption {
     },
   };
 }
+
+/** 多序列折线的标记形状，按序列顺序取用 */
+export const SERIES_SYMBOLS = ["circle", "rect", "triangle", "diamond", "emptyCircle"] as const;
 
 export const categoryAxis = (t: ChartTheme, data: string[]) => ({
   type: "category" as const,

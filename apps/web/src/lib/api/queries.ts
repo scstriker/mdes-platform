@@ -46,6 +46,25 @@ export const useObservations = (params: ObservationQuery, enabled = true) =>
     enabled,
   });
 
+/** 取全部观测值（每页 500，最多 5000 条），供指标档案做切片与图表 */
+export const ALL_OBSERVATIONS_MAX = 5000;
+
+export const useAllObservations = (params: ObservationQuery, enabled = true) =>
+  useQuery({
+    queryKey: ["observations", "all", params] as const,
+    enabled,
+    queryFn: async ({ signal }) => {
+      const first = await api.observations({ ...params, limit: 500, offset: 0 }, { signal });
+      let items = first.items;
+      while (items.length < first.total && items.length < ALL_OBSERVATIONS_MAX) {
+        const next = await api.observations({ ...params, limit: 500, offset: items.length }, { signal });
+        if (next.items.length === 0) break;
+        items = items.concat(next.items);
+      }
+      return { items, total: first.total, truncated: first.total > items.length };
+    },
+  });
+
 export const useBatches = () =>
   useQuery({ queryKey: queryKeys.batches, queryFn: ({ signal }) => api.batches({ signal }).then((r) => r.items) });
 

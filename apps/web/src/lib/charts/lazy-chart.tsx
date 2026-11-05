@@ -14,4 +14,4 @@ export function LazyChart(props: ChartProps) {
   );
 }
 
-export { baseOption, categoryAxis, valueAxis, type ChartTheme } from "./theme";
+export { baseOption, categoryAxis, SERIES_SYMBOLS, valueAxis, type ChartTheme } from "./theme";

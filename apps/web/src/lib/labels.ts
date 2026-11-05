@@ -68,7 +68,21 @@ const DIM_LABELS: Record<string, string> = {
 
 const DIM_VALUE_LABELS: Record<string, Record<string, string>> = {
   trade_type: { import: "进口", export: "出口" },
-  partner: { US: "美国", DE: "德国", JP: "日本", CN: "中国" },
+  partner: {
+    US: "美国",
+    DE: "德国",
+    JP: "日本",
+    NL: "荷兰",
+    KR: "韩国",
+    FR: "法国",
+    GB: "英国",
+    IT: "意大利",
+    CH: "瑞士",
+    IE: "爱尔兰",
+    MX: "墨西哥",
+    SG: "新加坡",
+    CN: "中国",
+  },
 };
 
 export const dimLabel = (key: string) => DIM_LABELS[key] ?? key;
