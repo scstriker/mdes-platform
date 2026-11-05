@@ -1,3 +1,4 @@
+import { errorBody } from "@mdes/shared";
 import { createApp } from "./app";
 import { createSql } from "./db";
 
@@ -12,7 +13,7 @@ const app = createApp(async (c, next) => {
   const env = c.env as Env;
   const connectionString = env.HYPERDRIVE?.connectionString || env.DATABASE_URL || "";
   if (!connectionString) {
-    return c.json({ error: "DATABASE_URL or HYPERDRIVE binding required" }, 500);
+    return c.json(errorBody("INTERNAL_ERROR", {}, "DATABASE_URL or HYPERDRIVE binding required"), 500);
   }
   const sql = createSql(connectionString, 1);
   c.set("sql", sql);

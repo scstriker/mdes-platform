@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createSql } from "./db";
+import { createSql, type Sql } from "./db";
 import { inferSourceKind } from "./inferSourceKind";
 
 type SeedFile = {
@@ -25,13 +25,11 @@ type SeedFile = {
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = resolve(__dirname, "../../..");
-const seedPath = resolve(root, "data/indicators_seed.json");
-const databaseUrl =
-  process.env.DATABASE_URL || "postgres://mdes:mdes@127.0.0.1:5433/mdes";
+export const SEED_PATH = resolve(root, "data/indicators_seed.json");
 
-async function main() {
+/** 灌入簇与指标（幂等，可重复执行）；集成测试也用它准备测试库 */
+export async function seedIndicators(sql: Sql, { seedPath = SEED_PATH, log = console.log } = {}) {
   const seed = JSON.parse(readFileSync(seedPath, "utf8")) as SeedFile;
-  const sql = createSql(databaseUrl);
 
   await sql`insert into subsystem (id, name) values ('med', '医疗装备') on conflict do nothing`;
 
@@ -100,8 +98,14 @@ async function main() {
         `;
       }
     });
-    console.log(`seeded indicators ${Math.min(i + chunkSize, indicatorRows.length)}/${indicatorRows.length}`);
+    log(`seeded indicators ${Math.min(i + chunkSize, indicatorRows.length)}/${indicatorRows.length}`);
   }
+}
+
+async function main() {
+  const databaseUrl = process.env.DATABASE_URL || "postgres://mdes:mdes@127.0.0.1:5433/mdes";
+  const sql = createSql(databaseUrl);
+  await seedIndicators(sql);
 
   const [doc] = await sql<{ id: string }[]>`
     insert into document (title, source_uri, meta)
@@ -120,7 +124,9 @@ async function main() {
   await sql.end({ timeout: 5 });
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
+}

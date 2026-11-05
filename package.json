@@ -3,6 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "workspaces": [
+    "packages/*",
     "apps/*"
   ],
   "scripts": {
@@ -11,7 +12,7 @@
     "dev:web": "npm run dev -w @mdes/web",
     "seed": "npm run seed -w @mdes/api",
     "test": "npm run test --workspaces --if-present",
-    "build": "npm run build -w @mdes/web && npm run build -w @mdes/api",
+    "build": "npm run build -w @mdes/shared && npm run build -w @mdes/web && npm run build -w @mdes/api",
     "tokens": "npm run tokens -w @mdes/web"
   }
 }

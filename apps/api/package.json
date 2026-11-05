@@ -11,6 +11,7 @@
     "deploy": "wrangler deploy"
   },
   "dependencies": {
+    "@mdes/shared": "0.1.0",
     "hono": "^4.7.2",
     "postgres": "^3.4.5"
   },
