@@ -11,6 +11,7 @@ Accepted（2026-11-04，仓库所有者选定）
   - API 改动纳入本轮，包括 3 项补充改动。
   - 参考页 `https://md.sensor-cloud.org/45` 已于 2026-11-04 核对。只借鉴它的配色带来的第一眼效果；版式、组件和信息架构仍按 ITEI 设计系统。
   - 页眉改为白底加深蓝 / 亮蓝双线，不用渐变横幅（2026-11-05，仓库所有者授权按设计判断决定）。
+  - 阶段 1 实施中的 7 项取舍（2026-11-05，仓库所有者确认），见「实施补记」。
 - **待确认**：无。
 - **数据来源**：调研数据截至 2026-11-04，取自 GitHub 搜索 API 与各仓库的 `package.json`。star 数和提交日期会变，后续引用以仓库实时数据为准。
 
@@ -217,6 +218,20 @@ ITEI 的识别元素都保留：
 | 新建 `packages/shared` | 存放共享类型和 CSV 解析器（从 `apps/api/src/csv.ts` 移入），导入页可以用同一套规则在前端做预校验 |
 
 实施时同步更新 `docs/API.md`、`docs/ACCEPTANCE.md` 与 API 测试。
+
+## 实施补记（2026-11-05 阶段 1 确认）
+
+阶段 1 实施中遇到 ADR 没写到的情况，以下 7 项由仓库所有者确认。
+
+| # | 项 | 结论 | 理由 |
+|---|---|---|---|
+| 1 | Tailwind 命名空间 | 在 `--color-*`、`--radius-*`、`--shadow-*` 之外，再清空 `--text-*`、`--font-*`、`--inset-shadow-*`、`--drop-shadow-*`、`--text-shadow-*`；渐变色（`gradient-start`、`gradient-end`、`on-gradient`）与 `radius-md` 不注册为工具类 | 只留 ITEI 字号体系；在 token 层执行「全站不用渐变」和「`rounded-md` 不生成样式」 |
+| 2 | 依赖版本 | `react-router-dom` 换成同为 7.x 的 `react-router`；TanStack Table 用 v9 | React Router v7 已把两个包合并；v9 是 TanStack Table 当前主版本 |
+| 3 | Stepper 未开始项 | 用 `surface-sunken` 底 + `ink-muted` 字，不用 NumberedNav 默认的深蓝实底；已完成 `info-bg` + 对勾，当前项 `brand-red` | ITEI「同屏深蓝实色块两块以上时其余降为浅底」 |
+| 4 | 对话框 / 抽屉遮罩 | `surface-sunken` 80% 半透明，不用黑色 | 浅色主题是白雾、深色主题是深底，两边都不写死颜色 |
+| 5 | showcase 与 README 冲突 | Button 横向内边距按 README 取 `space-5`（24px）；DataTable 表头文字按 showcase 用 13px 加粗 | README 是规则；表头 16px 在数据表里过大，showcase 的 13px 更贴近实际用法 |
+| 6 | `/__design` | 随生产包发布，不放进导航 | 部署后可以直接对照验收 |
+| 7 | shadcn 组件来源 | 当前环境的网络策略拦截 ui.shadcn.com，组件源码从 GitHub 上 shadcn 仓库（`apps/v4/registry/new-york-v4/ui`）手工复制，等同 CLI 添加；保留 `apps/web/components.json`，以后可照常用 CLI | 源码与 CLI 拉取的一致，换皮按「组件换皮清单」 |
 
 ## Decision Drivers
 
