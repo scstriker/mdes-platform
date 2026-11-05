@@ -13,17 +13,22 @@ import {
 import {
   AppFooter,
   AppHeader,
+  Breadcrumbs,
   Card,
   DataTable,
   Descriptions,
   Dropzone,
+  EmptyState,
   Field,
   KpiTile,
+  Notice,
   NumberedNav,
+  ProgressMeter,
   SectionTitle,
   Stepper,
   TabBar,
   Tag,
+  TextLink,
   Tree,
   type DataTableColumn,
   type NavItem,
@@ -512,6 +517,52 @@ export function Gallery({ theme }: { theme: "light" | "dark" }) {
             },
           ]}
         />
+      </Demo>
+
+      <Demo title="Notice / EmptyState" note="状态横幅：浅底 + 图标 + 文字；错误自动带「错误：」。空状态与请求失败分开">
+        <div className="grid gap-3">
+          <Notice tone="info" title="一期 30 项指标中 5 项已入库">其余指标导入观测值后自动更新。</Notice>
+          <Notice tone="success" title="导入完成">10 行全部写入，批次 8906a7d3。</Notice>
+          <Notice tone="warning" title="部分行未导入">3 行校验失败，详见下方行错误。</Notice>
+          <Notice
+            tone="danger"
+            title={errorMessage("NETWORK_ERROR")}
+            action={
+              <Button variant="secondary" size="sm">
+                <IconRefresh />
+                重试
+              </Button>
+            }
+          />
+          <EmptyState
+            title="该指标还没有导入数据"
+            description="导入 CSV 观测值后，这里显示图表与数据表。"
+            action={<Button size="sm">去导入</Button>}
+          />
+        </div>
+      </Demo>
+
+      <Demo title="ProgressMeter / Breadcrumbs / TextLink" note="进度条用 brand-sky；面包屑当前页不加链接；文字链接用 link 色">
+        <div className="grid max-w-md gap-5">
+          <div className="grid gap-1.5">
+            <div className="flex justify-between body-sm">
+              <span>进出口贸易（TRD）一期覆盖</span>
+              <span className="tabular-nums text-ink-muted">5 / 5</span>
+            </div>
+            <ProgressMeter value={5} max={5} label="TRD 一期覆盖率" />
+          </div>
+          <div className="grid gap-1.5">
+            <div className="flex justify-between body-sm">
+              <span>企业主体（ENT）一期覆盖</span>
+              <span className="tabular-nums text-ink-muted">0 / 8</span>
+            </div>
+            <ProgressMeter value={0} max={8} label="ENT 一期覆盖率" />
+          </div>
+          <Breadcrumbs items={[{ label: "指标目录", href: "/indicators" }, { label: "进出口贸易", href: "/indicators?cluster=TRD" }, { label: "TRD-001" }]} />
+          <p className="body">
+            导入后可在<TextLink to="/observations">观测值</TextLink>页按批次查询。
+          </p>
+        </div>
       </Demo>
 
       <Demo title="Tabs" note="当前项 2px 深蓝下划线，与页眉导航同一语言">

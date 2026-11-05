@@ -24,7 +24,7 @@ export function SectionTitle({ level = 1, number, children, as, className }: Sec
     return (
       <Tag
         className={cn(
-          "inline-flex max-w-full items-center bg-brand-navy py-2 pr-12 pl-6 title-section text-on-brand clip-slash",
+          "inline-flex w-fit max-w-full items-center bg-brand-navy py-2 pr-12 pl-6 title-section text-on-brand clip-slash",
           className,
         )}
       >
@@ -37,7 +37,7 @@ export function SectionTitle({ level = 1, number, children, as, className }: Sec
   }
   if (level === 2) {
     return (
-      <Tag className={cn("inline-block max-w-full border-b-2 border-brand-sky pb-1 title-sub text-ink", className)}>
+      <Tag className={cn("inline-block w-fit max-w-full border-b-2 border-brand-sky pb-1 title-sub text-ink", className)}>
         {number && <b className="mr-2 text-brand-navy">{number}</b>}
         {children}
       </Tag>
