@@ -33,6 +33,8 @@ npm run dev:web
 npm test
 ```
 
+`npm test` 依次跑 `packages/shared`（CSV 解析）、`apps/api`（API 集成测试）和 `apps/web`（客户端、token、样式规则）。API 集成测试连本地 pgvector 里的独立库 `mdes_test`（自动创建，不碰开发库）；没起 `npm run dev:db` 时这一组会跳过并提示。
+
 ## 线上 Demo（已部署）
 
 - Web：https://mdes-web.pages.dev

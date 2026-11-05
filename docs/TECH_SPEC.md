@@ -32,15 +32,17 @@ Local: Vite proxy → Node/Wrangler dev → DATABASE_URL → Docker pgvector
 
 ## 5. Modules
 
-- `apps/api/src/db` — schema、client
-- `apps/api/src/routes` — REST
-- `apps/api/src/import` — CSV 校验
+- `apps/api/src/db.ts` — client；schema 见 `apps/api/sql/001_init.sql`
+- `apps/api/src/routes` — REST（meta / indicators / observations / import / stats）
+- `apps/api/src/import.ts` — CSV 导入：共享解析器校验 + 单事务分块批量写入
+- `apps/api/src/errors.ts` — 统一错误体 `{ error: { code, message, params } }`
+- `packages/shared` — 前后端共用的类型、错误码与 CSV 解析器
 - `apps/web/src/app` — 路由（React Router 7）、页面外框、TanStack Query
 - `apps/web/src/pages` — 概览 / 指标目录 / 指标档案 / 观测值 / 数据导入，`/__design` 组件验收页
 - `apps/web/src/components/itei` — ITEI 组件层；`components/ui` — 换皮后的 shadcn/ui
 - `apps/web/src/lib/api` — API 客户端、ApiError 与错误码中文文案
 - `apps/web/scripts/tokens` — Style Dictionary token 流水线
-- `scripts/seed.mjs` — 灌入 `data/indicators_seed.json`
+- `apps/api/src/seed.ts` — 灌入 `data/indicators_seed.json`（`npm run seed`）
 - `data/samples/trd_sample.csv` — 演示数据
 
 ## 6. Extension Seams（二期）

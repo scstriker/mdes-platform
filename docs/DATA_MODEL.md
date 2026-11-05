@@ -36,10 +36,10 @@
 |---|---|---|
 | id | uuid PK | |
 | filename | text | |
-| status | text | pending/completed/failed/completed_with_errors |
+| status | text | completed / completed_with_errors / failed；批次与观测值在同一事务写入，状态一次写定 |
 | row_ok | int | |
 | row_err | int | |
-| errors_json | jsonb | |
+| errors_json | jsonb | 行错误 `[{ line, code, params }]`，见 docs/API.md |
 | created_at | timestamptz | |
 
 ### observation

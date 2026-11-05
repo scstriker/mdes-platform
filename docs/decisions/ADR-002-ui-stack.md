@@ -12,6 +12,7 @@ Accepted（2026-11-04，仓库所有者选定）
   - 参考页 `https://md.sensor-cloud.org/45` 已于 2026-11-04 核对。只借鉴它的配色带来的第一眼效果；版式、组件和信息架构仍按 ITEI 设计系统。
   - 页眉改为白底加深蓝 / 亮蓝双线，不用渐变横幅（2026-11-05，仓库所有者授权按设计判断决定）。
   - 阶段 1 实施中的 7 项取舍（2026-11-05，仓库所有者确认），见「实施补记」。
+  - API 错误处理的 3 项补充约定（2026-11-05，仓库所有者确认），见「API 改动 · 阶段 2 补充约定」。
 - **待确认**：无。
 - **数据来源**：调研数据截至 2026-11-04，取自 GitHub 搜索 API 与各仓库的 `package.json`。star 数和提交日期会变，后续引用以仓库实时数据为准。
 
@@ -218,6 +219,14 @@ ITEI 的识别元素都保留：
 | 新建 `packages/shared` | 存放共享类型和 CSV 解析器（从 `apps/api/src/csv.ts` 移入），导入页可以用同一套规则在前端做预校验 |
 
 实施时同步更新 `docs/API.md`、`docs/ACCEPTANCE.md` 与 API 测试。
+
+### 阶段 2 补充约定（2026-11-05 仓库所有者确认）
+
+| 项 | 结论 |
+|---|---|
+| 意外异常 | 新增错误码 `INTERNAL_ERROR`（HTTP 500，`/api/health` 为 503），不暴露内部细节。查询参数宽松处理：非法 `limit` / `offset` 回落到默认值，格式不对的 `batch_id` 查不到数据，不新增 `INVALID_PARAM` |
+| 导入全部行失败 | 仍记录 `failed` 批次并返回 200 `{ batch_id, status, row_ok, row_err, errors }`；文件级问题（`FILE_REQUIRED`、`EMPTY_CSV`、`MISSING_HEADER`、`ROW_LIMIT_EXCEEDED`）返回 400、不建批次 |
+| 错误体的 `message` | 英文开发者说明（如 `unknown indicator_id: TRD-099`）；中文文案只在前端按 `code` 生成，`packages/shared` 只放错误码与参数类型 |
 
 ## 实施补记（2026-11-05 阶段 1 确认）
 
