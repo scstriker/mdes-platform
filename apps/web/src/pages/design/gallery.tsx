@@ -560,7 +560,11 @@ export function Gallery({ theme }: { theme: "light" | "dark" }) {
           </div>
           <Breadcrumbs items={[{ label: "指标目录", href: "/indicators" }, { label: "进出口贸易", href: "/indicators?cluster=TRD" }, { label: "TRD-001" }]} />
           <p className="body">
-            导入后可在<TextLink to="/observations">观测值</TextLink>页按批次查询。
+            导入后可在
+            <TextLink inline to="/observations">
+              观测值
+            </TextLink>
+            页按批次查询。
           </p>
         </div>
       </Demo>
@@ -591,10 +595,16 @@ export function Gallery({ theme }: { theme: "light" | "dark" }) {
         <div className="grid gap-6 md:grid-cols-2">
           <div>
             <StateLabel>下拉面板外观（静态）</StateLabel>
-            <div className={cn(floatingPanelClass, "w-56 py-1")}>
-              <div className={menuItemClass}>跟随系统</div>
-              <div className={cn(menuItemClass, "bg-accent text-accent-foreground")}>浅色（悬停 / 键盘高亮）</div>
-              <div className={cn(menuItemClass, "text-ink-disabled")}>深色（不可用）</div>
+            <div role="menu" aria-label="下拉面板示例" className={cn(floatingPanelClass, "w-56 py-1")}>
+              <div role="menuitem" tabIndex={-1} className={menuItemClass}>
+                跟随系统
+              </div>
+              <div role="menuitem" tabIndex={-1} className={cn(menuItemClass, "bg-accent text-accent-foreground")}>
+                浅色（悬停 / 键盘高亮）
+              </div>
+              <div role="menuitem" tabIndex={-1} aria-disabled="true" data-disabled="" className={menuItemClass}>
+                深色（不可用）
+              </div>
             </div>
           </div>
           <div className="grid content-start justify-items-start gap-3">

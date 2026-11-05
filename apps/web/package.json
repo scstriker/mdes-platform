@@ -9,7 +9,8 @@
     "preview": "vite preview --host 127.0.0.1 --port 5173",
     "test": "vitest run",
     "tokens": "node scripts/tokens/build.mjs",
-    "tokens:check": "node scripts/tokens/build.mjs --check"
+    "tokens:check": "node scripts/tokens/build.mjs --check",
+    "e2e": "playwright test"
   },
   "dependencies": {
     "@mdes/shared": "0.1.0",
@@ -26,6 +27,8 @@
     "tailwind-merge": "^3.7.0"
   },
   "devDependencies": {
+    "@axe-core/playwright": "^4.14.0",
+    "@playwright/test": "^1.63.0",
     "@tailwindcss/vite": "^4.3.4",
     "@types/node": "^22.20.5",
     "@types/react": "^19.0.10",

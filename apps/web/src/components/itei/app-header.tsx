@@ -24,7 +24,7 @@ export function AppHeader({ title, nav, actions, sticky = true, className }: App
   return (
     <header className={cn("bg-surface", sticky && "sticky top-0 z-(--z-header)", className)}>
       <div className="flex h-14 items-center gap-4 px-4 md:gap-6 md:px-6">
-        <Link to="/" className="flex shrink-0 items-center focus-ring" aria-label="返回概览">
+        <Link to="/" className="flex shrink-0 items-center focus-ring" aria-label="ITEI，返回概览">
           <IteiLogo />
         </Link>
         <div className="min-w-0 flex-1 truncate title-header text-brand-navy">{title}</div>

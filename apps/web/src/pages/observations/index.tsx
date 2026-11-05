@@ -145,7 +145,10 @@ export default function ObservationsPage() {
                     {applied.indicator_id && (
                       <span className="text-ink-muted">
                         {" "}
-                        · <TextLink to={`/indicators/${applied.indicator_id}`}>{applied.indicator_id} {names.get(applied.indicator_id) ?? ""}</TextLink>
+                        ·{" "}
+                        <TextLink inline to={`/indicators/${applied.indicator_id}`}>
+                          {applied.indicator_id} {names.get(applied.indicator_id) ?? ""}
+                        </TextLink>
                       </span>
                     )}
                     {result.isFetching && <span className="ml-2 caption text-ink-muted">更新中</span>}

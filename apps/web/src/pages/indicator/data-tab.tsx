@@ -139,7 +139,11 @@ export function DataTab({ indicator }: { indicator: Indicator }) {
 
       {all.data?.truncated && (
         <Notice tone="warning" title={`观测值超过 ${formatNumber(ALL_OBSERVATIONS_MAX)} 条，这里只取前 ${formatNumber(ALL_OBSERVATIONS_MAX)} 条`}>
-          完整数据请到<TextLink to={`/observations?indicator_id=${indicator.id}`}>观测值页</TextLink>查询。
+          完整数据请到
+          <TextLink inline to={`/observations?indicator_id=${indicator.id}`}>
+            观测值页
+          </TextLink>
+          查询。
         </Notice>
       )}
       {slice.duplicates > 0 && (
