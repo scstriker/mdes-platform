@@ -8,9 +8,10 @@ Accepted（2026-11-04，仓库所有者选定）
   - UI 基座采用方案 A。
   - 「交互与信息架构参考」全部保留，只借鉴设计，不引入代码。
   - 图表库采用 ECharts 6。
-  - API 改动纳入本轮。
+  - API 改动纳入本轮，包括 3 项补充改动。
   - 参考页 `https://md.sensor-cloud.org/45` 已于 2026-11-04 核对。只借鉴它的配色带来的第一眼效果；版式、组件和信息架构仍按 ITEI 设计系统。
-- **待确认**：API 补充项、页眉配色观感，见 Open Items。
+  - 页眉改为白底加深蓝 / 亮蓝双线，不用渐变横幅（2026-11-05，仓库所有者授权按设计判断决定）。
+- **待确认**：无。
 - **数据来源**：调研数据截至 2026-11-04，取自 GitHub 搜索 API 与各仓库的 `package.json`。star 数和提交日期会变，后续引用以仓库实时数据为准。
 
 ## Context
@@ -49,7 +50,7 @@ Accepted（2026-11-04，仓库所有者选定）
 采用**方案 A：shadcn/ui + Tailwind v4，在仓库内自建一套与 ITEI 设计系统一一对应的组件层**。
 
 - **基座**：shadcn/ui 的组件源码复制进仓库，按「方案 A 落地要点」换皮。Tailwind v4 只开放 ITEI token。
-- **视觉**：版式与组件按 ITEI 设计系统；配色的用法借鉴参考页的第一眼效果，见「视觉参考：配色借鉴」。
+- **视觉**：版式与组件按 ITEI 设计系统；配色的用法借鉴参考页的第一眼效果，页眉改为白底加双线，见「视觉参考：配色借鉴」与「页眉：白底加双线」。
 - **骨架**：在现有仓库内自建，不 fork 模板。借鉴 [satnaing/shadcn-admin](https://github.com/satnaing/shadcn-admin) 中这几部分的实现：sidebar、全局搜索命令面板、data-table、主题切换。
 - **配套**：
   - 图表采用 ECharts 6，规范见「ECharts 使用规范」；
@@ -97,9 +98,31 @@ Accepted（2026-11-04，仓库所有者选定）
 | 红（brand-red） | 只做小面积的文字强调（「须跟进」） | 只用于小面积强调与错误，不做大色块 |
 | 浅蓝底（info-bg） | 只用在一处重点区块（「本期」） | 用于当前项浅底和少量重点区块 |
 | 灰（ink-muted、border） | 次要文字、1px 分隔线 | 说明、来源、时间戳用 ink-muted；行间分隔用 1px border |
-| 渐变 / 阴影 / 圆角 | 都没有 | 无阴影分层、直角；渐变按 ITEI 只允许出现在页眉（见 Open Items） |
+| 渐变 / 阴影 / 圆角 | 都没有 | 无阴影分层、直角；页眉改为白底后，全站不再使用渐变（见「页眉：白底加双线」） |
 
 附注：参考页标题用的是 Noto Serif CJK SC Bold 的子集（SIL OFL 1.1 许可，只含标题里的 10 个字，约 6.5 KB）。如果 MDES 在欢迎页使用 ITEI 的 display 字体，可以照此做子集。ITEI 字体栈首选的汉仪粗宋是商业字体，网页内嵌需另行授权。
+
+## 页眉：白底加双线（2026-11-05 决定）
+
+仓库所有者授权按设计判断决定。页眉是每个页面面积最大的色块，ITEI 的渐变横幅会在顶部形成一大块深蓝，与参考页「白底为主、深蓝点缀」的第一眼效果不符，因此改为白底。
+
+| 项 | 做法 |
+|---|---|
+| 背景与分隔 | 白底（surface）。下沿双线：上 3px brand-navy、下 2px brand-sky，中间留 1px 白缝 |
+| 结构 | 沿用 ITEI AppHeader：高 56px；左侧标志、中间当前页标题、右侧主导航 |
+| 标志 | 彩色标志（高 28px）直接放在白底上，符合 ITEI 标志规范，不再需要白色斜切标志区 |
+| 标题 | brand-navy，20px 加粗 |
+| 导航 | 文字用 ink，悬停变 brand-navy；当前项加 2px brand-navy 下划线 |
+| 深色主题 | 页眉底色随 surface 变深。按 ITEI「深色底上用白色文字 ITEI 代替标志」的规定，标志换成 ink 色的文字「ITEI」 |
+| 窄屏 | 沿用 ITEI：页眉保留标志与标题，导航移到底部 TabBar |
+
+ITEI 的识别元素都保留：
+
+- 45° 斜切留在一级 SectionTitle（每页一处深蓝斜切标题块）和应用页脚右端的装饰；
+- 深蓝页脚条保留；
+- 全站不再使用渐变。
+
+这一点偏离了 ITEI AppHeader「背景只用渐变」的规定，落地时要在 AppHeader 组件文档里注明本项目的白底变体。
 
 ## 方案 A 落地要点
 
@@ -154,7 +177,7 @@ Accepted（2026-11-04，仓库所有者选定）
 
 ### 需要自建的组件
 
-- **与设计系统一一对应**：AppHeader、AppFooter、TabBar（窄屏用）、SectionTitle（含 45° 斜切）、NumberedNav、KpiTile、Card、Tag、DataTable、Field。
+- **与设计系统一一对应**：AppHeader（白底变体，见「页眉：白底加双线」）、AppFooter、TabBar（窄屏用）、SectionTitle（含 45° 斜切）、NumberedNav、KpiTile、Card、Tag、DataTable、Field。
 - **shadcn 没有、MDES 又需要的**：
   - Tree：簇树；
   - Stepper：基于 NumberedNav，用于导入向导；
@@ -177,7 +200,7 @@ Accepted（2026-11-04，仓库所有者选定）
 
 ## API 改动（本轮）
 
-### 已确认纳入
+### 核心改动
 
 | 改动 | 说明 |
 |---|---|
@@ -185,7 +208,7 @@ Accepted（2026-11-04，仓库所有者选定）
 | 新增 `GET /api/stats` | 返回概览页需要的统计：<ul><li>指标总数、一期数、一期已入库数</li><li>观测值总数与数据截止期间</li><li>各簇的一期数、一期已入库数、后期数、观测值数</li><li>最近一次导入批次</li></ul> |
 | 错误码与中文文案 | <ul><li>错误统一返回 `{ error: { code, message, params } }`</li><li>CSV 行错误返回 `{ line, code, params }`</li><li>前端按 code 映射成中文提示，例如「第 5 行：指标编号 TRD-099 不存在，请核对指标目录后重试」</li><li>code 列表：`FILE_REQUIRED`、`EMPTY_CSV`、`MISSING_HEADER`、`ROW_LIMIT_EXCEEDED`、`REQUIRED_FIELD_MISSING`、`INVALID_VALUE_NUM`、`VALUE_MISSING`、`DIMS_INVALID_JSON`、`DIMS_NOT_OBJECT`、`UNKNOWN_INDICATOR`、`NOT_FOUND`</li></ul> |
 
-### 建议一并纳入（页面功能依赖，待确认）
+### 补充改动（2026-11-05 确认纳入）
 
 | 改动 | 原因 |
 |---|---|
@@ -379,13 +402,8 @@ ECharts 从 5.0 起不再内置中国地图，需要自己注册 GeoJSON。对�
 - shadcn 上游更新要手动合并，每次都得按「组件换皮清单」复核。
 - 用地图就必须使用合规底图。
 - API 的错误响应结构会变化，需要同步更新文档与测试。
+- 页眉偏离 ITEI AppHeader 的渐变要求，需要在组件文档中注明。
 
 ## Open Items
 
-1. **API 补充项**：是否纳入本轮。
-   - 观测值筛选与分页；
-   - 导入改为单事务批量插入；
-   - 新建 `packages/shared`。
-2. **页眉配色观感**：ITEI 的渐变横幅会在页面顶部形成一块大面积深蓝，参考页没有这样的色块。两种做法：
-   - 保留渐变横幅：当前方案，符合 ITEI 规范；
-   - 改成白底页眉加深蓝 / 亮蓝细线：更贴近参考页的第一眼效果。
+无。实施中遇到需要决策的问题，在本 ADR 中补记结论。
