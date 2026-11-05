@@ -33,7 +33,10 @@ const text = (v: unknown, fallback = "") => (v === undefined || v === null || v 
 const MESSAGES: Record<ErrorCode, (p: ApiErrorParams) => string> = {
   FILE_REQUIRED: () => "未收到文件，请选择要导入的 CSV 文件后重试",
   EMPTY_CSV: () => "CSV 文件没有内容，请检查文件后重试",
-  MISSING_HEADER: (p) => `缺少必需的列 ${text(p.header, "（未知列）")}，请对照导入模板补齐表头`,
+  MISSING_HEADER: (p) =>
+    p.header === "value_num"
+      ? "缺少数值列：value_num 与 value_text 至少要有一列，请对照导入模板补齐表头"
+      : `缺少必需的列 ${text(p.header, "（未知列）")}，请对照导入模板补齐表头`,
   ROW_LIMIT_EXCEEDED: (p) =>
     `数据超过 ${text(p.max, "上限")} 行${p.actual ? `（当前 ${p.actual} 行）` : ""}，请拆分为多个文件后分批导入`,
   REQUIRED_FIELD_MISSING: (p) => `${field(p.field)}为空，请补齐后重试`,

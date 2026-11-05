@@ -17,6 +17,10 @@ describe("错误码 → 中文文案", () => {
     );
   });
 
+  it("缺数值列时说明 value_num 与 value_text 二选一", () => {
+    expect(errorMessage("MISSING_HEADER", { header: "value_num" })).toMatch(/value_num 与 value_text 至少要有一列/);
+  });
+
   it("未知错误码用服务端 message 兜底", () => {
     expect(errorMessage("SOMETHING_NEW", {}, "服务端说明")).toBe("服务端说明");
     expect(errorMessage("SOMETHING_NEW", {})).toMatch(/未知错误/);
