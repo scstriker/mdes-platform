@@ -24,18 +24,22 @@ Local: Vite proxy → Node/Wrangler dev → DATABASE_URL → Docker pgvector
 
 ## 4. Stack
 
-- Web: React 19, TypeScript, Vite, Tailwind CSS 4, ITEI tokens（demo 用轻量组件；shadcn 可按需后补）
+- Web: React 19, TypeScript, Vite, Tailwind CSS 4 + shadcn/ui（换皮）+ ITEI 组件层，React Router 7、TanStack Query / Table、ECharts 6（按需懒加载）；token 由 Style Dictionary 从 ITEI tokens.json 生成。见 `docs/decisions/ADR-002-ui-stack.md`
 - API: Hono + postgres.js（可部署 Workers；本地 Node adapter）
 - DB: PostgreSQL 16 + pgvector（本地 Docker / 云上 Neon + Hyperdrive）
 - Deploy: Wrangler（Pages + Worker + Hyperdrive）
-- Test: Vitest（CSV 解析等）
+- Test: Vitest（CSV 解析、API 客户端与错误文案、token 同步、样式硬规则）
 
 ## 5. Modules
 
 - `apps/api/src/db` — schema、client
 - `apps/api/src/routes` — REST
 - `apps/api/src/import` — CSV 校验
-- `apps/web/src/pages` — Catalog / Import / Observations
+- `apps/web/src/app` — 路由（React Router 7）、页面外框、TanStack Query
+- `apps/web/src/pages` — 概览 / 指标目录 / 指标档案 / 观测值 / 数据导入，`/__design` 组件验收页
+- `apps/web/src/components/itei` — ITEI 组件层；`components/ui` — 换皮后的 shadcn/ui
+- `apps/web/src/lib/api` — API 客户端、ApiError 与错误码中文文案
+- `apps/web/scripts/tokens` — Style Dictionary token 流水线
 - `scripts/seed.mjs` — 灌入 `data/indicators_seed.json`
 - `data/samples/trd_sample.csv` — 演示数据
 

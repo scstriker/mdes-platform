@@ -6,8 +6,9 @@
 
 ## 前端硬性规则
 
-- token 唯一来源是设计系统目录里的 `tokens.css`，`apps/web/src` 下不另存副本。
-- 页面代码不写色值和任意值（如 `bg-[#...]`、`text-[13px]`），不写 `dark:` 前缀；只用 token 和 ITEI 组件。深色主题由 `[data-theme="dark"]` 与系统偏好驱动。
+- token 唯一来源是设计系统目录里的 `tokens.json`；改了它就运行 `npm run tokens`，由 Style Dictionary 重新生成 `tokens.css`、`tokens.flat.json` 和 `apps/web/src/styles/generated/itei-theme.css`。`apps/web/src` 下不另存 token 副本。
+- 组件优先用 `apps/web/src/components/itei`（ITEI 组件层，说明见同目录 README.md）与 `components/ui`（换皮后的 shadcn）；新组件先加到 `/__design` 验收页。
+- 页面代码不写色值和任意值（如 `bg-[#...]`、`text-[13px]`），不写 `dark:` 前缀；只用 token 和 ITEI 组件。深色主题由 `[data-theme="dark"]` 与系统偏好驱动。`apps/web/tests/style-rules.test.ts` 会拦截违规写法。
 - Cloudflare Pages 在没有 `404.html` 时才做 SPA 回退，`apps/web/dist` 里不要放 `404.html`。
 
 ## 常用命令
@@ -18,8 +19,12 @@ npm run dev:db      # Docker 起 pgvector（docker-compose.yml）
 npm run seed
 npm run dev:api     # http://127.0.0.1:8787
 npm run dev:web     # http://127.0.0.1:5173
+npm run tokens      # tokens.json 改动后重新生成 token 产物
 npm test
 npm run build
 ```
 
-每完成一块改动都跑 `npm test` 和 `npm run build`；界面改动用 Playwright 截图自查（桌面 1440 / 手机 390，浅色 / 深色）。重构前的界面基线在 `docs/screenshots/baseline/`。
+每完成一块改动都跑 `npm test` 和 `npm run build`；界面改动用 Playwright 截图自查（桌面 1440 / 手机 390，浅色 / 深色）。
+
+- 重构前的界面基线：`docs/screenshots/baseline/`
+- 组件验收截图（与 showcase.html 并排）：`node apps/web/scripts/design-screenshots.cjs`，输出到 `docs/screenshots/phase1/`
