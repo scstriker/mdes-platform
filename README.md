@@ -22,6 +22,12 @@ npm run dev:web
 
 默认库连接：`postgres://mdes:mdes@127.0.0.1:5433/mdes`
 
+演示时如需更丰富的数据（多省份、多贸易伙伴、混合单位等，**虚构数据**，仅用于展示），可生成后在「数据导入」页上传：
+
+```bash
+node scripts/make-demo-csv.mjs > /tmp/trd_demo.csv
+```
+
 ## 验收样例
 
 1. 打开「指标目录」，阶段选「一期」，应约 30 项

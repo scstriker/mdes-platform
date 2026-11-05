@@ -28,3 +28,5 @@ npm run build
 
 - 重构前的界面基线：`docs/screenshots/baseline/`
 - 组件验收截图（与 showcase.html 并排）：`node apps/web/scripts/design-screenshots.cjs`，输出到 `docs/screenshots/phase1/`
+- 页面截图自查（五个页面 × 桌面 / 手机 × 浅色 / 深色）：`node apps/web/scripts/page-screenshots.cjs <输出目录>`；自查截图不入库
+- 演示数据（虚构，覆盖多省份、多序列、混合单位、重复期间等切片情形）：`node scripts/make-demo-csv.mjs > /tmp/trd_demo.csv`，再在「数据导入」页上传
