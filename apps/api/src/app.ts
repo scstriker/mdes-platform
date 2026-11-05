@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import type { MiddlewareHandler } from "hono";
+import type postgres from "postgres";
 import type { Sql } from "./db";
 import { checkHealth } from "./db";
 import { parseObservationCsv } from "./csv";
@@ -192,7 +193,7 @@ export function createApp(bindDeps: MiddlewareHandler<AppEnv>) {
             ${row.indicator_id},
             ${row.period},
             ${row.geo},
-            ${sql.json(row.dims)},
+            ${sql.json(row.dims as postgres.JSONValue)},
             ${row.value_num},
             ${row.value_text},
             ${row.unit},
