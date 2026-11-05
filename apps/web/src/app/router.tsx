@@ -1,4 +1,4 @@
-import { createBrowserRouter, type RouteObject } from "react-router";
+import { createBrowserRouter, createHashRouter, type RouteObject } from "react-router";
 import { AppShell, type RouteHandle } from "./app-shell";
 import { RouteError } from "./route-error";
 
@@ -36,4 +36,5 @@ const routes: RouteObject[] = [
   },
 ];
 
-export const router = createBrowserRouter(routes);
+// 演示版是单个 HTML 文件，没有服务端回退，用 hash 路由（#/indicators）
+export const router = import.meta.env.MODE === "demo" ? createHashRouter(routes) : createBrowserRouter(routes);

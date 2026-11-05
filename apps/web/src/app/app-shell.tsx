@@ -34,6 +34,11 @@ export function AppShell() {
         跳到主要内容
       </a>
       <AppHeader title={title?.title ?? "医疗器械产业数据系统"} nav={nav} actions={<ThemeMenu />} />
+      {import.meta.env.MODE === "demo" && (
+        <p role="note" className="border-b border-border bg-info-bg px-4 py-1.5 text-center caption text-ink md:px-6">
+          演示版：不连后端，数据为 README 样例与虚构演示数据，保存在浏览器内存中，刷新即重置。
+        </p>
+      )}
       <main id="main" tabIndex={-1} className="flex-1 pb-tabbar outline-none md:pb-0">
         <Suspense fallback={<PageFallback />}>
           <Outlet />

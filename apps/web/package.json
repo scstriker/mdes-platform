@@ -10,7 +10,8 @@
     "test": "vitest run",
     "tokens": "node scripts/tokens/build.mjs",
     "tokens:check": "node scripts/tokens/build.mjs --check",
-    "e2e": "playwright test"
+    "e2e": "playwright test",
+    "build:demo": "vite build --mode demo && node scripts/inline-demo.mjs"
   },
   "dependencies": {
     "@mdes/shared": "0.1.0",

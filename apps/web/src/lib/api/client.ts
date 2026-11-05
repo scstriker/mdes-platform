@@ -4,6 +4,15 @@ const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) || "";
 
 type Query = Record<string, string | number | undefined | null>;
 
+/**
+ * 演示版（vite build --mode demo）改用浏览器内的模拟 API；MODE 在构建时被替换成常量，
+ * 正常构建里这一分支连同 demo 代码被整体剔除。
+ */
+const doFetch: typeof fetch =
+  import.meta.env.MODE === "demo"
+    ? (input, init) => import("@/demo/demo-api").then((m) => m.demoFetch(input, init))
+    : (input, init) => fetch(input, init);
+
 export function buildQuery(query?: Query): string {
   if (!query) return "";
   const q = new URLSearchParams();
@@ -31,7 +40,7 @@ export async function request<T>(
 
   let res: Response;
   try {
-    res = await fetch(`${API_BASE}${path}${buildQuery(init.query)}`, {
+    res = await doFetch(`${API_BASE}${path}${buildQuery(init.query)}`, {
       method: init.method ?? (body ? "POST" : "GET"),
       headers,
       body,

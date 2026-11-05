@@ -28,6 +28,14 @@ npm run dev:web
 node scripts/make-demo-csv.mjs > /tmp/trd_demo.csv
 ```
 
+### 离线演示版
+
+不连后端、可交互的单文件演示（数据为样例与上面的虚构数据，存在浏览器内存里，刷新即重置）：
+
+```bash
+npm run build:demo -w @mdes/web   # 输出 apps/web/dist-demo/mdes-demo.html，双击即可打开
+```
+
 ## 验收样例
 
 1. 打开「指标目录」，阶段选「一期」，应约 30 项
