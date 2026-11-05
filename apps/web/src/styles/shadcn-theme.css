@@ -1,0 +1,34 @@
+/*
+ * shadcn 语义变量 → ITEI token（ADR-002「shadcn 语义变量映射」）。
+ *
+ * 直接注册为 Tailwind 颜色并引用 ITEI 变量，不定义 --background 这类中间变量，
+ * 这样局部的 [data-theme] 容器（如 /__design 的深色屏）也能正确换色。
+ * shadcn 模板自带的颜色、--radius 派生值和 .dark 定义一律不保留。
+ * --border 与 --chart-1…5 两边同名同义，只用 ITEI 的定义（见 generated/itei-theme.css）。
+ */
+@theme inline {
+  --color-background: var(--surface);
+  --color-foreground: var(--ink);
+  --color-card: var(--surface-raised);
+  --color-card-foreground: var(--ink);
+  --color-popover: var(--surface-raised);
+  --color-popover-foreground: var(--ink);
+  --color-primary: var(--brand-navy);
+  --color-primary-foreground: var(--on-brand);
+  --color-muted: var(--surface-sunken);
+  --color-muted-foreground: var(--ink-muted);
+  --color-accent: var(--info-bg);
+  --color-accent-foreground: var(--brand-navy);
+  --color-destructive: var(--danger);
+  --color-input: var(--border-strong);
+  --color-ring: var(--focus);
+
+  --color-sidebar: var(--surface-sunken);
+  --color-sidebar-foreground: var(--ink);
+  --color-sidebar-primary: var(--brand-navy);
+  --color-sidebar-primary-foreground: var(--on-brand);
+  --color-sidebar-accent: var(--info-bg);
+  --color-sidebar-accent-foreground: var(--brand-navy);
+  --color-sidebar-border: var(--border);
+  --color-sidebar-ring: var(--focus);
+}

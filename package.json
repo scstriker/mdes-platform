@@ -10,7 +10,8 @@
     "dev:api": "npm run dev -w @mdes/api",
     "dev:web": "npm run dev -w @mdes/web",
     "seed": "npm run seed -w @mdes/api",
-    "test": "npm run test -w @mdes/api",
-    "build": "npm run build -w @mdes/web && npm run build -w @mdes/api"
+    "test": "npm run test --workspaces --if-present",
+    "build": "npm run build -w @mdes/web && npm run build -w @mdes/api",
+    "tokens": "npm run tokens -w @mdes/web"
   }
 }
