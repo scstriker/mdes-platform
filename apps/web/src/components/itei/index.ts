@@ -13,7 +13,7 @@ export { KpiTile } from "./kpi-tile";
 export { IteiLogo } from "./logo";
 export type { NavItem } from "./nav";
 export { Notice, type NoticeTone } from "./notice";
-export { NumberedNav, type NumberedNavItem } from "./numbered-nav";
+export { NumberedNav, pad2, type NumberedNavItem } from "./numbered-nav";
 export { ProgressMeter } from "./progress-meter";
 export { SectionTitle } from "./section-title";
 export { Sparkline } from "./sparkline";

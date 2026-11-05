@@ -238,8 +238,8 @@ export function DataTable<T extends RowData>({
                       key={col.key}
                       className={cn(
                         ALIGN[alignOf(col)],
-                        col.type === "number" && "tabular-nums",
-                        col.type === "code" && "code",
+                        col.type === "number" && "whitespace-nowrap tabular-nums",
+                        col.type === "code" && "code whitespace-nowrap",
                         stickyFirstColumn && i === 0 && "sticky left-0 z-1 bg-surface group-even/row:bg-surface-sunken",
                       )}
                     >
