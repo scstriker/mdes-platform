@@ -1,12 +1,20 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import App from "./App";
-// token 正本在设计系统目录里，不在 src 下另存副本。
-import "../design/itei/itei-design-system/tokens.css";
-import "./itei-app.css";
+import { QueryClientProvider } from "@tanstack/react-query";
+import { RouterProvider } from "react-router";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import { createQueryClient } from "@/app/query-client";
+import { router } from "@/app/router";
+import "@/styles/app.css";
+
+const queryClient = createQueryClient();
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <App />
+    <QueryClientProvider client={queryClient}>
+      <TooltipProvider>
+        <RouterProvider router={router} />
+      </TooltipProvider>
+    </QueryClientProvider>
   </StrictMode>,
 );
