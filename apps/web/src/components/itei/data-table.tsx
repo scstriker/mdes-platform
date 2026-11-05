@@ -89,6 +89,8 @@ function renderCell<T extends RowData>(column: DataTableColumn<T>, row: T): Reac
   return String(v);
 }
 
+const isEmpty = (v: unknown) => v === null || v === undefined || v === "" || v === "—";
+
 function alignOf<T extends RowData>(column: DataTableColumn<T>) {
   return column.align ?? (column.type === "number" ? "right" : "left");
 }
@@ -100,7 +102,7 @@ const ALIGN = { left: "text-left", right: "text-right", center: "text-center" } 
  * - 表头 surface-sunken + brand-navy 字 + 2px brand-sky 下边线；偶数行 surface-sunken；无竖线
  * - 数字列右对齐、等宽数字、千分位；编码列等宽字体；状态列放 Tag
  * - 加载、空数据、请求失败三种状态分开显示，失败不会被当成空数据
- * - 窄屏改为卡片列表，不缩小字号
+ * - 窄屏改为卡片列表，不缩小字号；卡片里不显示空的纯值字段
  */
 export function DataTable<T extends RowData>({
   columns,
@@ -278,7 +280,7 @@ export function DataTable<T extends RowData>({
                 </div>
                 <dl className="grid grid-cols-2 gap-x-4 gap-y-2">
                   {columns
-                    .filter((c) => c !== primary && !c.hideOnCard)
+                    .filter((c) => c !== primary && !c.hideOnCard && (c.cell || !isEmpty(readValue(c, row.original))))
                     .map((col) => (
                       <div key={col.key} className="grid min-w-0 content-start gap-0.5">
                         <dt className="caption text-ink-muted">{col.title}</dt>

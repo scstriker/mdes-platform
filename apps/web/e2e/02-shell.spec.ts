@@ -56,6 +56,13 @@ test.describe("外框 · 窄屏", () => {
     await expect(tabbar.locator("[aria-current=page]")).toHaveText("指标目录");
   });
 
+  test("观测值页：窄屏只露出「指标」，其余条件收进「更多条件」", async ({ page }) => {
+    await page.goto("/observations");
+    await expect(page.getByLabel("起始期间")).toBeHidden();
+    await page.getByRole("button", { name: /更多条件/ }).tap();
+    await expect(page.getByLabel("起始期间")).toBeVisible();
+  });
+
   test("内容不被 TabBar 挡住：滚到底时最后一块内容在 TabBar 之上", async ({ page }) => {
     await page.goto("/import");
     // 等导入历史加载完、页面高度稳定后再滚到底

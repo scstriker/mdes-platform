@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { Link } from "react-router";
-import { IconDownload, IconSearch, IconUpload, IconX } from "@tabler/icons-react";
+import { IconAdjustmentsHorizontal, IconDownload, IconSearch, IconUpload, IconX } from "@tabler/icons-react";
 import type { Observation, ObservationQuery } from "@mdes/shared";
 import { DataTable, EmptyState, Field, formatNumber, Notice, TextLink, type DataTableColumn } from "@/components/itei";
 import { FilterSelect } from "@/components/layout/filter-select";
@@ -13,6 +13,7 @@ import { formatDateTime } from "@/lib/datetime";
 import { downloadText, toCsv } from "@/lib/download";
 import { formatDims, geoLabel } from "@/lib/labels";
 import { useUrlState } from "@/lib/url-state";
+import { cn } from "@/lib/utils";
 
 const PAGE_SIZE = 50;
 const EXPORT_MAX = 10_000;
@@ -41,6 +42,8 @@ export default function ObservationsPage() {
   const indicators = useIndicators();
   const batches = useBatches();
   const [exporting, setExporting] = useState<{ error?: string; busy: boolean }>({ busy: false });
+  const moreActive = FIELDS.filter((k) => k !== "indicator_id" && applied[k]).length;
+  const [showMore, setShowMore] = useState(moreActive > 0);
 
   const names = useMemo(() => new Map((indicators.data ?? []).map((i) => [i.id, i.name])), [indicators.data]);
   const anyFilter = FIELDS.some((k) => applied[k]);
@@ -89,6 +92,7 @@ export default function ObservationsPage() {
         <form onSubmit={submit} className="grid gap-4 border border-border bg-surface p-4" aria-label="查询条件">
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             <FilterSelect
+              className="sm:col-span-2 lg:col-span-1"
               label="指标"
               allLabel="全部指标"
               value={draft.indicator_id}
@@ -99,23 +103,35 @@ export default function ObservationsPage() {
                 count: i.obs_count || undefined,
               }))}
             />
-            <Field label="起始期间" help="含当期，如 2024-01 或 2024">
-              <Input value={draft.period_from} placeholder="如 2024-01" onChange={(e) => setDraft((d) => ({ ...d, period_from: e.target.value }))} />
-            </Field>
-            <Field label="截止期间" help="含当期；填 2024 含 2024 年各月">
-              <Input value={draft.period_to} placeholder="如 2024-12" onChange={(e) => setDraft((d) => ({ ...d, period_to: e.target.value }))} />
-            </Field>
-            <Field label="地域" help="全国为 CN，省份用 6 位行政区划代码，如 440000">
-              <Input value={draft.geo} placeholder="如 CN" onChange={(e) => setDraft((d) => ({ ...d, geo: e.target.value }))} />
-            </Field>
-            <FilterSelect
-              className="lg:col-span-2"
-              label="导入批次"
-              allLabel="全部批次"
-              value={draft.batch_id}
-              onChange={(v) => setDraft((d) => ({ ...d, batch_id: v }))}
-              options={batchOptions}
-            />
+            <Button
+              variant="secondary"
+              size="sm"
+              className="justify-self-start sm:hidden"
+              aria-expanded={showMore}
+              onClick={() => setShowMore((v) => !v)}
+            >
+              <IconAdjustmentsHorizontal aria-hidden="true" />
+              {showMore ? "收起条件" : `更多条件${moreActive ? `（${moreActive}）` : ""}`}
+            </Button>
+            <div className={cn("contents", !showMore && "max-sm:hidden")}>
+              <Field label="起始期间" help="含当期，如 2024-01 或 2024">
+                <Input value={draft.period_from} placeholder="如 2024-01" onChange={(e) => setDraft((d) => ({ ...d, period_from: e.target.value }))} />
+              </Field>
+              <Field label="截止期间" help="含当期；填 2024 含 2024 年各月">
+                <Input value={draft.period_to} placeholder="如 2024-12" onChange={(e) => setDraft((d) => ({ ...d, period_to: e.target.value }))} />
+              </Field>
+              <Field label="地域" help="全国为 CN，省份用 6 位行政区划代码，如 440000">
+                <Input value={draft.geo} placeholder="如 CN" onChange={(e) => setDraft((d) => ({ ...d, geo: e.target.value }))} />
+              </Field>
+              <FilterSelect
+                className="lg:col-span-2"
+                label="导入批次"
+                allLabel="全部批次"
+                value={draft.batch_id}
+                onChange={(v) => setDraft((d) => ({ ...d, batch_id: v }))}
+                options={batchOptions}
+              />
+            </div>
           </div>
           <div className="flex flex-wrap gap-3">
             <Button type="submit">
