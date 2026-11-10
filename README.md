@@ -64,19 +64,13 @@ npm run e2e
 
 - Web：https://mdes-web.pages.dev
 - API：https://mdes-api.scstriker0120.workers.dev/api/health
-- 数据库：Neon Postgres（经 Cloudflare Hyperdrive）
-
-线上仍是改用 D1 之前的版本。按下面的步骤重新部署后，API 改用 D1；Neon 里的旧数据不会自动迁移。
+- 数据库：Cloudflare D1（库名 `mdes`，2026-11-10 起；Neon 里的旧观测值没有迁移过来）
 
 ## Cloudflare 重新部署
 
-首次部署先建 D1 库，把返回的 `database_id` 填进 `apps/api/wrangler.toml`：
+线上 D1 库已建好，`database_id` 已写在 `apps/api/wrangler.toml`。换到新的 Cloudflare 账号时才需要先 `npx wrangler d1 create mdes`，再把返回的 `database_id` 填进去。
 
-```bash
-cd apps/api && npx wrangler d1 create mdes
-```
-
-然后迁移、灌数据、部署 Worker 与 Pages：
+迁移、灌数据（幂等，可重复执行）、部署 Worker 与 Pages：
 
 ```bash
 cd apps/api
@@ -84,8 +78,12 @@ npx wrangler d1 migrations apply mdes --remote
 npm run seed -- --remote
 npx wrangler deploy
 cd ../web && VITE_API_BASE=https://mdes-api.scstriker0120.workers.dev npm run build
-npx wrangler pages deploy dist --project-name mdes-web --commit-dirty=true
+npx wrangler pages deploy dist --project-name mdes-web --branch main --commit-dirty=true
 ```
+
+`mdes-web` 的生产分支是 `main`，不加 `--branch main` 时 wrangler 会按当前 git 分支发成预览部署。
+
+在 Claude 云端会话里，Cloudflare 令牌由网络代理注入，`wrangler pages deploy` 会因此失败（见 ADR-003「实施补记」）；Pages 需要在本机执行上面的命令，或在 Cloudflare 控制台上传 `dist`。Worker 与 D1 的命令不受影响。
 
 Cloudflare 的 API 令牌等凭据不要写进仓库。选型说明见 `docs/decisions/ADR-003-cloudflare-d1.md`。
 

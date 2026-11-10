@@ -3,12 +3,12 @@ main = "src/worker.ts"
 compatibility_date = "2026-11-04"
 compatibility_flags = ["nodejs_compat"]
 
-# Cloudflare D1（SQLite）。本地开发与测试用 wrangler 的本地 D1，不需要 database_id 真值；
-# 部署前用 `npx wrangler d1 create mdes` 建库，再把返回的 database_id 填到下面。见 ADR-003。
+# Cloudflare D1（SQLite）。线上库由 `npx wrangler d1 create mdes` 创建（2026-11-10），
+# 本地开发与测试用 wrangler 的本地 D1，不连线上库。见 ADR-003。
 [[d1_databases]]
 binding = "DB"
 database_name = "mdes"
-database_id = "00000000-0000-0000-0000-000000000000"
+database_id = "ba551437-0a84-495e-af39-5fe3b4457017"
 migrations_dir = "migrations"
 
 [vars]
