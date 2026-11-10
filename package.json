@@ -7,7 +7,7 @@
     "apps/*"
   ],
   "scripts": {
-    "dev:db": "docker compose up -d db",
+    "db:migrate": "npm run db:migrate -w @mdes/api",
     "dev:api": "npm run dev -w @mdes/api",
     "dev:web": "npm run dev -w @mdes/web",
     "seed": "npm run seed -w @mdes/api",

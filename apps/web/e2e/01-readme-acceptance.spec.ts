@@ -34,10 +34,10 @@ test.describe.serial("README 验收样例", () => {
     await expect(rows.first()).toContainText("2024-03");
   });
 
-  test("4. /api/health 中 vector: true", async ({ request }) => {
+  test("4. /api/health 中 db: ok", async ({ request }) => {
     const res = await request.get(`${API_BASE}/api/health`);
     expect(res.ok()).toBe(true);
-    expect(await res.json()).toMatchObject({ ok: true, db: "ok", vector: true });
+    expect(await res.json()).toEqual({ ok: true, db: "ok" });
   });
 
   test("导入后概览与目录同步更新", async ({ page }) => {

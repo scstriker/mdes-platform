@@ -1,4 +1,6 @@
 import type { Context, Hono } from "hono";
+import type { ImportBatch } from "@mdes/shared";
+import { parseJson } from "../db";
 import { AppError } from "../errors";
 import type { AppEnv } from "../env";
 import { importObservations } from "../import";
@@ -35,17 +37,21 @@ async function readUpload(c: Context<AppEnv>): Promise<{ filename: string; csvTe
 export function importRoutes(app: Hono<AppEnv>) {
   app.post("/api/import/csv", async (c) => {
     const { filename, csvText } = await readUpload(c);
-    const result = await importObservations(c.get("sql"), { filename, csvText, maxRows: c.get("importMaxRows") });
+    const result = await importObservations(c.get("db"), { filename, csvText, maxRows: c.get("importMaxRows") });
     return c.json(result);
   });
 
   app.get("/api/import/batches", async (c) => {
-    const items = await c.get("sql")`
-      select id, filename, status, row_ok, row_err, errors_json, created_at
-      from import_batch
-      order by created_at desc
-      limit 50
-    `;
+    const { results } = await c
+      .get("db")
+      .prepare(
+        `select id, filename, status, row_ok, row_err, errors_json, created_at
+         from import_batch
+         order by created_at desc, rowid desc
+         limit 50`,
+      )
+      .all<Record<string, unknown>>();
+    const items = results.map((b) => ({ ...b, errors_json: parseJson(b.errors_json, []) })) as unknown as ImportBatch[];
     return c.json({ items });
   });
 }

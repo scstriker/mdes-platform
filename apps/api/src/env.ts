@@ -1,15 +1,11 @@
-import type { Sql } from "./db";
-
 export type AppEnv = {
   Bindings: {
-    HYPERDRIVE?: { connectionString: string };
-    DATABASE_URL?: string;
-    EMBEDDING_DIMS?: string;
+    /** Cloudflare D1（wrangler.toml 的 d1_databases） */
+    DB: D1Database;
     IMPORT_MAX_ROWS?: string;
   };
   Variables: {
-    sql: Sql;
-    embeddingDims: number;
+    db: D1Database;
     importMaxRows: number;
   };
 };

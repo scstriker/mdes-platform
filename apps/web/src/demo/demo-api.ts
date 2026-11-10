@@ -114,7 +114,7 @@ async function handle(method: string, url: URL, body: BodyInit | null | undefine
   const path = url.pathname;
   const q = url.searchParams;
 
-  if (method === "GET" && path === "/api/health") return json({ ok: true, db: "ok", vector: true, embedding_dims: 1536 });
+  if (method === "GET" && path === "/api/health") return json({ ok: true, db: "ok" });
   if (method === "GET" && path === "/api/clusters") return json({ items: clusters });
 
   if (method === "GET" && path === "/api/indicators") {

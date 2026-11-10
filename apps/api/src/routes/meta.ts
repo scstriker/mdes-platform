@@ -7,21 +7,16 @@ export function metaRoutes(app: Hono<AppEnv>) {
   /** 健康检查：数据库不可用时返回 503，并附带统一错误体 */
   app.get("/api/health", async (c) => {
     try {
-      const h = await checkHealth(c.get("sql"));
-      return c.json({ ok: true, ...h, embedding_dims: c.get("embeddingDims") });
+      const h = await checkHealth(c.get("db"));
+      return c.json({ ok: true, ...h });
     } catch (err) {
       console.error(err);
-      return c.json(
-        { ok: false, db: "error", vector: false, embedding_dims: c.get("embeddingDims"), ...errorBody("INTERNAL_ERROR") },
-        503,
-      );
+      return c.json({ ok: false, db: "error", ...errorBody("INTERNAL_ERROR") }, 503);
     }
   });
 
   app.get("/api/clusters", async (c) => {
-    const items = await c.get("sql")`
-      select code, name, subsystem_id from indicator_cluster order by code
-    `;
-    return c.json({ items });
+    const { results } = await c.get("db").prepare("select code, name, subsystem_id from indicator_cluster order by code").all();
+    return c.json({ items: results });
   });
 }

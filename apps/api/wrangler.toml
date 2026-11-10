@@ -3,10 +3,13 @@ main = "src/worker.ts"
 compatibility_date = "2026-11-04"
 compatibility_flags = ["nodejs_compat"]
 
-[[hyperdrive]]
-binding = "HYPERDRIVE"
-id = "d56f8011fd1446e5bb4d6908b414d304"
+# Cloudflare D1（SQLite）。本地开发与测试用 wrangler 的本地 D1，不需要 database_id 真值；
+# 部署前用 `npx wrangler d1 create mdes` 建库，再把返回的 database_id 填到下面。见 ADR-003。
+[[d1_databases]]
+binding = "DB"
+database_name = "mdes"
+database_id = "00000000-0000-0000-0000-000000000000"
+migrations_dir = "migrations"
 
 [vars]
-EMBEDDING_DIMS = "1536"
 IMPORT_MAX_ROWS = "5000"

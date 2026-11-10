@@ -82,7 +82,8 @@ export type ImportBatchSummary = {
 
 export type ImportBatch = ImportBatchSummary & { errors_json: RowError[] };
 
-export type Health = { ok: boolean; db: "ok" | "error"; vector: boolean; embedding_dims: number };
+/** GET /api/health；数据库不可用时 ok 为 false，并附带 error（统一错误体） */
+export type Health = { ok: boolean; db: "ok" | "error" };
 
 export type ClusterStats = {
   code: string;

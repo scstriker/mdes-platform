@@ -679,8 +679,8 @@ function ApiErrors() {
           ) : health.isError ? (
             <span className="text-danger">错误：{health.error.message}</span>
           ) : (
-            <Tag tone={health.data.vector ? "success" : "warning"}>
-              {health.data.vector ? "数据库与 pgvector 就绪" : "pgvector 未启用"}
+            <Tag tone={health.data.ok ? "success" : "warning"}>
+              {health.data.ok ? "数据库（D1）就绪" : "数据库不可用"}
             </Tag>
           )}
         </p>
