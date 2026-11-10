@@ -33,6 +33,8 @@ npm run dev:web
 npm test
 ```
 
+`tests/import.db.test.ts`（CSV 导入集成测试）需要本地数据库（`npm run dev:db`，或用 `TEST_DATABASE_URL` 指定）；它在临时 schema 中运行、结束后删除，连不上数据库时自动跳过。
+
 ## 线上 Demo（已部署）
 
 - Web：https://mdes-web.pages.dev
