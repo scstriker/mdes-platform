@@ -1,11 +1,18 @@
+// What JSON.parse can return. Typing `dims` this way (rather than as
+// Record<string, unknown>) lets postgres' sql.json() accept it.
+export type JsonValue = null | boolean | number | string | JsonValue[] | JsonObject;
+export type JsonObject = { [key: string]: JsonValue };
+
 export type CsvRow = {
+  /** 1-based line in the original CSV text, counting blank lines. */
+  line: number;
   indicator_id: string;
   period: string;
   geo: string;
   value_num: number | null;
   value_text: string | null;
   unit: string;
-  dims: Record<string, unknown>;
+  dims: JsonObject;
 };
 
 export type CsvParseResult = {
@@ -42,22 +49,25 @@ function splitCsvLine(line: string): string[] {
 }
 
 export function parseObservationCsv(text: string, maxRows = 5000): CsvParseResult {
+  // Number lines before dropping blank ones, so reported line numbers match
+  // the uploaded file.
   const lines = text
     .replace(/^\uFEFF/, "")
     .split(/\r?\n/)
-    .map((l) => l.trimEnd())
-    .filter((l) => l.length > 0);
+    .map((l, idx) => ({ content: l.trimEnd(), lineNo: idx + 1 }))
+    .filter((l) => l.content.length > 0);
 
   if (lines.length === 0) {
     return { rows: [], errors: [{ line: 0, message: "empty csv" }] };
   }
 
-  const headers = splitCsvLine(lines[0]).map((h) => h.trim().toLowerCase());
+  const header = lines[0];
+  const headers = splitCsvLine(header.content).map((h) => h.trim().toLowerCase());
   for (const key of REQUIRED) {
     if (!headers.includes(key)) {
       return {
         rows: [],
-        errors: [{ line: 1, message: `missing required header: ${key}` }],
+        errors: [{ line: header.lineNo, message: `missing required header: ${key}` }],
       };
     }
   }
@@ -73,9 +83,8 @@ export function parseObservationCsv(text: string, maxRows = 5000): CsvParseResul
   const rows: CsvRow[] = [];
   const errors: { line: number; message: string }[] = [];
 
-  dataLines.forEach((line, idx) => {
-    const lineNo = idx + 2;
-    const cols = splitCsvLine(line);
+  dataLines.forEach(({ content, lineNo }) => {
+    const cols = splitCsvLine(content);
     const get = (name: string) => {
       const i = headers.indexOf(name);
       return i >= 0 ? (cols[i] ?? "").trim() : "";
@@ -100,12 +109,12 @@ export function parseObservationCsv(text: string, maxRows = 5000): CsvParseResul
     }
 
     const rawDims = get("dims");
-    let dims: Record<string, unknown> = {};
+    let dims: JsonObject = {};
     if (rawDims) {
       try {
         const parsed = JSON.parse(rawDims);
         if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-          dims = parsed as Record<string, unknown>;
+          dims = parsed as JsonObject;
         } else {
           errors.push({ line: lineNo, message: "dims must be a JSON object" });
           return;
@@ -123,6 +132,7 @@ export function parseObservationCsv(text: string, maxRows = 5000): CsvParseResul
     }
 
     rows.push({
+      line: lineNo,
       indicator_id,
       period,
       geo: get("geo") || "CN",
