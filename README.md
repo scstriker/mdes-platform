@@ -68,6 +68,19 @@ npm run e2e
 
 ## Cloudflare 重新部署
 
+### 自动部署（GitHub Actions）
+
+`.github/workflows/deploy-cloudflare.yml`：推送到 `ui/itei-refactor` 或 `main` 时自动执行。依次是测试、构建、D1 迁移、部署 `mdes-api` Worker、部署 `mdes-web` Pages（生产），最后做冒烟检查。也可以在 Actions 页手动运行。
+
+需要一个仓库机密（Settings → Secrets and variables → Actions → New repository secret）：
+
+- `CLOUDFLARE_API_TOKEN`：账号级权限 D1 编辑、Workers Scripts 编辑、Cloudflare Pages 编辑。
+- `CLOUDFLARE_ACCOUNT_ID`（选填）：不填时取令牌能访问的唯一账号。
+
+种子数据不在工作流里灌；指标清单有变动时按下面的手动步骤执行 `npm run seed -- --remote`。
+
+### 手动部署
+
 线上 D1 库已建好，`database_id` 已写在 `apps/api/wrangler.toml`。换到新的 Cloudflare 账号时才需要先 `npx wrangler d1 create mdes`，再把返回的 `database_id` 填进去。
 
 迁移、灌数据（幂等，可重复执行）、部署 Worker 与 Pages：
@@ -83,7 +96,7 @@ npx wrangler pages deploy dist --project-name mdes-web --branch main --commit-di
 
 `mdes-web` 的生产分支是 `main`，不加 `--branch main` 时 wrangler 会按当前 git 分支发成预览部署。
 
-在 Claude 云端会话里，Cloudflare 令牌由网络代理注入，`wrangler pages deploy` 会因此失败（见 ADR-003「实施补记」）；Pages 需要在本机执行上面的命令，或在 Cloudflare 控制台上传 `dist`。Worker 与 D1 的命令不受影响。
+在 Claude 云端会话里，Cloudflare 令牌由网络代理注入，`wrangler pages deploy` 会因此失败（见 ADR-003「实施补记」）；Pages 改由上面的 GitHub Actions 部署，或在本机执行上面的命令。Worker 与 D1 的命令不受影响。
 
 Cloudflare 的 API 令牌等凭据不要写进仓库。选型说明见 `docs/decisions/ADR-003-cloudflare-d1.md`。
 

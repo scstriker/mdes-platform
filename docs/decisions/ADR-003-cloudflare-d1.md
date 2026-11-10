@@ -41,7 +41,8 @@ Accepted（2026-11-10，仓库所有者决定）。取代 ADR-001 中「DB → N
 - 测试不用 Miniflare 的 `getD1Database()`：它在 Node 侧通过代理访问 D1，在本项目的云端开发环境里会挂起。改为把 SQL 送进 workerd 里执行（`tests/helpers/harness-worker.ts`）。
 - workerd 不允许模块路径用 `..` 跳出启动目录，测试打包产物放在 `apps/api/.wrangler/test/`。
 - 2026-11-10 首次上线（替换线上版本）：线上库 `mdes` 建在 ENAM 区域，`database_id` 写进 `wrangler.toml`；迁移、灌数据与 `mdes-api` Worker 部署都从 Claude 云端会话完成。
-- 云端会话里 Cloudflare 令牌是网络代理注入的凭据：代理会改写发往 `api.cloudflare.com` 的每个请求的 `Authorization` 头。`wrangler pages deploy` 上传静态资源时，用的是另一个短期上传令牌（JWT）放在同一个头里，被代理改写后 `/pages/assets/check-missing` 返回 8000013 Authorization failed。所以 Pages 不能从云端会话部署，要在本机用 wrangler 或在 Cloudflare 控制台上传 `dist`；Worker、D1 的命令不受影响。
+- 云端会话里 Cloudflare 令牌是网络代理注入的凭据：代理会改写发往 `api.cloudflare.com` 的每个请求的 `Authorization` 头。`wrangler pages deploy` 上传静态资源时，用的是另一个短期上传令牌（JWT）放在同一个头里，被代理改写后 `/pages/assets/check-missing` 返回 8000013 Authorization failed。所以 Pages 不能从云端会话部署；Worker、D1 的命令不受影响。临时中转 Worker（把上传请求从 Cloudflare 内部转发出去）的做法被会话的权限系统拦下，未采用。
+- 部署改由 GitHub Actions 执行（`.github/workflows/deploy-cloudflare.yml`，仓库所有者 2026-11-10 选定）：推送到 `ui/itei-refactor` 或 `main` 时测试、构建、D1 迁移、部署 Worker 与 Pages（`--branch main`，即生产）。令牌放在仓库机密 `CLOUDFLARE_API_TOKEN`；仓库是公开的，账号 ID 也不写进仓库，工作流用令牌查出唯一账号（wrangler 默认用的 `/memberships` 需要用户级权限，账号级令牌调不了）。重构版本合并到 `main` 之后，把 `ui/itei-refactor` 从触发分支里去掉。
 
 ## Consequences
 
