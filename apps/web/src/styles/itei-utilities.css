@@ -1,0 +1,107 @@
+/*
+ * ITEI 专用工具类与基础样式。数值都来自 ITEI token 或组件 README 的规格。
+ */
+
+/* 焦点环：2px --focus 实线 + 2px 偏移，所有可交互元素统一（ADR-002 换皮清单「焦点环」） */
+@utility focus-ring {
+  &:focus-visible {
+    outline: var(--border-rule) solid var(--focus);
+    outline-offset: 2px;
+  }
+}
+
+/* 静态焦点态，只给 /__design 展示用 */
+@utility focus-ring-static {
+  outline: var(--border-rule) solid var(--focus);
+  outline-offset: 2px;
+}
+
+/* 品牌形状：右下 45° 斜切，偏移 --slash（SectionTitle、NumberedNav 序号块） */
+@utility clip-slash {
+  clip-path: polygon(0 0, 100% 0, calc(100% - var(--slash)) 100%, 0 100%);
+}
+
+/* 左下 45° 斜切（应用页脚右端装饰） */
+@utility clip-slash-start {
+  clip-path: polygon(var(--slash) 0, 100% 0, 100% 100%, 0 100%);
+}
+
+/* AppHeader 标题：title-section 语义缩到 20px（AppHeader README） */
+@utility title-header {
+  font-family: var(--font-sans);
+  font-size: 20px;
+  line-height: 28px;
+  font-weight: 700;
+}
+
+/* NumberedNav / Stepper 序号：numeral 缩到 22px（NumberedNav README） */
+@utility numeral-sm {
+  font-family: var(--font-sans);
+  font-size: 22px;
+  line-height: 28px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+@layer base {
+  /* Tailwind v4 预设边线色是 currentColor，统一回到 ITEI --border */
+  *,
+  ::before,
+  ::after,
+  ::backdrop {
+    border-color: var(--border);
+  }
+
+  /* 原生控件（滚动条、日期框）跟随主题；选择器与 tokens.css 一致 */
+  :root,
+  [data-theme="light"] {
+    color-scheme: light;
+  }
+  [data-theme="dark"] {
+    color-scheme: dark;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+    }
+  }
+
+  body {
+    font-size: 15px;
+    line-height: 24px;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  ::placeholder {
+    color: var(--ink-muted);
+  }
+
+  /* ITEI 只允许 120–200ms 的过渡；系统要求减少动效时全部关掉 */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    ::before,
+    ::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}
+
+/* 焦点环内缩：用于贴边的列表项（Tree、TabBar），避免被滚动容器裁掉 */
+@utility focus-ring-inset {
+  &:focus-visible {
+    outline: var(--border-rule) solid var(--focus);
+    outline-offset: calc(var(--border-rule) * -1);
+  }
+}
+
+/* 底部安全区（iPhone 横条），TabBar 用 */
+@utility pb-safe {
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+/* 窄屏内容区给底部 TabBar 让位：TabBar 高 56px + 安全区 */
+@utility pb-tabbar {
+  padding-bottom: calc(var(--header-height) + env(safe-area-inset-bottom));
+}

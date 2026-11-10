@@ -1,0 +1,14 @@
+/*
+ * 样式入口。顺序有意义：
+ * 1. Tailwind 与 tw-animate-css（浮层淡入 / 位移）
+ * 2. ITEI tokens.css 正本，放进 base 层：不放进 layer 的样式优先级高于所有工具类，会悄悄覆盖它们（ADR-002）
+ * 3. 生成的 Tailwind 主题：清空默认命名空间，只注册 ITEI token
+ * 4. shadcn 语义色映射、ITEI 工具类、组件层样式
+ */
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "../../design/itei/itei-design-system/tokens.css" layer(base);
+@import "./generated/itei-theme.css";
+@import "./shadcn-theme.css";
+@import "./itei-utilities.css";
+@import "./itei-components.css";

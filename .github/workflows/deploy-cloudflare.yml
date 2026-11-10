@@ -1,0 +1,97 @@
+# 部署到 Cloudflare：D1 迁移 → mdes-api Worker → mdes-web Pages（生产环境，分支 main）。
+#
+# 为什么用 GitHub Actions：Claude 云端会话里 Cloudflare 令牌由网络代理注入，Pages 上传资源用的
+# 临时令牌会被改写，无法从会话里部署 Pages（见 docs/decisions/ADR-003-cloudflare-d1.md「实施补记」）。
+#
+# 仓库机密（Settings → Secrets and variables → Actions → New repository secret）：
+#   CLOUDFLARE_API_TOKEN   必填。账号级权限：D1 编辑、Workers Scripts 编辑、Cloudflare Pages 编辑
+#   CLOUDFLARE_ACCOUNT_ID  选填。不填时取令牌能访问的唯一账号
+#
+# 触发：推送到 ui/itei-refactor（重构版本目前就是线上版本）或 main。合并到 main 之后，
+# 把 ui/itei-refactor 从下面的分支列表里去掉。
+name: Deploy to Cloudflare
+
+on:
+  push:
+    branches: [ui/itei-refactor, main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-cloudflare
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      API_BASE: https://mdes-api.scstriker0120.workers.dev
+      WEB_BASE: https://mdes-web.pages.dev
+      WRANGLER_SEND_METRICS: "false"
+    steps:
+      - name: Check Cloudflare credentials
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
+            echo "::error::缺少仓库机密 CLOUDFLARE_API_TOKEN（Settings → Secrets and variables → Actions）"
+            exit 1
+          fi
+          if [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
+            # wrangler 默认用 /memberships 找账号，账号级令牌没有这个权限；这里改用 /accounts
+            ids=$(curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" https://api.cloudflare.com/client/v4/accounts | jq -r '.result[].id')
+            if [ "$(printf '%s\n' "$ids" | grep -c .)" != "1" ]; then
+              echo "::error::令牌能访问的账号不是恰好一个，请加仓库机密 CLOUDFLARE_ACCOUNT_ID"
+              exit 1
+            fi
+            echo "::add-mask::$ids"
+            echo "CLOUDFLARE_ACCOUNT_ID=$ids" >> "$GITHUB_ENV"
+          fi
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm test
+
+      - name: Build
+        run: npm run build
+        env:
+          VITE_API_BASE: ${{ env.API_BASE }}
+
+      - name: dist 里不能有 404.html（没有它 Pages 才做 SPA 回退）
+        run: test ! -e apps/web/dist/404.html
+
+      - name: D1 migrations
+        working-directory: apps/api
+        run: npx wrangler d1 migrations apply mdes --remote
+
+      - name: Deploy API Worker
+        working-directory: apps/api
+        run: npx wrangler deploy
+
+      - name: Deploy web to Pages (production)
+        working-directory: apps/web
+        run: npx wrangler pages deploy dist --project-name mdes-web --branch main --commit-dirty=true
+
+      - name: Smoke check
+        run: |
+          curl -fsS "$API_BASE/api/health" | jq -e '.ok == true and .db == "ok"'
+          want=$(grep -o 'assets/index-[^"]*\.js' apps/web/dist/index.html | head -1)
+          for i in $(seq 1 24); do
+            if curl -fsS "$WEB_BASE/indicators" | grep -q "$want"; then
+              echo "Pages 已是新版本（$want），SPA 回退正常"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::$WEB_BASE 两分钟内没有返回新版本的 index.html"
+          exit 1

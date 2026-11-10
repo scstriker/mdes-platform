@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted
+Superseded（2026-11-10）：数据库部分由 [ADR-003](./ADR-003-cloudflare-d1.md) 取代，改用 Cloudflare D1，本轮不含向量。Pages + Workers、Hono、TypeScript 的决定仍然有效。
+
+原状态：Accepted
 
 ## Context
 

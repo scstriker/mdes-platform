@@ -1,0 +1,18 @@
+{
+  "name": "@mdes/shared",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "MDES 前后端共用的类型、错误码与 CSV 解析器",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "build": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.2",
+    "vitest": "^3.2.4"
+  }
+}

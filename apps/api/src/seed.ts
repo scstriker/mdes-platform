@@ -1,7 +1,16 @@
-import { readFileSync } from "node:fs";
-import { resolve, dirname } from "node:path";
+/**
+ * 灌入簇与 99 个指标（幂等，可重复执行）。
+ *
+ * 由 data/indicators_seed.json 生成 SQL，再交给 wrangler 执行：
+ *   npm run seed                      本地 D1（wrangler dev 用的那份）
+ *   npm run seed -- --persist-to dir  指定本地数据目录（e2e 用）
+ *   npm run seed -- --remote          线上 D1
+ * seedStatements() 也供集成测试直接使用。
+ */
+import { execFileSync } from "node:child_process";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createSql } from "./db";
 import { inferSourceKind } from "./inferSourceKind";
 
 type SeedFile = {
@@ -23,104 +32,63 @@ type SeedFile = {
   }[];
 };
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const root = resolve(__dirname, "../../..");
-const seedPath = resolve(root, "data/indicators_seed.json");
-const databaseUrl =
-  process.env.DATABASE_URL || "postgres://mdes:mdes@127.0.0.1:5433/mdes";
+const here = dirname(fileURLToPath(import.meta.url));
+const API_ROOT = resolve(here, "..");
+export const SEED_PATH = resolve(API_ROOT, "../../data/indicators_seed.json");
+export const DATABASE_NAME = "mdes";
 
-async function main() {
+/** SQLite 字符串字面量：单引号写两遍（SQLite 不认反斜杠转义） */
+const lit = (s: string) => `'${s.replace(/'/g, "''")}'`;
+
+export function seedStatements(seedPath = SEED_PATH): string[] {
   const seed = JSON.parse(readFileSync(seedPath, "utf8")) as SeedFile;
-  const sql = createSql(databaseUrl);
-
-  await sql`insert into subsystem (id, name) values ('med', '医疗装备') on conflict do nothing`;
-
-  if (seed.clusters.length > 0) {
-    const codes = seed.clusters.map((c) => c.code);
-    const names = seed.clusters.map((c) => c.name);
-    const subs = seed.clusters.map(() => "med");
-    await sql`
-      insert into indicator_cluster ${sql(
-        codes.map((code, i) => ({
-          code,
-          name: names[i],
-          subsystem_id: subs[i],
-        })),
-      )}
-      on conflict (code) do update set name = excluded.name
-    `;
+  const statements = ["INSERT OR IGNORE INTO subsystem (id, name) VALUES ('med', '医疗装备')"];
+  for (const c of seed.clusters) {
+    statements.push(
+      `INSERT INTO indicator_cluster (code, name, subsystem_id) VALUES (${lit(c.code)}, ${lit(c.name)}, 'med') ` +
+        "ON CONFLICT(code) DO UPDATE SET name = excluded.name",
+    );
   }
-
-  const indicatorRows = seed.indicators.map((ind) => ({
-    id: ind.id,
-    cluster_code: ind.cluster_code,
-    name: ind.name,
-    phase: ind.phase,
-    update_freq: ind.update_freq,
-    source_kind: inferSourceKind(ind.source, ind.collect_method),
-    phase_scope: ind.phase_scope,
-    spec_json: {
-      business_value: ind.business_value,
-      definition: ind.definition,
-      source: ind.source,
-      collect_method: ind.collect_method,
-      usage: ind.usage,
-      automation: ind.automation,
-      note: ind.note,
-    },
-  }));
-
-  // batch in chunks to keep payload reasonable
-  const chunkSize = 25;
-  for (let i = 0; i < indicatorRows.length; i += chunkSize) {
-    const chunk = indicatorRows.slice(i, i + chunkSize);
-    await sql.begin(async (tx) => {
-      for (const row of chunk) {
-        await tx`
-          insert into indicator (
-            id, cluster_code, name, phase, update_freq, source_kind, phase_scope, spec_json
-          ) values (
-            ${row.id},
-            ${row.cluster_code},
-            ${row.name},
-            ${row.phase},
-            ${row.update_freq},
-            ${row.source_kind},
-            ${row.phase_scope},
-            ${tx.json(row.spec_json)}
-          )
-          on conflict (id) do update set
-            cluster_code = excluded.cluster_code,
-            name = excluded.name,
-            phase = excluded.phase,
-            update_freq = excluded.update_freq,
-            source_kind = excluded.source_kind,
-            phase_scope = excluded.phase_scope,
-            spec_json = excluded.spec_json
-        `;
-      }
+  for (const i of seed.indicators) {
+    const spec = JSON.stringify({
+      business_value: i.business_value,
+      definition: i.definition,
+      source: i.source,
+      collect_method: i.collect_method,
+      usage: i.usage,
+      automation: i.automation,
+      note: i.note,
     });
-    console.log(`seeded indicators ${Math.min(i + chunkSize, indicatorRows.length)}/${indicatorRows.length}`);
+    statements.push(
+      "INSERT INTO indicator (id, cluster_code, name, phase, update_freq, source_kind, phase_scope, spec_json) VALUES (" +
+        [i.id, i.cluster_code, i.name, i.phase, i.update_freq, inferSourceKind(i.source, i.collect_method), i.phase_scope, spec]
+          .map(lit)
+          .join(", ") +
+        ") ON CONFLICT(id) DO UPDATE SET cluster_code = excluded.cluster_code, name = excluded.name, phase = excluded.phase, " +
+        "update_freq = excluded.update_freq, source_kind = excluded.source_kind, phase_scope = excluded.phase_scope, spec_json = excluded.spec_json",
+    );
   }
-
-  const [doc] = await sql<{ id: string }[]>`
-    insert into document (title, source_uri, meta)
-    values ('seed-smoke', null, ${sql.json({ kind: "smoke" })})
-    returning id
-  `;
-  await sql`
-    insert into document_chunk (document_id, chunk_index, content, embedding, meta)
-    values (${doc.id}, 0, 'pgvector reserved table smoke', null, ${sql.json({})})
-  `;
-
-  const counts = await sql<{ phase: string; n: string }[]>`
-    select phase, count(*)::text as n from indicator group by phase order by phase
-  `;
-  console.log("seeded", counts);
-  await sql.end({ timeout: 5 });
+  return statements;
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+function main() {
+  const args = process.argv.slice(2);
+  const file = resolve(API_ROOT, ".wrangler/seed.sql");
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, seedStatements().map((s) => `${s};`).join("\n") + "\n");
+  const target = args.includes("--remote") || args.includes("--local") ? [] : ["--local"];
+  execFileSync("npx", ["wrangler", "d1", "execute", DATABASE_NAME, ...target, ...args, "--file", file], {
+    cwd: API_ROOT,
+    stdio: "inherit",
+    env: { ...process.env, WRANGLER_SEND_METRICS: "false" },
+  });
+}
+
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  try {
+    main();
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : err);
+    process.exit(1);
+  }
+}

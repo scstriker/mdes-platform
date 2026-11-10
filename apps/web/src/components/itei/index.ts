@@ -1,0 +1,24 @@
+/** ITEI 组件层：与设计系统 components/ 一一对应，外加 MDES 需要的 Tree / Stepper / Dropzone / Descriptions */
+export { AppFooter } from "./app-footer";
+export { AppHeader } from "./app-header";
+export { Breadcrumbs, type Crumb } from "./breadcrumbs";
+export { Card } from "./card";
+export { DataTable, type DataTableColumn, type DataTablePagination } from "./data-table";
+export { Descriptions, type DescriptionItem } from "./descriptions";
+export { Dropzone } from "./dropzone";
+export { EmptyState } from "./empty-state";
+export { Field } from "./field";
+export { formatBytes, formatNumber } from "./format";
+export { KpiTile } from "./kpi-tile";
+export { IteiLogo } from "./logo";
+export type { NavItem } from "./nav";
+export { Notice, type NoticeTone } from "./notice";
+export { NumberedNav, pad2, type NumberedNavItem } from "./numbered-nav";
+export { ProgressMeter } from "./progress-meter";
+export { SectionTitle } from "./section-title";
+export { Sparkline } from "./sparkline";
+export { Stepper } from "./stepper";
+export { TabBar } from "./tab-bar";
+export { Tag, type TagTone } from "./tag";
+export { TextLink } from "./text-link";
+export { Tree, type TreeNode } from "./tree";

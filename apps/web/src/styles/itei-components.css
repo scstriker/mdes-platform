@@ -1,0 +1,31 @@
+/*
+ * ITEI 组件层里少量必须随主题切换「结构」而不是「颜色」的样式。
+ * 颜色一律走 token；这里只处理标志：ITEI 规定深色底上不放彩色标志，改用 ink 色文字「ITEI」。
+ * 用自定义属性而不是 [data-theme] 后代选择器，最近一层 data-theme 生效，嵌套主题也正确。
+ */
+@layer base {
+  :root,
+  [data-theme="light"] {
+    --itei-logo-image: block;
+    --itei-logo-text: none;
+  }
+  [data-theme="dark"] {
+    --itei-logo-image: none;
+    --itei-logo-text: block;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --itei-logo-image: none;
+      --itei-logo-text: block;
+    }
+  }
+}
+
+@layer components {
+  .itei-logo-image {
+    display: var(--itei-logo-image);
+  }
+  .itei-logo-text {
+    display: var(--itei-logo-text);
+  }
+}
