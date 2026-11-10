@@ -12,8 +12,8 @@
 
 - 将 V12 指标元数据（含一期 30 项）入库并可浏览
 - 支持 CSV 观测值导入与按指标/期间查询
-- 使用 PostgreSQL + pgvector，并预留文档向量与 Agent 表
-- 优先可部署到 Cloudflare（Pages + Workers），数据库使用 Neon（或兼容的托管 Postgres）
+- 使用 Cloudflare D1，并预留知识库文档与 Agent 表（本轮不存向量）
+- 优先可部署到 Cloudflare（Pages + Workers + D1）
 
 ## 4. Non-goals
 
@@ -60,15 +60,15 @@
 
 **Acceptance:** AC-003
 
-### FR-004 — 健康与向量扩展
+### FR-004 — 健康检查与预留表
 
-**Requirement:** 健康检查报告数据库可用，且 `vector` 扩展已启用；文档分块表可插入（可不经 UI）。
+**Requirement:** 健康检查报告数据库可用；知识库预留表（`document` / `document_chunk`）可写入（可不经 UI）。本轮不含向量（ADR-003）。
 
 **Acceptance:** AC-004
 
 ### FR-005 — Cloudflare 部署路径
 
-**Requirement:** 文档与配置支持将 Web 部署到 Pages、API 部署到 Workers，经 Hyperdrive 连接 Neon。
+**Requirement:** 文档与配置支持将 Web 部署到 Pages、API 部署到 Workers，数据存于 D1。
 
 **Acceptance:** AC-005
 
@@ -82,13 +82,13 @@
 
 ### NFR-002 — 可扩展元模型
 
-**Requirement:** 观测值使用通用表 + JSONB dims，不为每指标建物理表；预留 subsystem / entity / document_chunk / agent_run。
+**Requirement:** 观测值使用通用表 + JSON 文本 dims，不为每指标建物理表；预留 subsystem / entity / document_chunk / agent_run。
 
 **Measurement / verification:** DATA_MODEL 与迁移一致。
 
 ## 9. Constraints and Assumptions
 
-- 数据库必须为 PostgreSQL + pgvector（不用 D1/Vectorize 替代）
+- 数据库使用 Cloudflare D1；不用 Neon、PGlite 或 pgvector（ADR-003，2026-11-10 仓库所有者决定）
 - UI 遵循 ITEI 视觉；组件栈 Tailwind + shadcn
 - 现有 `medical-device-import-demo` 仅思路参考
 
@@ -99,4 +99,5 @@
 
 ## 11. Open Questions
 
-- 生产 Neon / Cloudflare 账号与 Hyperdrive 绑定由部署者提供
+- 生产 Cloudflare 账号与 D1 库由部署者提供
+- 二期知识库的向量检索方案（如 Cloudflare Vectorize）待定

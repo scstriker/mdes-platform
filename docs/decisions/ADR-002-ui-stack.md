@@ -255,7 +255,7 @@ ITEI 的识别元素都保留：
 
 ## 实施补记（阶段 4）
 
-- 端到端测试用 `@playwright/test`（与环境预装浏览器同版本 1.63.0），配置见 `apps/web/playwright.config.ts`：自带 API（8788）与 Web（5174），连独立库 `mdes_e2e`。
+- 端到端测试用 `@playwright/test`（与环境预装浏览器同版本 1.63.0），配置见 `apps/web/playwright.config.ts`：自带 API（8788）与 Web（5174）；API 原先连独立库 `mdes_e2e`，改用 D1 后为 `wrangler dev` + 本地 D1（`apps/api/.wrangler/e2e`，每次重建），见 ADR-003。
 - axe 检查用 `@axe-core/playwright`，许可证 MPL-2.0（不在 R4 优先的 MIT / Apache 之列）；只作为开发依赖跑测试，不进产品包。
 - axe 发现并已修复：页眉标志链接的可访问名称不含可见文字（WCAG 2.5.3）；段落里的链接只靠颜色区分（WCAG 1.4.1），`TextLink` 增加常显下划线的 `inline` 用法，用于正文中的链接。
 

@@ -4,10 +4,10 @@ Traceability: FR → AC → verification.
 
 自动化测试：
 
-- API 集成测试 `apps/api/tests/api.integration.test.ts`：连本地 pgvector 的独立库 `mdes_test`（`TEST_DATABASE_URL` 可改），自动建库、建表、灌指标；连不上时整组跳过并提示。先 `npm run dev:db` 再 `npm test`。
+- API 集成测试 `apps/api/tests/api.integration.test.ts`：用 esbuild 打包真实 Worker，在 Miniflare（workerd + 本地 D1）里运行；每组测试一个全新的库，自动建表、灌指标。不需要 Docker 或外部数据库，`npm test` 直接跑。
 - CSV 解析单元测试 `packages/shared/tests/csv.test.ts`。
 - 前端：API 客户端与错误文案 `apps/web/tests/api-errors.test.ts`；图表切片 `apps/web/tests/slice.test.ts`；目录筛选 `apps/web/tests/catalog-filter.test.ts`。
-- 端到端：`apps/web/e2e/`（`npm run e2e`），自带 API 与 Web，连独立库 `mdes_e2e`。
+- 端到端：`apps/web/e2e/`（`npm run e2e`），自带 API（`wrangler dev`，8788 端口）与 Web；本地 D1 数据放在 `apps/api/.wrangler/e2e`，每次运行删掉重建。
 
 ### AC-001 — 一期指标目录可见
 
@@ -27,16 +27,16 @@ Traceability: FR → AC → verification.
 **Verify:** 导入后 `GET /api/observations?indicator_id=TRD-001` 返回 3 行，`total=3`，按期间倒序；Web「观测值」选 TRD-001 查询显示「共 3 条」。  
 **Method:** automated API test（「AC-003」）+ e2e（「3.」）
 
-### AC-004 — pgvector 就绪
+### AC-004 — 数据库可用、预留表可写入
 
 **Covers:** FR-004  
-**Verify:** `GET /api/health` 含 `db: ok` 与 `vector: true`；可向 `document_chunk` 写入一条 1536 维向量。数据库不可用时 `/api/health` 返回 503。  
+**Verify:** `GET /api/health` 返回 `{ ok: true, db: "ok" }`；知识库预留表 `document` / `document_chunk` 可写入，且 `document_chunk` 不含 `embedding` 列（本轮不含向量，见 ADR-003）。数据库不可用时 `/api/health` 返回 503。  
 **Method:** automated API test（「AC-004」）
 
 ### AC-005 — Cloudflare 部署路径文档完整
 
 **Covers:** FR-005  
-**Verify:** README 含 Neon 创建、`CREATE EXTENSION vector`、Hyperdrive、Pages/Worker 部署步骤；`wrangler` 配置文件存在且 `npx wrangler deploy --dry-run` 可打包（含 `packages/shared`）。  
+**Verify:** README 含 D1 建库（`wrangler d1 create`）、迁移（`wrangler d1 migrations apply --remote`）、灌种子数据、Pages/Worker 部署步骤；`wrangler` 配置文件含 D1 绑定 `DB`，且 `npx wrangler deploy --dry-run` 可打包（含 `packages/shared`）。  
 **Method:** manual review
 
 ### AC-006 — 指标列表带数据状态
@@ -68,12 +68,12 @@ Traceability: FR → AC → verification.
 **Verify:** `GET /api/observations` 支持 `geo`、`batch_id`、`period_from`、`period_to`、`limit`、`offset`，返回 `total`（不受分页影响）；`period_to=2024` 含 2024 年各月；按 `batch_id` 可查出单个批次的全部数据；非法 `limit` 回落到 100、超过 500 截到 500，格式不对的 `batch_id` 查不到数据而不报错。  
 **Method:** automated API test（「GET /api/observations」）
 
-### AC-010 — 导入单事务、分块批量写入
+### AC-010 — 导入单事务（D1 batch）、分块批量写入
 
 **Covers:** FR-002、NFR-001  
 **Verify:**
 
-- 批次与观测值在同一事务中写入，每 500 行一次批量插入；中途失败整体回滚，库里既没有半批观测值，也没有批次记录。
+- 批次与观测值放进同一次 `db.batch()`（D1 把它当作一个事务）写入，每 500 行一条批量插入语句（整块作为一个 JSON 参数，避开每条语句 100 个参数的限制）；中途失败整体回滚，库里既没有半批观测值，也没有批次记录。
 - 部分行失败时 `status=completed_with_errors`，只写入有效行；全部行失败时仍记录 `failed` 批次并返回 200，不写观测值。
 - 5000 行文件一次导入成功（本地约 0.3 秒）。
 

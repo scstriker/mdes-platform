@@ -30,10 +30,10 @@ CSV 行错误不走上表，而是放在导入结果的 `errors` 里，见「POS
 ## GET /health
 
 ```json
-{ "ok": true, "db": "ok", "vector": true, "embedding_dims": 1536 }
+{ "ok": true, "db": "ok" }
 ```
 
-数据库不可用时返回 **503**：`{ "ok": false, "db": "error", "vector": false, "embedding_dims": 1536, "error": { "code": "INTERNAL_ERROR", … } }`。
+数据库不可用时返回 **503**：`{ "ok": false, "db": "error", "error": { "code": "INTERNAL_ERROR", … } }`。
 
 ## GET /clusters
 
@@ -76,7 +76,7 @@ Returns：
 ```
 
 - `total` 是符合筛选条件的总条数，不受 `limit` / `offset` 影响。
-- `items` 按 `period desc, id desc` 排序；`id` 为字符串（bigserial）。
+- `items` 按 `period desc, id desc` 排序；`id` 为字符串（库里是自增整数）。
 
 ## POST /import/csv
 
@@ -91,7 +91,7 @@ CSV 规则（前后端共用 `packages/shared/src/csv.ts`）：
 处理方式：
 
 - 文件级问题（`FILE_REQUIRED`、`EMPTY_CSV`、`MISSING_HEADER`、`ROW_LIMIT_EXCEEDED`）返回 400 错误体，不建批次。
-- 其余情况都会建一个批次并返回 **200**。批次与全部观测值在同一个事务里写入，每 500 行一次批量插入；中途失败整体回滚，不留半批数据，返回 500 `INTERNAL_ERROR`。
+- 其余情况都会建一个批次并返回 **200**。批次与全部观测值放进同一次 D1 `db.batch()`（单事务）写入，每 500 行一条批量插入；中途失败整体回滚，不留半批数据，返回 500 `INTERNAL_ERROR`。
 - 校验失败的行跳过，其余行照常写入；所有行都失败时批次状态为 `failed`，同样记录在导入历史里。
 
 Returns：

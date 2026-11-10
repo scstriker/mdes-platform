@@ -1,7 +1,7 @@
 # MDES Platform
 
 - UI 规范见 `apps/web/design/itei/itei-design-system/AGENTS.md`（按其中的读取顺序读 README.md、platforms.md、tokens.css、components/*/README.md；`showcase.html` 是组件的视觉基准）。
-- 重构决定见 `docs/decisions/ADR-002-ui-stack.md`。ADR 没覆盖、或必须偏离 ADR 的情况，先找仓库所有者确认，定下来后在 ADR 里补记。
+- 重构决定见 `docs/decisions/ADR-002-ui-stack.md`；数据库选型（Cloudflare D1，本轮不含向量）见 `docs/decisions/ADR-003-cloudflare-d1.md`。ADR 没覆盖、或必须偏离 ADR 的情况，先找仓库所有者确认，定下来后在 ADR 里补记。
 - 产品与接口文档：`docs/PRD.md`、`docs/TECH_SPEC.md`、`docs/API.md`、`docs/DATA_MODEL.md`、`docs/ACCEPTANCE.md`。
 
 ## 前端硬性规则
@@ -15,14 +15,14 @@
 
 ```bash
 npm install
-npm run dev:db      # Docker 起 pgvector（docker-compose.yml）
+npm run db:migrate  # 本地 D1 建表（wrangler，数据在 apps/api/.wrangler/state）
 npm run seed
 npm run dev:api     # http://127.0.0.1:8787
 npm run dev:web     # http://127.0.0.1:5173
 npm run tokens      # tokens.json 改动后重新生成 token 产物
 npm test
 npm run build
-npm run e2e          # Playwright：README 验收 + 外框 + 回归 + axe（需 pgvector，独立端口与独立库）
+npm run e2e          # Playwright：README 验收 + 外框 + 回归 + axe（独立端口，本地 D1 放在 apps/api/.wrangler/e2e）
 ```
 
 每完成一块改动都跑 `npm test` 和 `npm run build`，界面改动再跑 `npm run e2e`；界面改动用 Playwright 截图自查（桌面 1440 / 手机 390，浅色 / 深色）。
