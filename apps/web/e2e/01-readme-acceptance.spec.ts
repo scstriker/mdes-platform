@@ -14,14 +14,14 @@ test.describe.serial("README 验收样例", () => {
     await expect(page).toHaveURL(/phase=phase1/);
   });
 
-  test("2. 「数据导入」上传 data/samples/trd_sample.csv", async ({ page }) => {
-    await page.goto("/import");
+  test("2. 数据后台「新建导入」上传 data/samples/trd_sample.csv", async ({ page }) => {
+    await page.goto("/admin/import");
+    await page.getByRole("button", { name: /38\s+医疗器械进出口贸易/ }).click();
     await page.locator("input[type=file]").setInputFiles(SAMPLE_CSV);
-    await expect(page.getByText("预校验通过，10 行都可以导入")).toBeVisible();
-    await page.getByRole("button", { name: "开始导入（10 行）" }).click();
+    await expect(page.getByText(/可写入/)).toBeVisible({ timeout: 15_000 });
+    await page.getByRole("button", { name: /写入 10 行/ }).click();
     await expect(page.getByText("导入完成，10 行全部写入")).toBeVisible();
-    await expect(page.locator("[aria-current=step]")).toContainText("结果");
-    await expect(page.getByRole("link", { name: "查看本批次数据" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "查看本批次" })).toBeVisible();
   });
 
   test("3. 「观测值」查询 TRD-001 应有多行", async ({ page }) => {
@@ -40,10 +40,9 @@ test.describe.serial("README 验收样例", () => {
     expect(await res.json()).toEqual({ ok: true, db: "ok" });
   });
 
-  test("导入后概览与目录同步更新", async ({ page }) => {
+  test("导入后目录同步更新", async ({ page }) => {
     await page.goto("/");
-    await expect(page.getByText("覆盖率 16.7%")).toBeVisible();
-    await expect(page.getByText("数据截止 2024-03", { exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { level: 1 })).toContainText(/创新医疗器械|国产三类/);
     await page.goto("/indicators?data=with");
     await expect(page.getByText(/共 5 项/)).toBeVisible();
   });

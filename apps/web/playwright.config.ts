@@ -29,7 +29,7 @@ export default defineConfig({
   webServer: [
     {
       command: [
-        "rm -rf .wrangler/e2e",
+        "node -e \"require('fs').rmSync('.wrangler/e2e',{recursive:true,force:true})\"",
         "npx wrangler d1 migrations apply mdes --local --persist-to .wrangler/e2e",
         "npx tsx src/seed.ts --persist-to .wrangler/e2e",
         `npx wrangler dev --port ${API_PORT} --ip 127.0.0.1 --persist-to .wrangler/e2e`,

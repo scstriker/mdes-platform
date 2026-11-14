@@ -163,6 +163,13 @@
       "letterSpacing": "-0.01em",
       "family": "sans"
     },
+    "numeral-lg": {
+      "fontSize": "36px",
+      "lineHeight": "40px",
+      "fontWeight": 700,
+      "letterSpacing": "-0.01em",
+      "family": "sans"
+    },
     "code": {
       "fontSize": "13px",
       "lineHeight": "20px",

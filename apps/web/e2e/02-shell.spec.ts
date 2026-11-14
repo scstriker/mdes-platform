@@ -4,9 +4,9 @@ import { useTheme } from "./support";
 /** 新外框要解决的四个问题（ADR-002「现状」），外加路由与主题 */
 test.describe("外框 · 桌面", () => {
   test("页眉导航标出当前页；深链与未知路径", async ({ page }) => {
-    await page.goto("/indicators/TRD-001");
-    await expect(page.locator("header nav [aria-current=page]")).toHaveText("指标目录");
-    await expect(page.getByRole("heading", { level: 1 })).toHaveText("医疗装备进口金额");
+    await page.goto("/system");
+    await expect(page.locator("header nav [aria-current=page]")).toHaveText("指标体系");
+    await expect(page.getByRole("heading", { level: 1 })).toContainText("指标体系");
     await page.goto("/no-such-page");
     await expect(page.getByRole("heading", { level: 1 })).toHaveText("页面不存在");
   });
@@ -51,9 +51,9 @@ test.describe("外框 · 窄屏", () => {
     await expect(tabbar).toHaveCount(1);
     await expect(tabbar).toBeVisible();
     await expect(page.getByRole("contentinfo")).toBeHidden();
-    await tabbar.getByRole("link", { name: "指标目录" }).tap();
-    await expect(page).toHaveURL(/\/indicators$/);
-    await expect(tabbar.locator("[aria-current=page]")).toHaveText("指标目录");
+    await tabbar.getByRole("link", { name: "指标体系" }).tap();
+    await expect(page).toHaveURL(/\/system$/);
+    await expect(tabbar.locator("[aria-current=page]")).toHaveText("指标体系");
   });
 
   test("观测值页：窄屏只露出「指标」，其余条件收进「更多条件」", async ({ page }) => {
@@ -64,13 +64,12 @@ test.describe("外框 · 窄屏", () => {
   });
 
   test("内容不被 TabBar 挡住：滚到底时最后一块内容在 TabBar 之上", async ({ page }) => {
-    await page.goto("/import");
-    // 等导入历史加载完、页面高度稳定后再滚到底
-    await expect(page.getByText("导入历史")).toBeVisible();
+    await page.goto("/system");
+    await expect(page.getByRole("heading", { name: /指标体系/ })).toBeVisible();
     await page.waitForLoadState("networkidle");
     await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
     const tabTop = (await page.getByRole("navigation", { name: "主导航" }).boundingBox())!.y;
-    const lastBottom = await page.locator("main > div > div").last().evaluate((el) => el.getBoundingClientRect().bottom);
+    const lastBottom = await page.locator("main").evaluate((el) => el.getBoundingClientRect().bottom);
     expect(lastBottom).toBeLessThanOrEqual(tabTop + 1);
   });
 });

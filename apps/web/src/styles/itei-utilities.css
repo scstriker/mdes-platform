@@ -2,6 +2,11 @@
  * ITEI 专用工具类与基础样式。数值都来自 ITEI token 或组件 README 的规格。
  */
 
+/* 网页刊头优先用已加载的 Noto Serif SC（OFL 子集），汉仪粗宋仍作本地回退 */
+:root {
+  --font-display: "Noto Serif SC", "HYCuSongJ", "汉仪粗宋简", "Noto Serif CJK SC", "Source Han Serif SC", "Songti SC", "SimSun", serif;
+}
+
 /* 焦点环：2px --focus 实线 + 2px 偏移，所有可交互元素统一（ADR-002 换皮清单「焦点环」） */
 @utility focus-ring {
   &:focus-visible {
