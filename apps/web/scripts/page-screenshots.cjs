@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 /**
- * 页面截图自查：五个页面 × 桌面 1440 / 手机 390 × 浅色 / 深色，整页截图。
+ * 页面截图自查：示意稿 7 页 × 桌面 1440 / 手机 390 × 浅色 / 深色，整页截图。
  *
- * 前置：API 与 Web dev server 已启动；库里导入了 data/samples/trd_sample.csv 与
- * `node scripts/make-demo-csv.mjs` 生成的演示数据（虚构，用于展示多省份、多序列等切片情形）。
+ * 前置：API 与 Web dev server 已启动（可选：演示数据已导入）。
  * 用法：node apps/web/scripts/page-screenshots.cjs [输出目录]
+ * 对照基准：docs/screenshots/target-ui/
  */
 const path = require("node:path");
 const fs = require("node:fs");
@@ -13,13 +13,32 @@ const { chromium } = require("playwright");
 const BASE = process.env.BASE_URL || "http://127.0.0.1:5173";
 const OUT = path.resolve(process.argv[2] || "docs/screenshots/phase3");
 
+/** @type {[string, string, ((page: import('playwright').Page) => Promise<void>)?][]} */
 const PAGES = [
   ["overview", "/"],
-  ["catalog", "/indicators?phase=phase1"],
-  ["indicator", "/indicators/TRD-001"],
-  ["indicator-compare", "/indicators/TRD-005?split=d.partner"],
-  ["observations", "/observations?indicator_id=TRD-001&geo=CN&period_from=2024-01"],
-  ["import", "/import"],
+  ["system", "/system"],
+  ["system-01", "/system/01"],
+  ["admin-overview", "/admin"],
+  [
+    "admin-import-validate",
+    "/admin/import?seq=01",
+    async (page) => {
+      // 演示步：上传样例后进入校验（字段对照并入校验步）
+      const sample = path.resolve(__dirname, "../../../data/samples/trd_sample.csv");
+      if (!fs.existsSync(sample)) return;
+      await page.locator('input[type="file"]').first().setInputFiles(sample);
+      await page.getByRole("button", { name: /进入校验|下一步/ }).first().click({ timeout: 8000 }).catch(() => {});
+      await page.waitForTimeout(400);
+    },
+  ],
+  [
+    "admin-import-file",
+    "/admin/import?seq=24",
+    async (page) => {
+      await page.getByRole("button", { name: /下一步|进入/ }).first().click({ timeout: 5000 }).catch(() => {});
+      await page.waitForTimeout(400);
+    },
+  ],
 ];
 const DEVICES = {
   desktop: { viewport: { width: 1440, height: 900 } },
@@ -35,9 +54,10 @@ async function main() {
         const ctx = await browser.newContext({ ...opts, deviceScaleFactor: 1, locale: "zh-CN" });
         await ctx.addInitScript((t) => localStorage.setItem("mdes-theme", t), theme);
         const page = await ctx.newPage();
-        for (const [name, route] of PAGES) {
+        for (const [name, route, setup] of PAGES) {
           await page.goto(BASE + route);
           await page.waitForLoadState("networkidle");
+          if (setup) await setup(page);
           await page.waitForTimeout(700);
           const file = path.join(OUT, `${name}-${device}-${theme}.png`);
           await page.screenshot({ path: file, fullPage: true });

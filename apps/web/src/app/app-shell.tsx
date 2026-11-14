@@ -1,20 +1,18 @@
 import { Suspense } from "react";
-import { Outlet, ScrollRestoration, useLocation, useMatches } from "react-router";
+import { Link, Outlet, ScrollRestoration, useLocation, useMatches } from "react-router";
+import { IconDatabase } from "@tabler/icons-react";
 import { AppFooter, AppHeader, TabBar } from "@/components/itei";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useDocumentTitle } from "@/lib/theme";
-import { NAV, isCurrent } from "./nav";
+import { PRODUCT_NAME, PUBLIC_NAV, isCurrent } from "./nav";
+import { IndicatorSearch } from "@/components/layout/indicator-search";
 import { ThemeMenu } from "./theme-menu";
 
 export type RouteHandle = { title?: string };
 
 /**
- * 页面外框：白底页眉（吸顶）+ 内容 + 深蓝页脚（桌面）/ 底部 TabBar（窄屏）。
- * 解决旧外框的四个问题：
- * 1. 窄屏没有导航 → 窄屏显示 TabBar；
- * 2. 页脚文字被斜切装饰遮住 → 右段文字留出装饰宽度；
- * 3. 宽屏滚动条跑到屏幕中间 → 滚动交给文档本身，内容区只限宽不自带滚动；
- * 4. 深色主题下标志落在深蓝底上 → 页眉白底，深色主题标志换成文字「ITEI」。
+ * 前台外框：白底页眉（产品名 + 发布物导航）+ 内容 + 深蓝页脚 / 窄屏 TabBar。
+ * 「数据后台」放右侧工具区，不进主导航。
  */
 export function AppShell() {
   const { pathname } = useLocation();
@@ -22,8 +20,8 @@ export function AppShell() {
   const title = [...matches].reverse().find((m) => (m.handle as RouteHandle | undefined)?.title)?.handle as
     | RouteHandle
     | undefined;
-  useDocumentTitle(title?.title);
-  const nav = NAV.map((item) => ({ ...item, current: isCurrent(item.href, pathname) }));
+  useDocumentTitle(title?.title ? `${title.title} · ${PRODUCT_NAME}` : PRODUCT_NAME);
+  const nav = PUBLIC_NAV.map((item) => ({ ...item, current: isCurrent(item.href, pathname) }));
 
   return (
     <div className="flex min-h-dvh flex-col bg-surface text-ink">
@@ -33,7 +31,23 @@ export function AppShell() {
       >
         跳到主要内容
       </a>
-      <AppHeader title={title?.title ?? "医疗器械产业数据系统"} nav={nav} actions={<ThemeMenu />} />
+      <AppHeader
+        title={PRODUCT_NAME}
+        nav={nav}
+        actions={
+          <>
+            <IndicatorSearch variant="button" className="hidden lg:inline-flex" />
+            <Link
+              to="/admin"
+              className="hidden items-center gap-1.5 border-b-2 border-transparent py-1 button text-ink transition-colors duration-150 hover:text-brand-navy focus-ring md:inline-flex"
+            >
+              <IconDatabase size={18} aria-hidden="true" />
+              数据后台
+            </Link>
+            <ThemeMenu />
+          </>
+        }
+      />
       {import.meta.env.MODE === "demo" && (
         <p role="note" className="border-b border-border bg-info-bg px-4 py-1.5 text-center caption text-ink md:px-6">
           演示版：不连后端，数据为 README 样例与虚构演示数据，保存在浏览器内存中，刷新即重置。
@@ -45,9 +59,9 @@ export function AppShell() {
         </Suspense>
       </main>
       <AppFooter
-        left="医疗器械产业数据系统（MDES）"
+        left={PRODUCT_NAME}
         center="机械工业仪器仪表综合技术经济研究所（ITEI）"
-        right="一期演示"
+        right="方法说明 · 引用格式"
       />
       <TabBar nav={nav} />
       <ScrollRestoration />

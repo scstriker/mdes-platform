@@ -1,4 +1,5 @@
-import { createBrowserRouter, createHashRouter, type RouteObject } from "react-router";
+import { createBrowserRouter, createHashRouter, Navigate, type RouteObject } from "react-router";
+import { AdminShell } from "./admin-shell";
 import { AppShell, type RouteHandle } from "./app-shell";
 import { RouteError } from "./route-error";
 
@@ -10,14 +11,17 @@ const routes: RouteObject[] = [
   {
     path: "/",
     element: <AppShell />,
-    // 首次进入时懒加载页面代码，期间显示空白底色，避免闪出无样式内容
     hydrateFallbackElement: <div className="min-h-dvh bg-surface" aria-busy="true" />,
     children: [
       {
-        // 无路径的错误边界：页面出错时外框保留
         errorElement: <RouteError />,
         children: [
-          { index: true, lazy: page(() => import("@/pages/overview")), handle: { title: "概览" } satisfies RouteHandle },
+          { index: true, lazy: page(() => import("@/pages/overview")), handle: { title: "态势总览" } satisfies RouteHandle },
+          { path: "monitoring", lazy: page(() => import("@/pages/placeholder")), handle: { title: "运行监测" } satisfies RouteHandle },
+          { path: "regions", lazy: page(() => import("@/pages/placeholder")), handle: { title: "区域画像" } satisfies RouteHandle },
+          { path: "research", lazy: page(() => import("@/pages/placeholder")), handle: { title: "研究发布" } satisfies RouteHandle },
+          { path: "system", lazy: page(() => import("@/pages/system")), handle: { title: "指标体系" } satisfies RouteHandle },
+          { path: "system/:seq", lazy: page(() => import("@/pages/system-detail")), handle: { title: "三级指标" } satisfies RouteHandle },
           {
             path: "indicators",
             handle: { title: "指标目录" } satisfies RouteHandle,
@@ -27,8 +31,24 @@ const routes: RouteObject[] = [
             ],
           },
           { path: "observations", lazy: page(() => import("@/pages/observations")), handle: { title: "观测值" } satisfies RouteHandle },
-          { path: "import", lazy: page(() => import("@/pages/import")), handle: { title: "数据导入" } satisfies RouteHandle },
+          { path: "import", element: <Navigate to="/admin/import" replace /> },
           { path: "__design", lazy: page(() => import("@/pages/design")), handle: { title: "组件验收" } satisfies RouteHandle },
+          { path: "*", lazy: page(() => import("@/pages/not-found")), handle: { title: "页面不存在" } satisfies RouteHandle },
+        ],
+      },
+    ],
+  },
+  {
+    path: "/admin",
+    element: <AdminShell />,
+    hydrateFallbackElement: <div className="min-h-dvh bg-surface" aria-busy="true" />,
+    children: [
+      {
+        errorElement: <RouteError />,
+        children: [
+          { index: true, lazy: page(() => import("@/pages/admin/overview")), handle: { title: "概况" } satisfies RouteHandle },
+          { path: "import", lazy: page(() => import("@/pages/admin/import")), handle: { title: "新建导入" } satisfies RouteHandle },
+          { path: "batches", lazy: page(() => import("@/pages/admin/batches")), handle: { title: "导入记录" } satisfies RouteHandle },
           { path: "*", lazy: page(() => import("@/pages/not-found")), handle: { title: "页面不存在" } satisfies RouteHandle },
         ],
       },
@@ -36,5 +56,4 @@ const routes: RouteObject[] = [
   },
 ];
 
-// 演示版是单个 HTML 文件，没有服务端回退，用 hash 路由（#/indicators）
 export const router = import.meta.env.MODE === "demo" ? createHashRouter(routes) : createBrowserRouter(routes);

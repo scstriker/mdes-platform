@@ -7,7 +7,9 @@ import { useTheme } from "./support";
  * 在 01 导入样例数据之后运行，页面带真实内容。
  */
 const ROUTES: [string, string][] = [
-  ["概览", "/"],
+  ["态势总览", "/"],
+  ["指标体系", "/system"],
+  ["三级指标 01", "/system/01"],
   ["指标目录 · 表格", "/indicators"],
   ["指标目录 · 矩阵", "/indicators?view=matrix"],
   ["指标档案 · 数据", "/indicators/TRD-001"],
@@ -15,7 +17,8 @@ const ROUTES: [string, string][] = [
   ["指标档案 · 规格", "/indicators/TRD-001?tab=spec"],
   ["指标档案 · 关联", "/indicators/TRD-001?tab=related"],
   ["观测值", "/observations?indicator_id=TRD-001"],
-  ["数据导入", "/import"],
+  ["数据后台 · 概况", "/admin"],
+  ["数据后台 · 导入", "/admin/import"],
   ["组件验收", "/__design"],
 ];
 

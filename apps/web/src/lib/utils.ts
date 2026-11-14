@@ -16,6 +16,7 @@ const TEXT_STYLES = [
   "label",
   "button",
   "numeral",
+  "numeral-lg",
   "numeral-sm",
   "code",
 ];

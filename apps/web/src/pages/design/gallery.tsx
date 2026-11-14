@@ -109,6 +109,7 @@ const TEXT_STYLES: [string, string, string][] = [
   ["caption", "caption", "2025/7/8 · 第 3 页"],
   ["label", "label", "报告时间"],
   ["numeral", "numeral", "01  02  03"],
+  ["numeral-lg", "numeral-lg", "2,814"],
   ["code", "code", "HS 9018.90"],
 ];
 
