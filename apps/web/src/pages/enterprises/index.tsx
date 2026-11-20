@@ -1,7 +1,9 @@
 import { useMemo, useState } from "react";
 import { useSearchParams } from "react-router";
 import { IconArrowRight, IconRotate } from "@tabler/icons-react";
+import bannerEnterprises from "@/assets/visuals/banner-enterprises.webp";
 import { DataTable, formatNumber, Tag, TextLink, type DataTableColumn } from "@/components/itei";
+import { PageVisualBanner } from "@/components/layout/page-visual-banner";
 import { Button } from "@/components/ui/button";
 import { controlClass, Input } from "@/components/ui/input";
 import { SYSTEM_INDICATORS, type SystemIndicator } from "@/content/system-v3";
@@ -301,22 +303,18 @@ export default function EnterprisesPage() {
       {/* Band 1: Page Header & Open 5-Column Rule-Line KPI Strip */}
       <section className="bg-surface" aria-labelledby="enterprises-page-title">
         <div className="mx-auto grid w-full max-w-content gap-6 px-4 py-8 md:px-8 md:py-10">
-          <header className="flex flex-wrap items-end justify-between gap-4">
-            <div className="grid max-w-3xl gap-2">
-              <p className="label text-brand-navy">三、企业与机构 · 各省市产业集聚分布</p>
-              <h1 id="enterprises-page-title" className="title-page text-brand-navy">
-                企业主体、省市分布与服务机构库
-              </h1>
-              <p className="body text-ink-muted">
-                以统一社会信用代码为实体枢纽，贯通二三类医疗器械生产企业（09）、国家级制造业单项冠军（12）、A/H
-                股上市样本池及年报分部财务数据（13–16），并协同呈现各省市集聚度与研发检测临床支撑机构（19–22）。
-              </p>
-            </div>
-            <TextLink to="/system#l1-ent" className="inline-flex items-center gap-1 body-sm font-semibold">
-              查看指标体系释义（09–22）
-              <IconArrowRight size={15} aria-hidden="true" />
-            </TextLink>
-          </header>
+          <PageVisualBanner
+            titleId="enterprises-page-title"
+            title="企业主体、省市分布与服务机构库"
+            summary="以统一社会信用代码为枢纽，汇聚生产企业（09）、制造业单项冠军（12）、上市样本池（13–16）及研发检测临床支撑机构。"
+            image={bannerEnterprises}
+            actions={
+              <TextLink to="/system#l1-ent" className="inline-flex items-center gap-1 body">
+                指标体系释义（09–22）
+                <IconArrowRight size={15} aria-hidden="true" />
+              </TextLink>
+            }
+          />
 
           <div
             role="region"

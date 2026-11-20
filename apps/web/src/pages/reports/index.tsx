@@ -1,7 +1,10 @@
 import { useCallback, useMemo, useState } from "react";
 import { useSearchParams } from "react-router";
 import { IconArrowRight, IconCheck, IconChevronDown, IconChevronUp, IconCopy, IconSearch, IconX } from "@tabler/icons-react";
+import bannerReports from "@/assets/visuals/banner-reports.webp";
 import { DataTable, formatNumber, Tag, TextLink, type DataTableColumn } from "@/components/itei";
+import { PageVisualBanner } from "@/components/layout/page-visual-banner";
+import { ReportCoverThumb, type ReportCoverVariant } from "@/components/layout/report-cover-thumb";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
@@ -311,25 +314,22 @@ export default function ReportsPage() {
       {/* Band 1: Header, Open 4-Column Summary Strip, Search & Underline Tab Bar */}
       <section className="border-b border-border bg-surface">
         <div className="mx-auto grid w-full max-w-content gap-6 px-4 pt-8 md:px-8 md:pt-10">
-          <header className="grid gap-3">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <p className="label text-brand-navy">四、政策与监管 · 五、知识产权与标准 · 智库成果</p>
-              <div className="flex flex-wrap items-center gap-4 body-sm">
-                <TextLink to="/system#l1-pol">
-                  四、政策与监管体系（23–32）
-                  <IconArrowRight size={14} className="ml-1 inline" aria-hidden="true" />
+          <PageVisualBanner
+            title="研究报告、政策法规与技术标准库"
+            summary="汇聚 ITEI 季度运行监测报告、专题简报，以及国家及地方政策条款、注册审查指导原则与现行 GB/YY 标准档案。"
+            image={bannerReports}
+            actions={
+              <>
+                <TextLink to="/system#l1-pol" className="inline-flex items-center gap-1 body">
+                  政策与监管体系（23–32）
+                  <IconArrowRight size={15} aria-hidden="true" />
                 </TextLink>
-                <TextLink to="/system#l1-ip" className="text-ink-muted">
-                  五、知识产权与标准（35–37）
+                <TextLink to="/system#l1-ip" className="body text-ink-muted">
+                  知识产权与标准（35–37）
                 </TextLink>
-              </div>
-            </div>
-
-            <h1 className="title-page text-brand-navy">研究报告、政策法规与技术标准库</h1>
-            <p className="max-w-4xl body-lg text-ink-muted">
-              整合研究所季度监测报告与专题简报，并按“原始文件留存 + 条款级 JSON 结构化解析”双轨机制归档国家及地方医疗器械政策、CMDE 注册审查指导原则、监管统计年报及现行 GB/YY 标准索引。
-            </p>
-          </header>
+              </>
+            }
+          />
 
           {/* Open 4-Column Rule-Line Summary Strip */}
           <div
@@ -450,11 +450,19 @@ export default function ReportsPage() {
                 </div>
               ) : (
                 <ol className="divide-y divide-border border-y border-border">
-                  {filteredBriefings.map((item) => {
+                  {filteredBriefings.map((item, idx) => {
                     const expanded = Boolean(expandedBriefingIds[item.id]);
                     const isCopied = copiedId === item.id;
+                    const coverVariant: ReportCoverVariant =
+                      idx % 3 === 0 ? "quarterly" : idx % 3 === 1 ? "domestic" : "supply";
+                    const coverLabel =
+                      idx % 3 === 0 ? "监测报告" : idx % 3 === 1 ? "专题简报" : "风险评估";
                     return (
-                      <li key={item.id} className="grid gap-3 py-6">
+                      <li key={item.id} className="grid gap-4 py-6 sm:grid-cols-12">
+                        <div className="sm:col-span-2">
+                          <ReportCoverThumb variant={coverVariant} label={coverLabel} className="w-full sm:w-28" />
+                        </div>
+                        <div className="grid gap-3 sm:col-span-10">
                         <div className="flex flex-wrap items-center justify-between gap-2">
                           <div className="flex flex-wrap items-center gap-3">
                             <span className="code tabular-nums text-ink-muted">{item.date}</span>
@@ -530,6 +538,7 @@ export default function ReportsPage() {
                               </>
                             )}
                           </button>
+                        </div>
                         </div>
                       </li>
                     );

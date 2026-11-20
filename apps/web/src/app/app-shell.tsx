@@ -60,7 +60,7 @@ export function AppShell() {
           <Outlet />
         </Suspense>
       </main>
-      {pathname !== "/__design" && <PublicationFooter />}
+      {pathname !== "/__design" && pathname !== "/" && <PublicationFooter />}
       <AppFooter
         left={PRODUCT_NAME}
         center="机械工业仪器仪表综合技术经济研究所（ITEI）"

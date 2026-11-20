@@ -73,6 +73,46 @@ export type RegulatoryArchiveItem = {
   date: string;
 };
 
+export type HeroSlideKind = "bluebook" | "medtech" | "reg-chart" | "trade-chart";
+
+export type HeroCarouselSlide = {
+  id: string;
+  kind: HeroSlideKind;
+  thumbLabel: string;
+  title: string;
+  synopsis: string;
+  href: string;
+  ctaLabel: string;
+  /** 仅海报帧使用，叠加在无文字 Gemini 智库底图左侧留白处 */
+  posterKicker?: string;
+  posterLines?: readonly [string, string];
+  posterFoot?: string;
+};
+
+export type HomepageStat = {
+  id: string;
+  label: string;
+  value: number;
+  digits?: number;
+  unit: string;
+  href: string;
+};
+
+export type HomepageInsight = {
+  id: string;
+  title: string;
+  href: string;
+  featured?: boolean;
+};
+
+export type HomepageBriefing = {
+  id: string;
+  coverVariant: "quarterly" | "domestic";
+  coverLabel: string;
+  title: string;
+  href: string;
+};
+
 export const ISSUE = {
   eyebrow: "机械工业仪器仪表综合技术经济研究所（ITEI） · 产业数据与决策支撑系统",
   heroTitle: "医疗器械产业数据与运行分析平台",
@@ -405,4 +445,110 @@ export const ISSUE = {
       date: "2026-07-30",
     },
   ] satisfies readonly RegulatoryArchiveItem[],
+
+  /** 首页 4 帧经典克制轮播：2 张 Gemini 多模态智库视觉 + 2 张 ECharts 真实趋势主图 */
+  heroSlides: [
+    {
+      id: "slide-bluebook",
+      kind: "bluebook",
+      thumbLabel: "季度监测报告",
+      title: "《2026 年前三季度医疗器械产业运行监测报告》发布",
+      synopsis:
+        "2026 年 10 月，机械工业仪器仪表综合技术经济研究所依托《指标体系 V3.0》发布总第 3 期季度监测报告。前三季度批准第三类首次注册 2,814 件、国产占比升至 71.2%，获批创新器械 49 件，海关出口 312.6 亿美元。",
+      href: "/reports",
+      ctaLabel: "查看报告详情",
+      posterKicker: "ITEI · 2026 年第 3 季度",
+      posterLines: ["医疗器械产业运行", "监测报告"],
+      posterFoot: "机械工业仪器仪表综合技术经济研究所",
+    },
+    {
+      id: "slide-medtech",
+      kind: "medtech",
+      thumbLabel: "创新器械专题",
+      title: "创新医疗器械审评提速，高端影像与有源手术装备成核心拉动力",
+      synopsis:
+        "2026 年前三季度国家药监局正式批准创新医疗器械 49 件，较上年同期增加 11 件。腔镜手术机器人、5.0T 超高场磁共振、植入式脑机接口等高端装备集中获批，审评转正周期稳步缩短。",
+      href: "/products?channel=innov",
+      ctaLabel: "进入注册与产品库",
+      posterKicker: "创新审查专题 · 指标 02",
+      posterLines: ["高端医疗装备创新", "获批态势观察"],
+      posterFoot: "前三季度获批 49 件 · 同比增 11 件",
+    },
+    {
+      id: "slide-reg",
+      kind: "reg-chart",
+      thumbLabel: "三类注册趋势",
+      title: "第三类医疗器械首次注册国产占比连续五年攀升至七成",
+      synopsis:
+        "2021 年至 2026 年前三季度，境内第三类首次注册占比由 52.1% 提升至 71.2%。有源手术器械、医用成像设备与无源植入成为本土替代主要拉动赛道，粤苏沪京浙五省市承载逾六成新增量。",
+      href: "/products",
+      ctaLabel: "查看注册结构明细",
+    },
+    {
+      id: "slide-trade",
+      kind: "trade-chart",
+      thumbLabel: "海关进出口走势",
+      title: "医疗器械贸易顺差稳步扩大，高端核心部件集中度仍须关注",
+      synopsis:
+        "2026 年前三季度医疗器械累计出口 312.6 亿美元（同比 +6.6%），进口 268.4 亿美元（同比 -2.1%）。中端常规设备本土替代提速，但超导磁体与高端探测器进口来源集中度仍逾七成。",
+      href: "/trade",
+      ctaLabel: "进入进出口贸易库",
+    },
+  ] satisfies readonly HeroCarouselSlide[],
+
+  /** 首页极静单行 4 项压舱石核心数字 */
+  homepageStats: [
+    { id: "stat-reg", label: "三类首次注册", value: 2814, unit: "件", href: "/products" },
+    { id: "stat-innov", label: "获批创新器械", value: 49, unit: "件", href: "/products?channel=innov" },
+    { id: "stat-exp", label: "器械出口额", value: 312.6, digits: 1, unit: "亿美元", href: "/trade" },
+    { id: "stat-imp", label: "器械进口额", value: 268.4, digits: 1, unit: "亿美元", href: "/trade" },
+  ] satisfies readonly HomepageStat[],
+
+  /** 首页「ITEI 研判」5 条纯单行（零摘要段落，对标信通院 CAICT 观点） */
+  homepageInsights: [
+    {
+      id: "ins-1",
+      title: "进口回落伴随结构升级，高端影像核心部件来源集中度仍逾七成",
+      href: "/trade",
+      featured: true,
+    },
+    {
+      id: "ins-2",
+      title: "创新审查持续向有源手术装备与高端植介入倾斜",
+      href: "/products?channel=innov",
+    },
+    {
+      id: "ins-3",
+      title: "粤苏沪京浙五省市承载逾六成第三类首次注册新增量",
+      href: "/enterprises",
+    },
+    {
+      id: "ins-4",
+      title: "国产第三类医疗器械首次注册占比连续五年稳步攀升",
+      href: "/products",
+    },
+    {
+      id: "ins-5",
+      title: "海关出口额与上市龙头境外营收口径差异辨析",
+      href: "/reports",
+    },
+  ] satisfies readonly HomepageInsight[],
+
+  /** 首页「权威发布」2 份旗舰报告（Gemini 封面图 + 纯单行报告名） */
+  homepageBriefings: [
+    {
+      id: "pub-1",
+      coverVariant: "quarterly",
+      coverLabel: "监测报告",
+      title: "2026 年前三季度医疗器械产业运行监测报告",
+      href: "/reports",
+    },
+    {
+      id: "pub-2",
+      coverVariant: "domestic",
+      coverLabel: "专题简报",
+      title: "国产第三类首次注册突破七成赛道解构简报",
+      href: "/reports",
+    },
+  ] satisfies readonly HomepageBriefing[],
 } as const;
