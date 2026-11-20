@@ -42,7 +42,7 @@ test.describe.serial("README 验收样例", () => {
 
   test("导入后目录同步更新", async ({ page }) => {
     await page.goto("/");
-    await expect(page.getByRole("heading", { level: 1 })).toContainText(/创新医疗器械|国产三类/);
+    await expect(page.getByRole("heading", { level: 1 })).toContainText("医疗器械产业数据与运行分析平台");
     await page.goto("/indicators?data=with");
     await expect(page.getByText(/共 5 项/)).toBeVisible();
   });

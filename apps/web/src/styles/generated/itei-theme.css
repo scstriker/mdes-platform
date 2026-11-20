@@ -33,6 +33,10 @@
   --color-warning-bg: var(--warning-bg);
   --color-danger-bg: var(--danger-bg);
   --color-info-bg: var(--info-bg);
+  --color-banner-bg: var(--banner-bg);
+  --color-on-banner: var(--on-banner);
+  --color-on-banner-muted: var(--on-banner-muted);
+  --color-banner-border: var(--banner-border);
   --color-chart-1: var(--chart-1);
   --color-chart-2: var(--chart-2);
   --color-chart-3: var(--chart-3);
