@@ -65,14 +65,49 @@ test.describe("前端重构专项验收：像素对齐、多子页与去卡片�
     await expect(page).toHaveURL(/\/reports$/);
   });
 
-  test("3. 首页 Banner 分面检索可携带查询词直达对应业务子页面", async ({ page }) => {
+  test("3. 首页分域检索直达子页，且经典克制首屏轮播与全站视觉图正常加载", async ({ page }) => {
     await page.goto("/");
+    // 等待懒加载首页挂载并校验经典克制轮播联动
+    const h1 = page.locator("main h1");
+    await expect(h1).toContainText("医疗器械产业运行监测报告");
+    await page.waitForLoadState("networkidle");
+
+    // 验证首页图片均完整加载（含 Gemini 多模态视觉图）
+    await expect
+      .poll(async () => {
+        const statuses = await page.locator("main img").evaluateAll((imgs) =>
+          imgs.map((img) => ({
+            complete: (img as HTMLImageElement).complete,
+            w: (img as HTMLImageElement).naturalWidth,
+          })),
+        );
+        return statuses.length >= 4 && statuses.every((s) => s.complete && s.w > 0);
+      })
+      .toBe(true);
+
+    // 验证左侧底缘缩略图、左右轻箭头与右侧分页圆点三向联动切换
+    await page.getByRole("button", { name: /^第 2 帧/ }).click();
+    await expect(h1).toContainText("创新医疗器械审评提速");
+    await page.getByRole("button", { name: "下一帧" }).click();
+    await expect(h1).toContainText("国产占比连续五年攀升至七成");
+    await page.getByRole("button", { name: /^切换到第 4 帧/ }).click();
+    await expect(h1).toContainText("贸易顺差稳步扩大");
+
+    // 验证首页外显分域检索携带查询词直达对应业务子页
     const bannerSearch = page.locator("section").first().locator("form[role=search]");
     await bannerSearch.getByLabel("检索范围").selectOption("/products");
     await bannerSearch.locator("input").first().fill("手术");
     await bannerSearch.getByRole("button", { name: /检索/ }).click();
     await expect(page).toHaveURL(/\/products\?q=/);
     await expect(page.getByRole("heading", { level: 1, name: /注册准入与产品数据库/ })).toBeVisible();
+    await expect
+      .poll(async () => {
+        const widths = await page.locator("main img").evaluateAll((imgs) =>
+          imgs.map((img) => (img as HTMLImageElement).naturalWidth),
+        );
+        return widths.some((w) => w > 0);
+      })
+      .toBe(true);
   });
 
   test("4. 按需输出多视口双主题验收截图", async ({ page }) => {

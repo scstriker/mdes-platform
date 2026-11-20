@@ -2,7 +2,9 @@ import { useCallback, useMemo, useState } from "react";
 import { useSearchParams } from "react-router";
 import { IconArrowRight, IconSearch, IconUpload, IconX } from "@tabler/icons-react";
 import type { Observation } from "@mdes/shared";
+import bannerTrade from "@/assets/visuals/banner-trade.webp";
 import { DataTable, formatNumber, Tag, TextLink, type DataTableColumn } from "@/components/itei";
+import { PageVisualBanner } from "@/components/layout/page-visual-banner";
 import { QueryError } from "@/components/layout/query-error";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -202,25 +204,22 @@ export default function TradePage() {
       {/* Band 1: Header & Open 4-Column Rule-Line KPI Strip */}
       <section className="bg-surface">
         <div className="mx-auto grid w-full max-w-content gap-6 px-4 py-8 md:px-8 md:py-10">
-          <header className="grid gap-3">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <p className="label text-brand-navy">六、进出口贸易 · 海关 HS 编码与伙伴集中度</p>
-              <div className="flex flex-wrap items-center gap-4 body-sm">
-                <TextLink to="/system/38">
-                  38 号三级指标口径与释义
-                  <IconArrowRight size={14} className="ml-1 inline" aria-hidden="true" />
+          <PageVisualBanner
+            title="医疗器械进出口贸易与供应链集中度"
+            summary="基于中国海关 8 位 HS 编码统计，跟踪五大品类进出口规模演变与高端诊疗装备原产国集中度（CR3）。"
+            image={bannerTrade}
+            actions={
+              <>
+                <TextLink to="/system/38" className="inline-flex items-center gap-1 body">
+                  38 号指标口径
+                  <IconArrowRight size={15} aria-hidden="true" />
                 </TextLink>
-                <TextLink to="/indicators?cluster=TRD" className="text-ink-muted">
+                <TextLink to="/indicators?cluster=TRD" className="body text-ink-muted">
                   TRD 工程指标簇
                 </TextLink>
-              </div>
-            </div>
-
-            <h1 className="title-page text-brand-navy">医疗器械进出口贸易与供应链集中度</h1>
-            <p className="max-w-4xl body-lg text-ink-muted">
-              基于中国海关 8 位 HS 商品编码与联合国 UN Comtrade 双边贸易统计，跟踪五大医疗器械品类进出口规模、贸易顺逆差演变及高端医疗装备原产国集中度（CR3）。
-            </p>
-          </header>
+              </>
+            }
+          />
 
           <div
             aria-label="进出口贸易核心指标"

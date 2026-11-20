@@ -1,7 +1,9 @@
 import { useMemo, useState } from "react";
 import { useSearchParams } from "react-router";
 import { IconArrowRight, IconRotate } from "@tabler/icons-react";
+import bannerProducts from "@/assets/visuals/banner-products.webp";
 import { DataTable, Tag, TextLink, type DataTableColumn, type TagTone } from "@/components/itei";
+import { PageVisualBanner } from "@/components/layout/page-visual-banner";
 import { Button } from "@/components/ui/button";
 import { controlClass, Input } from "@/components/ui/input";
 import { SYSTEM_INDICATORS, type SystemIndicator } from "@/content/system-v3";
@@ -300,22 +302,18 @@ export default function ProductsPage() {
       {/* Band 1: Page Header & Open 5-Column Rule-Line KPI Strip */}
       <section className="bg-surface" aria-labelledby="products-page-title">
         <div className="mx-auto grid w-full max-w-content gap-6 px-4 py-8 md:px-8 md:py-10">
-          <header className="flex flex-wrap items-end justify-between gap-4">
-            <div className="grid max-w-3xl gap-2">
-              <p className="label text-brand-navy">一、审评注册与上市准入 · 二、产品档案与招采</p>
-              <h1 id="products-page-title" className="title-page text-brand-navy">
-                注册准入与产品数据库
-              </h1>
-              <p className="body text-ink-muted">
-                贯通第三类医疗器械注册证（01）、创新特别审查获批（02）、优先审批通道（03）与唯一标识 UDI
-                规格型号明细（05），并与国家药监局年度统计报告（28）交叉核验口径一致性。
-              </p>
-            </div>
-            <TextLink to="/system#l1-reg" className="inline-flex items-center gap-1 body-sm font-semibold">
-              查看指标体系释义（01–08）
-              <IconArrowRight size={15} aria-hidden="true" />
-            </TextLink>
-          </header>
+          <PageVisualBanner
+            titleId="products-page-title"
+            title="注册准入与产品数据库"
+            summary="贯通三类注册证（01）、创新特别审查（02）、优先审批（03）与 UDI 规格明细（05），并与药监监管年报交叉核验口径。"
+            image={bannerProducts}
+            actions={
+              <TextLink to="/system#l1-reg" className="inline-flex items-center gap-1 body">
+                指标体系释义（01–08）
+                <IconArrowRight size={15} aria-hidden="true" />
+              </TextLink>
+            }
+          />
 
           <div
             role="region"
