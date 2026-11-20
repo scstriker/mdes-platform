@@ -41,6 +41,8 @@ export type DataTableColumn<T extends RowData> = {
   primary?: boolean;
   /** 窄屏卡片里不显示 */
   hideOnCard?: boolean;
+  /** 桌面表格固定列宽类名（如 w-16、w-28、w-44），配合 fixedLayout 保证多表对齐 */
+  colClassName?: string;
 };
 
 export type DataTablePagination = {
@@ -62,6 +64,8 @@ type DataTableProps<T extends RowData> = {
   error?: ReactNode;
   empty?: ReactNode;
   dense?: boolean;
+  /** 开启 table-fixed 与 colgroup，确保同页多张分组子表列宽严格一致 */
+  fixedLayout?: boolean;
   /** 横向滚动时固定首列 */
   stickyFirstColumn?: boolean;
   /** 服务端排序：传入后不在前端排序 */
@@ -113,6 +117,7 @@ export function DataTable<T extends RowData>({
   error,
   empty = "暂无数据",
   dense,
+  fixedLayout,
   stickyFirstColumn,
   sorting: controlledSorting,
   onSortingChange,
@@ -177,8 +182,15 @@ export function DataTable<T extends RowData>({
     <div className={cn("grid gap-3", className)}>
       {/* 桌面：表格 */}
       <div className="hidden md:block">
-        <Table dense={dense} aria-busy={loading || undefined}>
+        <Table dense={dense} className={cn(fixedLayout && "table-fixed")} aria-busy={loading || undefined}>
           <TableCaption className="sr-only">{caption}</TableCaption>
+          {fixedLayout && (
+            <colgroup>
+              {columns.map((col) => (
+                <col key={col.key} className={col.colClassName} />
+              ))}
+            </colgroup>
+          )}
           <TableHeader>
             {table.getHeaderGroups().map((group) => (
               <TableRow key={group.id}>
@@ -254,13 +266,13 @@ export function DataTable<T extends RowData>({
         </Table>
       </div>
 
-      {/* 窄屏：卡片列表 */}
+      {/* 窄屏：开放式横线列表（无四边框卡片墙） */}
       <div className="md:hidden" aria-busy={loading || undefined}>
         <p className="sr-only">{caption}</p>
         {status === "loading" && (
-          <ul className="grid gap-3">
+          <ul className="divide-y divide-border border-y border-border">
             {Array.from({ length: 3 }, (_, r) => (
-              <li key={r} className="grid gap-2 border border-border bg-surface-raised p-4">
+              <li key={r} className="grid gap-2 py-3.5">
                 <Skeleton className="h-5 w-1/2" />
                 <Skeleton className="h-4 w-3/4" />
                 <Skeleton className="h-4 w-2/3" />
@@ -269,12 +281,12 @@ export function DataTable<T extends RowData>({
           </ul>
         )}
         {(status === "error" || status === "empty") && (
-          <div className="border border-border bg-surface-raised p-4 body">{stateMessage}</div>
+          <div className="border-y border-border py-4 body">{stateMessage}</div>
         )}
         {status === "ready" && (
-          <ul className="grid gap-3">
+          <ul className="divide-y divide-border border-y border-border">
             {rows.map((row) => (
-              <li key={row.id} className="grid gap-3 border border-border bg-surface-raised p-4">
+              <li key={row.id} className="grid gap-2.5 py-3.5">
                 <div className={cn("title-nav text-brand-navy", primary.type === "code" && "code font-bold")}>
                   {renderCell(primary, row.original)}
                 </div>

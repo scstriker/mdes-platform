@@ -7,7 +7,7 @@ import { cn } from "@/lib/utils";
  */
 function Table({ className, dense = false, ...props }: React.ComponentProps<"table"> & { dense?: boolean }) {
   return (
-    <div data-slot="table-container" className="relative w-full overflow-x-auto">
+    <div data-slot="table-container" tabIndex={0} className="relative w-full overflow-x-auto focus-ring">
       <table
         data-slot="table"
         data-dense={dense || undefined}

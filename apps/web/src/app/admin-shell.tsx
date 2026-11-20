@@ -59,7 +59,8 @@ export function AdminShell() {
                       <span
                         key={item.href}
                         title="本轮未开放"
-                        className="flex items-center justify-between gap-2 rounded-none px-3 py-2 body text-ink-disabled"
+                        aria-disabled="true"
+                        className="flex items-center justify-between gap-2 rounded-none px-3 py-2 body text-ink-muted"
                       >
                         {item.label}
                         <span className="caption">未开放</span>

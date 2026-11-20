@@ -4,6 +4,7 @@ export const mapper23: IndicatorMapper = {
   seq: "23",
   name: "国家及地方医疗器械政策条款",
   channel: "file",
+  indicatorId: "POL-116",
   status: "ready",
   note: "原始 PDF/HTML 与解析 JSON 按文件名配对上传，两者都保存。",
   fields: [

@@ -5,8 +5,8 @@ import { useTheme } from "./support";
 test.describe("外框 · 桌面", () => {
   test("页眉导航标出当前页；深链与未知路径", async ({ page }) => {
     await page.goto("/system");
-    await expect(page.locator("header nav [aria-current=page]")).toHaveText("指标体系");
-    await expect(page.getByRole("heading", { level: 1 })).toContainText("指标体系");
+    await expect(page.locator("header nav [aria-current=page]")).toHaveText("指标目录");
+    await expect(page.getByRole("heading", { level: 1 })).toContainText("指标目录");
     await page.goto("/no-such-page");
     await expect(page.getByRole("heading", { level: 1 })).toHaveText("页面不存在");
   });
@@ -51,9 +51,9 @@ test.describe("外框 · 窄屏", () => {
     await expect(tabbar).toHaveCount(1);
     await expect(tabbar).toBeVisible();
     await expect(page.getByRole("contentinfo")).toBeHidden();
-    await tabbar.getByRole("link", { name: "指标体系" }).tap();
+    await tabbar.getByRole("link", { name: "指标目录" }).tap();
     await expect(page).toHaveURL(/\/system$/);
-    await expect(tabbar.locator("[aria-current=page]")).toHaveText("指标体系");
+    await expect(tabbar.locator("[aria-current=page]")).toHaveText("指标目录");
   });
 
   test("观测值页：窄屏只露出「指标」，其余条件收进「更多条件」", async ({ page }) => {
@@ -65,7 +65,7 @@ test.describe("外框 · 窄屏", () => {
 
   test("内容不被 TabBar 挡住：滚到底时最后一块内容在 TabBar 之上", async ({ page }) => {
     await page.goto("/system");
-    await expect(page.getByRole("heading", { name: /指标体系/ })).toBeVisible();
+    await expect(page.getByRole("heading", { name: /指标目录/ })).toBeVisible();
     await page.waitForLoadState("networkidle");
     await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
     const tabTop = (await page.getByRole("navigation", { name: "主导航" }).boundingBox())!.y;

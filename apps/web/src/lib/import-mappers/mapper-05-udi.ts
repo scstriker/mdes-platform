@@ -4,6 +4,7 @@ export const mapper05: IndicatorMapper = {
   seq: "05",
   name: "医疗器械UDI规格型号明细",
   channel: "table",
+  indicatorId: "REG-022",
   primaryKey: "udi_di",
   status: "pending",
   note: "正式字段清单待补；壳层可选该指标，对照表显示「模板待补」。",

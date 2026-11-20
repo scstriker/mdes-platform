@@ -23,13 +23,13 @@ type AppHeaderProps = {
 export function AppHeader({ title, nav, actions, sticky = true, className }: AppHeaderProps) {
   return (
     <header className={cn("bg-surface", sticky && "sticky top-0 z-(--z-header)", className)}>
-      <div className="flex h-14 items-center gap-4 px-4 md:gap-6 md:px-6">
+      <div className="mx-auto flex h-14 w-full max-w-content items-center gap-4 px-4 md:gap-5 md:px-8">
         <Link to="/" className="flex shrink-0 items-center focus-ring" aria-label="ITEI，返回首页">
           <IteiLogo />
         </Link>
         <div className="min-w-0 flex-1 truncate title-header text-brand-navy">{title}</div>
         {nav.length > 0 && (
-          <nav aria-label="主导航" className="hidden h-full items-center gap-6 md:flex">
+          <nav aria-label="主导航" className="hidden h-full items-center gap-5 lg:gap-6 md:flex">
             {nav.map((item) => (
               <Link
                 key={item.href}

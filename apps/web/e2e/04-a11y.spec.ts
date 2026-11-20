@@ -7,18 +7,23 @@ import { useTheme } from "./support";
  * 在 01 导入样例数据之后运行，页面带真实内容。
  */
 const ROUTES: [string, string][] = [
-  ["态势总览", "/"],
-  ["指标体系", "/system"],
-  ["三级指标 01", "/system/01"],
-  ["指标目录 · 表格", "/indicators"],
-  ["指标目录 · 矩阵", "/indicators?view=matrix"],
+  ["首页", "/"],
+  ["注册与产品", "/products"],
+  ["企业与机构", "/enterprises"],
+  ["进出口贸易", "/trade"],
+  ["政策与报告", "/reports"],
+  ["指标目录", "/system"],
+  ["指标详情 01", "/system/01"],
+  ["指标详情 35", "/system/35"],
+  ["工程指标库 · 表格", "/indicators"],
+  ["工程指标库 · 矩阵", "/indicators?view=matrix"],
   ["指标档案 · 数据", "/indicators/TRD-001"],
   ["指标档案 · 对比", "/indicators/TRD-005?split=d.partner"],
   ["指标档案 · 规格", "/indicators/TRD-001?tab=spec"],
   ["指标档案 · 关联", "/indicators/TRD-001?tab=related"],
   ["观测值", "/observations?indicator_id=TRD-001"],
-  ["数据后台 · 概况", "/admin"],
-  ["数据后台 · 导入", "/admin/import"],
+  ["数据管理 · 概况", "/admin"],
+  ["数据管理 · 导入", "/admin/import"],
   ["组件验收", "/__design"],
 ];
 

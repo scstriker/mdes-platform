@@ -5,7 +5,7 @@ export const mapper01: IndicatorMapper = {
   seq: "01",
   name: "医疗器械注册与备案明细",
   channel: "table",
-  indicatorId: "REG-001",
+  indicatorId: "REG-012",
   primaryKey: "reg_no",
   status: "ready",
   fields: [
