@@ -13,13 +13,13 @@ test.describe("请求失败不被当成空数据", () => {
           })
         : route.continue(),
     );
-    await page.goto("/");
+    await page.goto("/admin");
     const alert = page.getByRole("alert");
     await expect(alert).toContainText("错误：服务器内部错误，请稍后重试");
-    await expect(page.getByText("指标总数")).toHaveCount(0);
+    await expect(page.getByText("一期指标纳入")).toHaveCount(0);
     fail = false;
     await alert.getByRole("button", { name: "重试" }).click();
-    await expect(page.getByText("指标总数")).toBeVisible();
+    await expect(page.getByText("一期指标纳入")).toBeVisible();
   });
 
   test("网络断开：提示无法连接服务器", async ({ page }) => {

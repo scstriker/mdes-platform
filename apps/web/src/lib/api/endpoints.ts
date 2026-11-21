@@ -1,6 +1,7 @@
 import { request } from "./client";
 import type {
   Cluster,
+  GlobalSearchResult,
   Health,
   ImportBatch,
   ImportResult,
@@ -23,6 +24,8 @@ export const api = {
   indicator: (id: string, o?: Opts) => request<Indicator>(`/api/indicators/${encodeURIComponent(id)}`, o),
   observations: (params: ObservationQuery = {}, o?: Opts) =>
     request<ObservationPage>("/api/observations", { ...o, query: params }),
+  search: (params: { q: string; limit?: number }, o?: Opts) =>
+    request<GlobalSearchResult>("/api/search", { ...o, query: params }),
   batches: (o?: Opts) => request<{ items: ImportBatch[] }>("/api/import/batches", o),
   importCsv: (file: File, o?: Opts) => {
     const fd = new FormData();

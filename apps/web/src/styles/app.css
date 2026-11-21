@@ -12,3 +12,10 @@
 @import "./shadcn-theme.css";
 @import "./itei-utilities.css";
 @import "./itei-components.css";
+
+@layer base {
+  input[type="search"]::-webkit-search-cancel-button {
+    -webkit-appearance: none;
+    appearance: none;
+  }
+}

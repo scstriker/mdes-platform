@@ -8,10 +8,17 @@
  * seedStatements() 也供集成测试直接使用。
  */
 import { execFileSync } from "node:child_process";
+import { createRequire } from "node:module";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { inferSourceKind } from "./inferSourceKind";
+
+/** Windows 上 execFileSync("npx") 会 ENOENT（npx.cmd）；直接跑本地 wrangler 入口 */
+function wranglerEntry(): string {
+  const require = createRequire(import.meta.url);
+  return resolve(dirname(require.resolve("wrangler/package.json")), "bin/wrangler.js");
+}
 
 type SeedFile = {
   clusters: { code: string; name: string }[];
@@ -77,11 +84,15 @@ function main() {
   mkdirSync(dirname(file), { recursive: true });
   writeFileSync(file, seedStatements().map((s) => `${s};`).join("\n") + "\n");
   const target = args.includes("--remote") || args.includes("--local") ? [] : ["--local"];
-  execFileSync("npx", ["wrangler", "d1", "execute", DATABASE_NAME, ...target, ...args, "--file", file], {
-    cwd: API_ROOT,
-    stdio: "inherit",
-    env: { ...process.env, WRANGLER_SEND_METRICS: "false" },
-  });
+  execFileSync(
+    process.execPath,
+    [wranglerEntry(), "d1", "execute", DATABASE_NAME, ...target, ...args, "--file", file],
+    {
+      cwd: API_ROOT,
+      stdio: "inherit",
+      env: { ...process.env, WRANGLER_SEND_METRICS: "false" },
+    },
+  );
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

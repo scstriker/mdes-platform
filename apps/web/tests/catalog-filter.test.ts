@@ -35,6 +35,7 @@ describe("指标目录筛选", () => {
 
   it("多个条件同时生效；搜索匹配编号或名称，不区分大小写", () => {
     expect(filterIndicators(ITEMS, { ...NONE, cluster: "TRD", q: "trd-00" }).map((i) => i.id)).toEqual(["TRD-001", "TRD-008"]);
+    expect(filterIndicators(ITEMS, { ...NONE, q: "TRD 进口" }).map((i) => i.id)).toEqual(["TRD-001"]);
     expect(filterIndicators(ITEMS, { ...NONE, q: "注册" }).map((i) => i.id)).toEqual(["REG-001"]);
     expect(filterIndicators(ITEMS, { ...NONE, data: "with" }).map((i) => i.id)).toEqual(["TRD-001"]);
     expect(filterIndicators(ITEMS, { ...NONE, data: "without", cluster: "REG" })).toHaveLength(2);
