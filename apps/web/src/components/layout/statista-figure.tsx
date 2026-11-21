@@ -4,7 +4,8 @@ import { Tag, type TagTone } from "@/components/itei";
 import { Table, TableBody, TableCaption, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { LazyChart } from "@/lib/charts/lazy-chart";
 import type { ChartOption } from "@/lib/charts/echarts";
-import type { ChartTheme } from "@/lib/charts/theme";
+import { buildFigureCardSvg, extractInnerSvgPayload } from "@/lib/charts/figure-svg";
+import { readChartTheme, type ChartTheme } from "@/lib/charts/theme";
 import { downloadText, toCsv } from "@/lib/download";
 import { cn } from "@/lib/utils";
 
@@ -73,16 +74,25 @@ export function StatistaFigure({
 }: StatistaFigureProps) {
   const [mode, setMode] = useState<"chart" | "table">("chart");
   const figureRef = useRef<HTMLElement>(null);
+  const plotRef = useRef<HTMLDivElement>(null);
   const hasTable = Boolean(tableColumns && tableColumns.length > 0 && tableRows && tableRows.length > 0);
 
   function handleExportSvg() {
-    const svg = figureRef.current?.querySelector("svg");
-    if (!svg) return;
-    const clone = svg.cloneNode(true) as SVGSVGElement;
-    if (!clone.getAttribute("xmlns")) {
-      clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
-    }
-    const serialized = `<?xml version="1.0" encoding="UTF-8"?>\n${clone.outerHTML}`;
+    const el = figureRef.current;
+    const svg = plotRef.current?.querySelector("svg");
+    if (!el || !svg) return;
+    const payload = extractInnerSvgPayload(svg, height);
+    const theme = readChartTheme(el);
+    const serialized = buildFigureCardSvg({
+      ...payload,
+      eyebrow,
+      title,
+      subtitle,
+      badgeLabel: badge?.label,
+      source,
+      note,
+      theme,
+    });
     downloadText(`${exportName}.svg`, serialized, "image/svg+xml;charset=utf-8");
   }
 
@@ -155,7 +165,7 @@ export function StatistaFigure({
         {controls && <div className="border-b border-border bg-surface-sunken px-4 py-2 md:px-5">{controls}</div>}
 
         {/* 3. Plot Canvas / Accessible Inline Table */}
-        <div className="px-4 py-3.5 md:px-5">
+        <div ref={plotRef} data-slot="figure-canvas" className="px-4 py-3.5 md:px-5">
           {mode === "chart" || !hasTable ? (
             <LazyChart option={option} ariaLabel={ariaLabel} height={height} />
           ) : (

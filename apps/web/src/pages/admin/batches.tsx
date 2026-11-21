@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router";
-import type { ImportBatch } from "@mdes/shared";
+import { matchesQuery, type ImportBatch } from "@mdes/shared";
 import { DataTable, EmptyState, SectionTitle, Tag, TextLink, type DataTableColumn } from "@/components/itei";
 import { QueryError } from "@/components/layout/query-error";
 import { Button } from "@/components/ui/button";
@@ -30,7 +30,7 @@ export default function AdminBatchesPage() {
       if (statusFilter !== "all" && b.status !== statusFilter) return false;
       if (!q) return true;
       const statusText = IMPORT_STATUS[b.status]?.label ?? b.status;
-      return `${b.filename} ${b.id} ${statusText}`.toLowerCase().includes(q);
+      return matchesQuery(`${b.filename} ${b.id} ${statusText} ${b.status}`, q);
     });
   }, [batches.data, statusFilter, q]);
 

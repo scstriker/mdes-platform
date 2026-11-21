@@ -43,7 +43,7 @@ const routes: RouteObject[] = [
           { path: "reports", lazy: page(() => import("@/pages/reports")), handle: { title: "政策与报告" } satisfies RouteHandle },
           { path: "system", lazy: page(() => import("@/pages/system")), handle: { title: "指标目录" } satisfies RouteHandle },
           { path: "system/:seq", lazy: page(() => import("@/pages/system-detail")), handle: { title: "指标详情" } satisfies RouteHandle },
-          // 工程底座与原始观测值路由已收归 /admin/* 治理闭环，旧路径保留参数平滑跳转
+          // 前后台信息架构与路由分层（生产环境访问控制由网关侧 Cloudflare Access 独立承载）
           { path: "indicators", element: <PreserveQueryRedirect to="/admin/indicators" /> },
           { path: "indicators/:id", element: <PreserveParamRedirect prefix="/admin/indicators" param="id" /> },
           { path: "observations", element: <PreserveQueryRedirect to="/admin/observations" /> },

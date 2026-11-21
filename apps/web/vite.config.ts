@@ -89,5 +89,9 @@ export default defineConfig(({ mode }) => ({
           chunkSizeWarningLimit: 4096,
           rollupOptions: { output: { inlineDynamicImports: true } },
         }
-      : undefined,
+      : mode === "e2e"
+        ? {
+            outDir: "dist-e2e",
+          }
+        : undefined,
 }));

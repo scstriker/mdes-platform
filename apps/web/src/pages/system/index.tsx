@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router";
+import { matchesQuery } from "@mdes/shared";
 import { DataTable, formatNumber, Tag, TextLink, type DataTableColumn } from "@/components/itei";
 import { StatistaFigure, type StatistaTableColumn } from "@/components/layout/statista-figure";
 import {
@@ -89,7 +90,7 @@ const OVERVIEW_TABLE_ROWS: readonly Record<string, string | number>[] = OVERVIEW
 }));
 
 export default function SystemPage() {
-  const [params] = useSearchParams();
+  const [params, setParams] = useSearchParams();
   const navigate = useNavigate();
   const rawQuery = params.get("q")?.trim() ?? "";
   const q = rawQuery.toLowerCase();
@@ -106,8 +107,10 @@ export default function SystemPage() {
         return false;
       }
       if (!q) return true;
-      const hay = `${row.seq} ${row.name} ${row.source} ${row.level1} ${row.level2} ${row.recordWhat}`.toLowerCase();
-      return hay.includes(q);
+      return matchesQuery(
+        `${row.seq} ${row.name} ${row.source} ${row.frequency} ${row.level1} ${row.level2} ${row.recordWhat} ${row.canAnswer.join(" ")} ${row.v12Codes.join(" ")}`,
+        q,
+      );
     });
   }, [q, onlineOnly, selectedForms]);
 
@@ -337,6 +340,24 @@ export default function SystemPage() {
 
           <fieldset className="grid gap-2 pt-4">
             <legend className="mb-1 caption font-semibold text-ink-muted">目录筛选</legend>
+            <div>
+              <label htmlFor="system-local-filter" className="sr-only">
+                筛选本目录指标
+              </label>
+              <input
+                id="system-local-filter"
+                type="search"
+                value={params.get("q") ?? ""}
+                onChange={(e) => {
+                  const next = new URLSearchParams(params);
+                  if (e.target.value.trim()) next.set("q", e.target.value);
+                  else next.delete("q");
+                  setParams(next, { replace: true });
+                }}
+                placeholder="筛选本目录指标…"
+                className="mb-1 h-8 w-full rounded-sm border border-border-strong bg-surface px-2.5 body-sm text-ink outline-none focus:border-brand-navy"
+              />
+            </div>
             <label className="flex cursor-pointer items-center gap-2 body-sm text-ink">
               <input
                 type="checkbox"
@@ -361,21 +382,23 @@ export default function SystemPage() {
         </nav>
 
         <div className="min-w-0 flex-1 grid gap-10">
-          <StatistaFigure
-            id="fig-system-overview"
-            eyebrow="体系结构总览"
-            title="企业与机构、政策与监管两大领域合计覆盖逾六成核心监测指标"
-            subtitle="《医疗器械产业数据系统指标体系》6 大一级业务领域三级指标数量分布（单位：项）"
-            badge={{ label: "共 6 大领域 · 33 项三级指标", tone: "info" }}
-            option={overviewChartOption}
-            ariaLabel="医疗器械产业数据系统指标体系六大一级业务领域三级指标数量分布：企业与机构 12 项、政策与监管 9 项、审评注册与上市准入 4 项、产品 4 项、知识产权与标准 3 项、进出口贸易 1 项"
-            height={208}
-            tableColumns={OVERVIEW_TABLE_COLUMNS}
-            tableRows={OVERVIEW_TABLE_ROWS}
-            exportName="mdes-system-v3-overview"
-            source="机械工业仪器仪表综合技术经济研究所（ITEI）《医疗器械产业数据系统指标体系（V3.0）》"
-            note="全体系共设 6 大一级业务领域、14 个二级分类、33 项三级监测指标。"
-          />
+          {!rawQuery && (
+            <StatistaFigure
+              id="fig-system-overview"
+              eyebrow="体系结构总览"
+              title="企业与机构、政策与监管两大领域合计覆盖逾六成核心监测指标"
+              subtitle="《医疗器械产业数据系统指标体系》6 大一级业务领域三级指标数量分布（单位：项）"
+              badge={{ label: "共 6 大领域 · 33 项三级指标", tone: "info" }}
+              option={overviewChartOption}
+              ariaLabel="医疗器械产业数据系统指标体系六大一级业务领域三级指标数量分布：企业与机构 12 项、政策与监管 9 项、审评注册与上市准入 4 项、产品 4 项、知识产权与标准 3 项、进出口贸易 1 项"
+              height={208}
+              tableColumns={OVERVIEW_TABLE_COLUMNS}
+              tableRows={OVERVIEW_TABLE_ROWS}
+              exportName="mdes-system-v3-overview"
+              source="机械工业仪器仪表综合技术经济研究所（ITEI）《医疗器械产业数据系统指标体系（V3.0）》"
+              note="全体系共设 6 大一级业务领域、14 个二级分类、33 项三级监测指标。"
+            />
+          )}
 
           {byLevel1.length === 0 ? (
             <div className="grid gap-2 border-y border-border py-8">

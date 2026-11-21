@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { Link } from "react-router";
 import { IconChevronDown, IconChevronUp, IconPlus, IconX } from "@tabler/icons-react";
-import type { ImportBatch } from "@mdes/shared";
+import { matchesQuery, type ImportBatch } from "@mdes/shared";
 import { DataTable, formatNumber, SectionTitle, Tag, TextLink, type DataTableColumn } from "@/components/itei";
 import { QueryError } from "@/components/layout/query-error";
 import { Button } from "@/components/ui/button";
@@ -136,16 +136,17 @@ export default function AdminOverviewPage() {
   const filteredIntake = useMemo(() => {
     if (!q) return intake;
     return intake.filter((r) =>
-      `${r.seq} ${r.name} ${r.indicatorId ?? ""} ${r.method} ${r.stored} ${r.statusLabel} ${r.reason ?? ""} ${r.scopeNote ?? ""}`
-        .toLowerCase()
-        .includes(q),
+      matchesQuery(
+        `${r.seq} ${r.name} ${r.indicatorId ?? ""} ${r.method} ${r.stored} ${r.statusLabel} ${r.reason ?? ""} ${r.scopeNote ?? ""}`,
+        q,
+      ),
     );
   }, [intake, q]);
 
   const filteredPhase2 = useMemo(() => {
     if (!q) return PHASE2_INDICATORS;
     return PHASE2_INDICATORS.filter((i) =>
-      `${i.seq} ${i.name} ${i.level1} ${i.source} ${i.v12Codes.join(" ")}`.toLowerCase().includes(q),
+      matchesQuery(`${i.seq} ${i.name} ${i.level1} ${i.source} ${i.v12Codes.join(" ")}`, q),
     );
   }, [q]);
 

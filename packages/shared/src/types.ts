@@ -47,6 +47,8 @@ export type ObservationQuery = {
   period_to?: string;
   geo?: string;
   batch_id?: string;
+  /** 关键词多词项检索（跨指标编号/名称、期间、地域、维度、数值文本与批次） */
+  q?: string;
   /** 默认 100，最大 500 */
   limit?: number;
   /** 默认 0 */
@@ -59,6 +61,24 @@ export type ObservationPage = {
   total: number;
   limit: number;
   offset: number;
+};
+
+export type ObservationSearchHit = Observation & {
+  indicator_name: string;
+  cluster_code: string;
+};
+
+/** GET /api/search 全站动态数据库检索返回体 */
+export type GlobalSearchResult = {
+  query: string;
+  observations: {
+    items: ObservationSearchHit[];
+    total: number;
+  };
+  indicators: {
+    items: IndicatorListItem[];
+    total: number;
+  };
 };
 
 export type ImportStatus = "completed" | "completed_with_errors" | "failed";

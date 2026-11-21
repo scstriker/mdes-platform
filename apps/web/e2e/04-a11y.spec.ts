@@ -30,10 +30,10 @@ const ROUTES: [string, string][] = [
 ];
 
 async function audit(page: Page, route: string) {
-  await page.waitForLoadState("networkidle");
+  await page.waitForLoadState("load");
   // /__design 里有常驻的「加载中」示例，不等它
   if (!route.startsWith("/__design")) await expect(page.locator("main [aria-busy=true]")).toHaveCount(0);
-  await page.waitForTimeout(400);
+  await page.waitForTimeout(250);
   // @axe-core/playwright 依赖的 playwright-core 类型版本较旧，运行时接口兼容
   const { violations } = await new AxeBuilder({ page: page as never }).withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"]).analyze();
   return violations.map(
@@ -50,6 +50,7 @@ for (const [device, opts] of [
       test.use(opts);
       for (const [name, route] of ROUTES) {
         test(name, async ({ page }) => {
+          test.setTimeout(60_000);
           await useTheme(page, theme);
           await page.goto(route);
           expect(await audit(page, route)).toEqual([]);

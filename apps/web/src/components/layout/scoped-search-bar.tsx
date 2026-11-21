@@ -4,19 +4,34 @@ import { IconArrowRight, IconChevronDown, IconSearch, IconSparkles, IconX } from
 import { Tag } from "@/components/itei";
 import { Button } from "@/components/ui/button";
 import { floatingMotionClass, floatingPanelClass } from "@/components/ui/overlay";
-import { useIndicators } from "@/lib/api";
+import { useBatches, useGlobalSearch, useIndicators } from "@/lib/api";
 import {
   ADMIN_SCOPES,
-  ADMIN_SEARCH_ITEMS,
+  buildPublicSearchUrl,
   PUBLIC_SCOPES,
-  queryPublicSuggestions,
   resolveDefaultAdminScope,
   resolveDefaultPublicScope,
   type AdminSearchScope,
   type PublicSearchScope,
   type SearchSuggestionItem,
-} from "@/lib/search/search-index";
+} from "@/lib/search/search-scopes";
 import { cn } from "@/lib/utils";
+
+type SearchIndexModule = typeof import("@/lib/search/search-index");
+
+let cachedSearchIndex: SearchIndexModule | null = null;
+let pendingSearchIndex: Promise<SearchIndexModule> | null = null;
+
+function loadSearchIndex(): Promise<SearchIndexModule> {
+  if (cachedSearchIndex) return Promise.resolve(cachedSearchIndex);
+  if (!pendingSearchIndex) {
+    pendingSearchIndex = import("@/lib/search/search-index").then((mod) => {
+      cachedSearchIndex = mod;
+      return mod;
+    });
+  }
+  return pendingSearchIndex;
+}
 
 type ScopedSearchBarProps = {
   mode?: "public" | "admin";
@@ -24,32 +39,57 @@ type ScopedSearchBarProps = {
 };
 
 /**
- * 全站同轴常驻分域搜索栏（置于 AppHeader 正下方，1200px 轴线对齐）：
- * - 首页默认「全站跨库检索」，进入任意子页面自动锁定「当前子页范围」；
- * - 支持一键移除本栏限制扩域至全站检索；
- * - 零输入聚焦展示本栏示范热词，输入实时弹出多源分组建议并联动过滤当页内容。
+ * 全站同轴常驻搜索栏（置于 AppHeader 正下方，1200px 轴线对齐）：
+ * - 前台模式（public）：作为标准全站搜索引擎入口，在任意页面检索、选热词或点结果词条统一进入独立搜索结果页 `/search`（不跳入带宏观大图的栏目概览页）；
+ * - 后台模式（admin）：面向数据治理表格，保留本栏实时筛选与当前页面查询参数（如 geo / indicator_id）。
  */
 export function ScopedSearchBar({ mode = "public", className }: ScopedSearchBarProps) {
   const { pathname } = useLocation();
   const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
   const scopeSelectId = useId();
-  const urlQuery = searchParams.get("q") ?? "";
+
+  const publicScopeParam = pathname === "/search" ? searchParams.get("scope") : null;
+  const urlQuery =
+    mode === "admin"
+      ? (searchParams.get("q") ?? "")
+      : pathname === "/search"
+        ? (searchParams.get("q") ?? "")
+        : "";
 
   const defaultScope =
-    mode === "admin" ? resolveDefaultAdminScope(pathname) : resolveDefaultPublicScope(pathname);
+    mode === "admin"
+      ? resolveDefaultAdminScope(pathname)
+      : resolveDefaultPublicScope(pathname, publicScopeParam);
 
   const [scope, setScope] = useState<string>(defaultScope);
   const [query, setQuery] = useState<string>(urlQuery);
   const [open, setOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState<number>(-1);
+  const [indexMod, setIndexMod] = useState<SearchIndexModule | null>(() => cachedSearchIndex);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const optionRefs = useRef<(HTMLButtonElement | null)[]>([]);
 
-  // 仅在后台模式打开建议面板且有输入时按需拉取 /api/indicators，避免前台页面无谓请求
-  const adminIndicators = useIndicators({}, mode === "admin" && open && query.trim().length > 0);
+  const trimmed = query.trim();
+
+  // 仅在打开建议面板时按需加载索引与实时接口，避免首屏静默拉取全站数据
+  useEffect(() => {
+    if (!open || indexMod) return;
+    let active = true;
+    void loadSearchIndex().then((mod) => {
+      if (active) setIndexMod(mod);
+    });
+    return () => {
+      active = false;
+    };
+  }, [open, indexMod]);
+
+  const adminQueryEnabled = mode === "admin" && open && trimmed.length > 0;
+  const adminIndicators = useIndicators({}, adminQueryEnabled);
+  const adminBatches = useBatches(adminQueryEnabled);
+  const livePublicSearch = useGlobalSearch(trimmed, 6, mode === "public" && open && trimmed.length > 0);
 
   useEffect(() => {
     setScope(defaultScope);
@@ -57,7 +97,7 @@ export function ScopedSearchBar({ mode = "public", className }: ScopedSearchBarP
 
   useEffect(() => {
     setQuery(urlQuery);
-  }, [urlQuery]);
+  }, [pathname, urlQuery]);
 
   // 点击外部收起下拉建议
   useEffect(() => {
@@ -90,54 +130,77 @@ export function ScopedSearchBar({ mode = "public", className }: ScopedSearchBarP
 
   const scopes = mode === "admin" ? ADMIN_SCOPES : PUBLIC_SCOPES;
   const activeMeta = scopes.find((s) => s.scope === scope) ?? scopes[0];
-  const isSubpageScoped = mode === "public" && scope !== "/search";
+  const isDomainFiltered = mode === "public" && scope !== "/search";
 
   const suggestions = useMemo(() => {
+    if (!indexMod || !trimmed) {
+      return {
+        scopedMatches: [] as SearchSuggestionItem[],
+        liveMatches: [] as SearchSuggestionItem[],
+        secondaryMatches: [] as SearchSuggestionItem[],
+        secondaryTitle: "",
+        globalTotal: 0,
+        liveObsTotal: 0,
+      };
+    }
+
     if (mode === "public") {
-      return queryPublicSuggestions(query, scope as PublicSearchScope);
+      const pub = indexMod.queryPublicSuggestions(trimmed, scope as PublicSearchScope);
+      const liveObsTotal = livePublicSearch.data?.observations.total ?? 0;
+      const liveMatches = (livePublicSearch.data?.observations.items ?? [])
+        .slice(0, 3)
+        .map((hit) => indexMod.mapObservationHitToSuggestion(hit, trimmed));
+      return {
+        scopedMatches: pub.scopedMatches,
+        liveMatches,
+        secondaryMatches: pub.indicatorMatches,
+        secondaryTitle: "关联指标口径与方法论",
+        globalTotal: pub.globalTotal,
+        liveObsTotal,
+      };
     }
-    const q = query.trim().toLowerCase();
-    if (!q) {
-      return { scopedMatches: [] as SearchSuggestionItem[], indicatorMatches: [] as SearchSuggestionItem[], globalTotal: 0 };
-    }
-    const liveIndItems: SearchSuggestionItem[] = (adminIndicators.data ?? [])
-      .filter((i) => `${i.id} ${i.name} ${i.cluster_code}`.toLowerCase().includes(q))
-      .slice(0, 5)
-      .map((i) => ({
-        id: `adm-api-ind-${i.id}`,
-        scope: "/admin/indicators" as AdminSearchScope,
-        scopeLabel: "工程指标库",
-        badge: i.id,
-        title: `${i.id} ${i.name}`,
-        subtitle: `观测值 ${i.obs_count} 条 · 更新频率：${i.update_freq || "—"}`,
-        href:
-          scope === "/admin/observations"
-            ? `/admin/observations?indicator_id=${encodeURIComponent(i.id)}`
-            : `/admin/indicators/${encodeURIComponent(i.id)}`,
-        keywords: `${i.id} ${i.name}`.toLowerCase(),
-      }));
 
-    const staticMatches = ADMIN_SEARCH_ITEMS.filter((item) => item.keywords.includes(q));
-    const combined = [...staticMatches, ...liveIndItems];
-    const dedup = combined.filter((v, idx, arr) => arr.findIndex((x) => x.title === v.title) === idx);
+    const adm = indexMod.queryAdminSuggestions(trimmed, scope as AdminSearchScope, {
+      indicators: adminIndicators.data,
+      batches: adminBatches.data,
+    });
     return {
-      scopedMatches: dedup.slice(0, 6),
-      indicatorMatches: [] as SearchSuggestionItem[],
-      globalTotal: dedup.length,
+      scopedMatches: adm.scopedMatches,
+      liveMatches: [] as SearchSuggestionItem[],
+      secondaryMatches: adm.crossMatches,
+      secondaryTitle: "跨后台检索",
+      globalTotal: adm.globalTotal,
+      liveObsTotal: 0,
     };
-  }, [mode, query, scope, adminIndicators.data]);
+  }, [
+    indexMod,
+    trimmed,
+    mode,
+    scope,
+    livePublicSearch.data,
+    adminIndicators.data,
+    adminBatches.data,
+  ]);
 
-  function syncLivePageFilter(nextVal: string, targetScope: string) {
-    // 若当前路由与激活的检索范围完全一致（如在 /products 搜 /products），实时同步 URL ?q= 驱动当页即时过滤
-    if (pathname === targetScope) {
-      const next = new URLSearchParams(searchParams);
-      if (nextVal.trim()) {
-        next.set("q", nextVal.trim());
-      } else {
-        next.delete("q");
+  function applyAdminSamePageQuery(nextVal: string, targetScope: string, pushHistory: boolean) {
+    const next = new URLSearchParams(searchParams);
+    const clean = nextVal.trim();
+    if (clean) {
+      next.set("q", clean);
+      if (targetScope === "/admin/import" && next.has("seq")) {
+        next.delete("seq");
       }
-      if (next.has("page")) next.delete("page");
-      setSearchParams(next, { replace: true });
+    } else {
+      next.delete("q");
+    }
+    next.delete("page");
+    const unchanged = next.toString() === searchParams.toString();
+    setSearchParams(next, { replace: !pushHistory || unchanged });
+  }
+
+  function syncAdminLiveFilter(nextVal: string, targetScope: string) {
+    if (mode === "admin" && pathname === targetScope) {
+      applyAdminSamePageQuery(nextVal, targetScope, false);
     }
   }
 
@@ -145,7 +208,26 @@ export function ScopedSearchBar({ mode = "public", className }: ScopedSearchBarP
     setQuery(val);
     setOpen(true);
     setActiveIndex(-1);
-    syncLivePageFilter(val, scope);
+    syncAdminLiveFilter(val, scope);
+  }
+
+  function navigatePublicSuggestion(item: SearchSuggestionItem) {
+    setOpen(false);
+    setActiveIndex(-1);
+    if (item.scope === "/system" && item.href.startsWith("/system/")) {
+      navigate(item.href);
+      return;
+    }
+    const targetScope = item.id.startsWith("live-obs-")
+      ? "observations"
+      : (item.scope as PublicSearchScope);
+    navigate(
+      buildPublicSearchUrl({
+        q: trimmed || item.title,
+        scope: targetScope,
+        item: item.id,
+      }),
+    );
   }
 
   function executeSearch(rawTerm: string, targetScope = scope) {
@@ -153,19 +235,25 @@ export function ScopedSearchBar({ mode = "public", className }: ScopedSearchBarP
     setOpen(false);
     setActiveIndex(-1);
 
-    if (mode === "admin" && targetScope === "/admin/observations" && /^[a-z]{3}-\d{3}$/i.test(term)) {
-      navigate(`/admin/observations?indicator_id=${encodeURIComponent(term.toUpperCase())}`);
+    // 前台公开门户：统一进入独立搜索结果页 /search，彻底杜绝跳入带宏观大图的栏目子页
+    if (mode === "public") {
+      navigate(
+        buildPublicSearchUrl({
+          q: term,
+          scope: targetScope as PublicSearchScope,
+        }),
+      );
+      return;
+    }
+
+    // 后台治理模式：同页保留当前筛选条件，跨页携带 q 跳转对应后台模块
+    if (pathname === targetScope) {
+      applyAdminSamePageQuery(term, targetScope, true);
       return;
     }
 
     if (!term) {
-      if (pathname === targetScope) {
-        const next = new URLSearchParams(searchParams);
-        next.delete("q");
-        setSearchParams(next, { replace: true });
-      } else {
-        navigate(targetScope);
-      }
+      navigate(targetScope);
       return;
     }
 
@@ -179,20 +267,32 @@ export function ScopedSearchBar({ mode = "public", className }: ScopedSearchBarP
 
   function clearInput() {
     setQuery("");
-    syncLivePageFilter("", scope);
+    if (mode === "admin") {
+      syncAdminLiveFilter("", scope);
+    } else if (pathname === "/search") {
+      const next = new URLSearchParams(searchParams);
+      next.delete("q");
+      next.delete("item");
+      setSearchParams(next, { replace: true });
+    }
     inputRef.current?.focus();
     setOpen(true);
   }
 
   function widenToGlobal() {
     setScope("/search");
+    if (mode === "public" && pathname === "/search") {
+      const next = new URLSearchParams(searchParams);
+      next.delete("scope");
+      next.delete("item");
+      setSearchParams(next, { replace: true });
+    }
     inputRef.current?.focus();
     setOpen(true);
   }
 
   // 组装可键盘上下导航的扁平建议项引用顺序
   const flatActions = useMemo(() => {
-    const trimmed = query.trim();
     if (!trimmed) {
       return activeMeta.hotQueries.map((h) => ({
         type: "hot" as const,
@@ -208,34 +308,47 @@ export function ScopedSearchBar({ mode = "public", className }: ScopedSearchBarP
         },
       }));
     }
-    const items: { type: "item" | "ind" | "global"; label: string; onSelect: () => void }[] = [
+    const items: { type: "item" | "live" | "secondary" | "global"; label: string; onSelect: () => void }[] = [
       ...suggestions.scopedMatches.map((m) => ({
         type: "item" as const,
         label: m.title,
         onSelect: () => {
-          setOpen(false);
-          navigate(m.href);
+          if (mode === "public") {
+            navigatePublicSuggestion(m);
+          } else {
+            setOpen(false);
+            navigate(m.href);
+          }
         },
       })),
-      ...suggestions.indicatorMatches.map((m) => ({
-        type: "ind" as const,
+      ...suggestions.liveMatches.map((m) => ({
+        type: "live" as const,
+        label: m.title,
+        onSelect: () => navigatePublicSuggestion(m),
+      })),
+      ...suggestions.secondaryMatches.map((m) => ({
+        type: "secondary" as const,
         label: m.title,
         onSelect: () => {
-          setOpen(false);
-          navigate(m.href);
+          if (mode === "public") {
+            navigatePublicSuggestion(m);
+          } else {
+            setOpen(false);
+            navigate(m.href);
+          }
         },
       })),
     ];
-    if (mode === "public" && scope !== "/search") {
+    if (mode === "public") {
       items.push({
         type: "global" as const,
-        label: `在全站跨库检索「${trimmed}」`,
+        label: `查看「${trimmed}」的全部搜索结果`,
         onSelect: () => executeSearch(trimmed, "/search"),
       });
     }
     return items;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [query, activeMeta, suggestions, mode, scope]);
+  }, [trimmed, activeMeta, suggestions, mode, scope]);
 
   function onInputKeyDown(e: KeyboardEvent<HTMLInputElement>) {
     if (e.key === "Escape") {
@@ -243,9 +356,8 @@ export function ScopedSearchBar({ mode = "public", className }: ScopedSearchBarP
       setActiveIndex(-1);
       return;
     }
-    if (e.key === "Backspace" && query === "" && isSubpageScoped) {
-      // 空输入按退格自动扩域至全站跨库检索
-      setScope("/search");
+    if (e.key === "Backspace" && query === "" && isDomainFiltered) {
+      widenToGlobal();
       return;
     }
     if (e.key === "ArrowDown" && flatActions.length > 0) {
@@ -283,11 +395,13 @@ export function ScopedSearchBar({ mode = "public", className }: ScopedSearchBarP
     }
   }
 
-  const trimmed = query.trim();
+  const liveOffset = suggestions.scopedMatches.length;
+  const secondaryOffset = liveOffset + suggestions.liveMatches.length;
+  const globalActionIndex = secondaryOffset + suggestions.secondaryMatches.length;
 
   return (
     <section
-      aria-label={mode === "admin" ? "后台范围检索" : "分域与全站检索"}
+      aria-label={mode === "admin" ? "后台范围检索" : "全站搜索"}
       className={cn("border-b border-border bg-surface", className)}
     >
       <div
@@ -310,8 +424,18 @@ export function ScopedSearchBar({ mode = "public", className }: ScopedSearchBarP
               onChange={(e) => {
                 const nextScope = e.target.value;
                 setScope(nextScope);
-                setOpen(true);
-                syncLivePageFilter(query, nextScope);
+                if (mode === "public" && pathname === "/search") {
+                  navigate(
+                    buildPublicSearchUrl({
+                      q: query,
+                      scope: nextScope as PublicSearchScope,
+                    }),
+                    { replace: true },
+                  );
+                } else {
+                  setOpen(true);
+                  syncAdminLiveFilter(query, nextScope);
+                }
               }}
               className="h-10 w-full cursor-pointer appearance-none rounded-sm border border-border-strong bg-surface-sunken pr-8 pl-3 body-sm font-semibold text-brand-navy focus-ring"
             >
@@ -328,17 +452,17 @@ export function ScopedSearchBar({ mode = "public", className }: ScopedSearchBarP
             />
           </div>
 
-          {/* 中部关键词输入框（含子页面默认本栏锁定胶囊 + 清空按钮） */}
+          {/* 中部关键词输入框 */}
           <div className="flex h-10 min-w-0 flex-1 items-center rounded-sm border border-border-strong bg-surface px-2.5 focus-within:border-brand-navy">
             <IconSearch size={18} className="shrink-0 text-ink-muted" aria-hidden="true" />
-            {isSubpageScoped && (
+            {isDomainFiltered && (
               <span className="ml-2 inline-flex shrink-0 items-center gap-1 rounded-sm border border-border bg-info-bg px-2 py-0.5 caption font-semibold text-brand-navy">
-                <span>本栏：{activeMeta.shortLabel}</span>
+                <span>领域：{activeMeta.shortLabel}</span>
                 <button
                   type="button"
                   onClick={widenToGlobal}
-                  aria-label="解除本栏范围限制"
-                  title="解除本栏范围限制"
+                  aria-label="解除领域范围限制"
+                  title="解除领域范围限制"
                   className="inline-flex cursor-pointer items-center text-brand-navy hover:text-brand-red focus-ring"
                 >
                   <IconX size={13} aria-hidden="true" />
@@ -386,7 +510,7 @@ export function ScopedSearchBar({ mode = "public", className }: ScopedSearchBarP
           </Button>
         </form>
 
-        {/* 弹出式搜索建议面板（零输入热词 / 实时分组联想 + 跨库兜底） */}
+        {/* 弹出式搜索建议面板 */}
         {open && (
           <div
             role="region"
@@ -404,13 +528,13 @@ export function ScopedSearchBar({ mode = "public", className }: ScopedSearchBarP
                     <IconSparkles size={15} aria-hidden="true" />
                     {activeMeta.shortLabel} · 热门检索示范
                   </p>
-                  {isSubpageScoped && (
+                  {isDomainFiltered && (
                     <button
                       type="button"
                       onClick={widenToGlobal}
                       className="cursor-pointer caption font-semibold text-link hover:underline focus-ring"
                     >
-                      切换至全站跨库检索 →
+                      切换至全部领域检索 →
                     </button>
                   )}
                 </div>
@@ -433,14 +557,22 @@ export function ScopedSearchBar({ mode = "public", className }: ScopedSearchBarP
               </div>
             ) : (
               <div className="divide-y divide-border">
-                {/* 第一组：当前范围精准匹配建议 */}
+                {/* 第一组：当前选中范围的匹配建议 */}
                 <div className="p-3">
                   <p className="px-2 pb-1.5 caption font-semibold text-ink-muted">
-                    {scope === "/search" ? "全站跨库匹配建议" : `本栏匹配建议（${activeMeta.shortLabel}）`}
+                    {mode === "public"
+                      ? scope === "/search"
+                        ? "全站匹配词条预览"
+                        : `${activeMeta.shortLabel}匹配词条预览`
+                      : `本栏匹配建议（${activeMeta.shortLabel}）`}
                   </p>
-                  {suggestions.scopedMatches.length === 0 ? (
+                  {!indexMod ? (
+                    <p className="px-2 py-2 body-sm text-ink-muted">正在加载检索索引…</p>
+                  ) : suggestions.scopedMatches.length === 0 ? (
                     <p className="px-2 py-2 body-sm text-ink-muted">
-                      当前范围未直接命中「{trimmed}」的代表性词条，可按回车筛选或切换全站检索。
+                      {mode === "admin"
+                        ? `当前「${activeMeta.shortLabel}」范围未直接命中「${trimmed}」，可按回车在本页筛选或从下方跨后台检索进入其他模块。`
+                        : `当前所选领域未直接命中「${trimmed}」的代表性词条，可点击下方查看全站搜索结果。`}
                     </p>
                   ) : (
                     <ul className="grid gap-0.5">
@@ -452,10 +584,7 @@ export function ScopedSearchBar({ mode = "public", className }: ScopedSearchBarP
                             }}
                             type="button"
                             onKeyDown={(e) => onSuggestionKeyDown(e, idx)}
-                            onClick={() => {
-                              setOpen(false);
-                              navigate(item.href);
-                            }}
+                            onClick={() => flatActions[idx]?.onSelect()}
                             className="flex w-full cursor-pointer items-start justify-between gap-3 px-2.5 py-2 text-left transition-colors hover:bg-info-bg focus:bg-info-bg focus-ring"
                           >
                             <div className="min-w-0 flex-1">
@@ -475,29 +604,36 @@ export function ScopedSearchBar({ mode = "public", className }: ScopedSearchBarP
                   )}
                 </div>
 
-                {/* 第二组：关联 V3.0 统计指标直达 */}
-                {suggestions.indicatorMatches.length > 0 && (
-                  <div className="bg-surface-sunken/60 p-3">
-                    <p className="px-2 pb-1.5 caption font-semibold text-ink-muted">关联指标口径与方法论</p>
+                {/* 第二组（前台动态库）：实时入库观测记录命中 */}
+                {suggestions.liveMatches.length > 0 && (
+                  <div className="bg-surface-sunken/40 p-3">
+                    <p className="px-2 pb-1.5 caption font-semibold text-ink-muted">
+                      实时入库数据命中（D1 观测库共 {suggestions.liveObsTotal} 条）
+                    </p>
                     <ul className="grid gap-0.5">
-                      {suggestions.indicatorMatches.map((ind, i) => {
-                        const refIdx = suggestions.scopedMatches.length + i;
+                      {suggestions.liveMatches.map((item, i) => {
+                        const refIdx = liveOffset + i;
                         return (
-                          <li key={ind.id}>
+                          <li key={item.id}>
                             <button
                               ref={(el) => {
                                 optionRefs.current[refIdx] = el;
                               }}
                               type="button"
                               onKeyDown={(e) => onSuggestionKeyDown(e, refIdx)}
-                              onClick={() => {
-                                setOpen(false);
-                                navigate(ind.href);
-                              }}
-                              className="flex w-full cursor-pointer items-center justify-between gap-3 px-2.5 py-1.5 text-left transition-colors hover:bg-info-bg focus:bg-info-bg focus-ring"
+                              onClick={() => flatActions[refIdx]?.onSelect()}
+                              className="flex w-full cursor-pointer items-start justify-between gap-3 px-2.5 py-2 text-left transition-colors hover:bg-info-bg focus:bg-info-bg focus-ring"
                             >
-                              <span className="truncate body-sm font-semibold text-brand-navy">{ind.title}</span>
-                              <span className="shrink-0 caption text-ink-muted">{ind.subtitle}</span>
+                              <div className="min-w-0 flex-1">
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <span className="body-sm font-semibold text-ink">{item.title}</span>
+                                  <Tag size="sm" tone="success">
+                                    {item.badge}
+                                  </Tag>
+                                </div>
+                                <p className="mt-0.5 truncate caption text-ink-muted">{item.subtitle}</p>
+                              </div>
+                              <IconArrowRight size={15} className="mt-1 shrink-0 text-ink-muted" aria-hidden="true" />
                             </button>
                           </li>
                         );
@@ -506,27 +642,57 @@ export function ScopedSearchBar({ mode = "public", className }: ScopedSearchBarP
                   </div>
                 )}
 
-                {/* 第三组：全站跨库检索兜底入口 */}
-                {mode === "public" && scope !== "/search" && (
+                {/* 第三组：前台「关联指标口径与方法论」 / 后台「跨后台检索」 */}
+                {suggestions.secondaryMatches.length > 0 && (
+                  <div className="bg-surface-sunken/60 p-3">
+                    <p className="px-2 pb-1.5 caption font-semibold text-ink-muted">{suggestions.secondaryTitle}</p>
+                    <ul className="grid gap-0.5">
+                      {suggestions.secondaryMatches.map((item, i) => {
+                        const refIdx = secondaryOffset + i;
+                        return (
+                          <li key={item.id}>
+                            <button
+                              ref={(el) => {
+                                optionRefs.current[refIdx] = el;
+                              }}
+                              type="button"
+                              onKeyDown={(e) => onSuggestionKeyDown(e, refIdx)}
+                              onClick={() => flatActions[refIdx]?.onSelect()}
+                              className="flex w-full cursor-pointer items-center justify-between gap-3 px-2.5 py-1.5 text-left transition-colors hover:bg-info-bg focus:bg-info-bg focus-ring"
+                            >
+                              <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
+                                <span className="truncate body-sm font-semibold text-brand-navy">{item.title}</span>
+                                {mode === "admin" && (
+                                  <Tag size="sm" tone="info">
+                                    {item.scopeLabel} · {item.badge}
+                                  </Tag>
+                                )}
+                              </div>
+                              <span className="shrink-0 caption text-ink-muted">{item.subtitle}</span>
+                            </button>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  </div>
+                )}
+
+                {/* 第四组：进入独立搜索结果页查看全量匹配结果 */}
+                {mode === "public" && (
                   <div className="bg-surface-sunken px-3 py-2.5">
                     <button
                       ref={(el) => {
-                        optionRefs.current[
-                          suggestions.scopedMatches.length + suggestions.indicatorMatches.length
-                        ] = el;
+                        optionRefs.current[globalActionIndex] = el;
                       }}
                       type="button"
-                      onKeyDown={(e) =>
-                        onSuggestionKeyDown(
-                          e,
-                          suggestions.scopedMatches.length + suggestions.indicatorMatches.length,
-                        )
-                      }
+                      onKeyDown={(e) => onSuggestionKeyDown(e, globalActionIndex)}
                       onClick={() => executeSearch(trimmed, "/search")}
                       className="flex w-full cursor-pointer items-center justify-between gap-2 px-2 py-1 body-sm font-semibold text-link hover:underline focus-ring"
                     >
                       <span>
-                        在全站全部业务库中检索「{trimmed}」（共命中 {suggestions.globalTotal} 条记录）
+                        {suggestions.liveObsTotal > 0
+                          ? `进入搜索结果页查看「${trimmed}」全量结果（代表性名录 ${suggestions.globalTotal} 条 · 实时观测 ${suggestions.liveObsTotal} 条）`
+                          : `进入搜索结果页查看「${trimmed}」全量结果（共命中 ${suggestions.globalTotal} 条）`}
                       </span>
                       <IconArrowRight size={16} aria-hidden="true" />
                     </button>

@@ -3,6 +3,7 @@ import { Link, useSearchParams } from "react-router";
 import { IconArrowLeft, IconFileImport, IconTable, IconX } from "@tabler/icons-react";
 import {
   DEFAULT_MAX_ROWS,
+  matchesQuery,
   parseObservationCsv,
   type CsvParseResult,
   type ImportResult,
@@ -44,6 +45,10 @@ export default function AdminImportPage() {
   const rawQuery = params.get("q")?.trim() ?? "";
   const mapper = seq ? getMapper(seq) : undefined;
   const [step, setStep] = useState(mapper ? 1 : 0);
+
+  useEffect(() => {
+    setStep(mapper ? 1 : 0);
+  }, [mapper]);
 
   function selectMapper(m: IndicatorMapper) {
     setParams({ seq: m.seq });
@@ -112,7 +117,7 @@ function SelectIndicator({
       if (channelFilter !== "all" && m.channel !== channelFilter) return false;
       if (!q) return true;
       const channelWords = m.channel === "table" ? "表格 csv excel" : "原件 文件 解析 json pdf";
-      return `${m.seq} ${m.name} ${m.indicatorId ?? ""} ${channelWords}`.toLowerCase().includes(q);
+      return matchesQuery(`${m.seq} ${m.name} ${m.indicatorId ?? ""} ${channelWords}`, q);
     });
   }, [channelFilter, q]);
 
