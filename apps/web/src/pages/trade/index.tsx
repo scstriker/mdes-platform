@@ -1,6 +1,7 @@
 import { useCallback, useMemo, useState } from "react";
 import { useSearchParams } from "react-router";
 import { IconArrowRight } from "@tabler/icons-react";
+import { matchesQuery } from "@mdes/shared";
 import bannerTrade from "@/assets/visuals/banner-trade.webp";
 import { DataTable, formatNumber, Tag, TextLink, type DataTableColumn } from "@/components/itei";
 import { PageVisualBanner } from "@/components/layout/page-visual-banner";
@@ -90,39 +91,41 @@ export default function TradePage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const queryText = searchParams.get("q") ?? "";
   const normalizedQ = queryText.trim().toLowerCase();
-  const activeTab = parseTradeTab(searchParams.get("tab"));
+  const explicitTab = searchParams.get("tab");
+  const requestedTab = parseTradeTab(explicitTab);
   const [leftView, setLeftView] = useState<LeftFigureView>("trend");
 
   const setActiveTab = useCallback(
     (nextTab: TradeTableTab) => {
       const next = new URLSearchParams(searchParams);
-      if (nextTab === "categories") next.delete("tab");
+      if (nextTab === "categories" && !normalizedQ) next.delete("tab");
       else next.set("tab", nextTab);
       setSearchParams(next, { replace: true });
     },
-    [searchParams, setSearchParams],
+    [normalizedQ, searchParams, setSearchParams],
   );
 
   const filteredCategories = useMemo(() => {
     if (!normalizedQ) return TRADE_CATEGORIES;
     return TRADE_CATEGORIES.filter((row) =>
-      `${row.category} ${row.hsRange} ${row.topOrigins} ${row.importCr3}`.toLowerCase().includes(normalizedQ),
+      matchesQuery(`${row.category} ${row.hsRange} ${row.topOrigins} ${row.importCr3}`, normalizedQ),
     );
   }, [normalizedQ]);
 
   const filteredHsRows = useMemo(() => {
     if (!normalizedQ) return HIGH_CONCENTRATION_HS;
     return HIGH_CONCENTRATION_HS.filter((row) =>
-      `${row.hsCode} ${row.itemName} ${row.category} ${row.topOrigins} ${row.supplyNote}`
-        .toLowerCase()
-        .includes(normalizedQ),
+      matchesQuery(
+        `${row.hsCode} ${row.itemName} ${row.category} ${row.topOrigins} ${row.supplyNote} ${row.cr3}`,
+        normalizedQ,
+      ),
     );
   }, [normalizedQ]);
 
   const filteredPartners = useMemo(() => {
     if (!normalizedQ) return TRADE_PARTNER_ROWS;
     return TRADE_PARTNER_ROWS.filter((row) =>
-      `${row.country} ${row.iso} ${row.focusCategory}`.toLowerCase().includes(normalizedQ),
+      matchesQuery(`${row.country} ${row.iso} ${row.focusCategory}`, normalizedQ),
     );
   }, [normalizedQ]);
 
@@ -131,6 +134,12 @@ export default function TradePage() {
     { key: "hs", label: "高集中度整机与核心部件税号", count: filteredHsRows.length },
     { key: "partners", label: "主要贸易伙伴国流向", count: filteredPartners.length },
   ];
+
+  // 若 URL 未显式指定 tab（如从全站搜索深链进入 /trade?q=CT+9022.3000）且默认分栏无结果时，自动激活有命中的分栏
+  const activeTab: TradeTableTab =
+    !explicitTab && normalizedQ && (tableTabs.find((t) => t.key === requestedTab)?.count ?? 0) === 0
+      ? (tableTabs.find((t) => t.count > 0)?.key ?? requestedTab)
+      : requestedTab;
 
   const activeTabMeta = tableTabs.find((t) => t.key === activeTab) ?? tableTabs[0];
   const fallbackTab = useMemo(() => {
@@ -277,108 +286,108 @@ export default function TradePage() {
         </div>
       </section>
 
-      {/* Band 2: Dual-Column StatistaFigure Flagship Infographics */}
-      <section className="border-y border-border bg-surface-sunken" aria-labelledby="trade-figures-heading">
-        <div className="mx-auto w-full max-w-content px-4 py-8 md:px-8 md:py-10">
-          <h2 id="trade-figures-heading" className="sr-only">
-            进出口规模走势与供应链集中度图表
-          </h2>
+      {/* Band 2: Dual-Column StatistaFigure Flagship Infographics（关键词筛选态自动收起，避免图表压住查询表） */}
+      {!normalizedQ && (
+        <section className="border-y border-border bg-surface-sunken" aria-labelledby="trade-figures-heading">
+          <div className="mx-auto w-full max-w-content px-4 py-8 md:px-8 md:py-10">
+            <h2 id="trade-figures-heading" className="sr-only">
+              进出口规模走势与供应链集中度图表
+            </h2>
 
-          <div className="grid gap-6 lg:grid-cols-2">
-            {/* Left Figure: Trend with Partial-Year Distinction / Top-5 Partners Toggle */}
-            <StatistaFigure
-              id="fig-trade-trend"
-              eyebrow={
-                leftView === "trend"
-                  ? "图 1 · 进出口规模与顺差演变"
-                  : "图 1 · 前五大伙伴国双边份额"
-              }
-              title={
-                leftView === "trend"
-                  ? "医疗器械贸易顺差持续走阔，2026 前三季出口同比增长 6.6%"
-                  : "美德日稳居前三大贸易伙伴，对美双边进出口份额均超两成"
-              }
-              subtitle={
-                leftView === "trend"
-                  ? "2021—2026年前三季度 · 中国海关医疗器械进出口额与顺差（单位：亿美元）"
-                  : "2026年前三季度 · 前五大贸易伙伴占中国医疗器械进口与出口比重（单位：%）"
-              }
-              badge={
-                leftView === "trend"
-                  ? { label: "前三季顺差 44.2 亿美元", tone: "info" }
-                  : { label: "前五进口合计 66.9%", tone: "info" }
-              }
-              controls={
-                <div
-                  role="group"
-                  aria-label="切换贸易趋势或伙伴国份额视图"
-                  className="flex flex-wrap items-center gap-2"
-                >
-                  <button
-                    type="button"
-                    aria-pressed={leftView === "trend"}
-                    onClick={() => setLeftView("trend")}
-                    className={cn(
-                      "cursor-pointer rounded-sm border px-3 py-1 caption font-semibold transition-colors focus-ring",
-                      leftView === "trend"
-                        ? "border-brand-navy bg-brand-navy text-on-brand"
-                        : "border-border bg-surface text-ink-muted hover:text-ink",
-                    )}
+            <div className="grid gap-6 lg:grid-cols-2">
+              <StatistaFigure
+                id="fig-trade-trend"
+                eyebrow={
+                  leftView === "trend"
+                    ? "图 1 · 进出口规模与顺差演变"
+                    : "图 1 · 前五大伙伴国双边份额"
+                }
+                title={
+                  leftView === "trend"
+                    ? "医疗器械贸易顺差持续走阔，2026 前三季出口同比增长 6.6%"
+                    : "美德日稳居前三大贸易伙伴，对美双边进出口份额均超两成"
+                }
+                subtitle={
+                  leftView === "trend"
+                    ? "2021—2026年前三季度 · 中国海关医疗器械进出口额与顺差（单位：亿美元）"
+                    : "2026年前三季度 · 前五大贸易伙伴占中国医疗器械进口与出口比重（单位：%）"
+                }
+                badge={
+                  leftView === "trend"
+                    ? { label: "前三季顺差 44.2 亿美元", tone: "info" }
+                    : { label: "前五进口合计 66.9%", tone: "info" }
+                }
+                controls={
+                  <div
+                    role="group"
+                    aria-label="切换贸易趋势或伙伴国份额视图"
+                    className="flex flex-wrap items-center gap-2"
                   >
-                    进出口规模演变
-                  </button>
-                  <button
-                    type="button"
-                    aria-pressed={leftView === "partners"}
-                    onClick={() => setLeftView("partners")}
-                    className={cn(
-                      "cursor-pointer rounded-sm border px-3 py-1 caption font-semibold transition-colors focus-ring",
-                      leftView === "partners"
-                        ? "border-brand-navy bg-brand-navy text-on-brand"
-                        : "border-border bg-surface text-ink-muted hover:text-ink",
-                    )}
-                  >
-                    前五大伙伴国份额
-                  </button>
-                </div>
-              }
-              option={leftView === "trend" ? tradeTrendPartialOption : partnerShareBarOption}
-              ariaLabel={
-                leftView === "trend"
-                  ? "2021至2026年前三季度中国海关医疗器械出口额、进口额与贸易顺差演变折线图，末尾前三季度以虚线与浅底色带区分非完整年度"
-                  : "2026年前三季度前五大贸易伙伴占我国医疗器械进口与出口比重分组柱状图"
-              }
-              height={292}
-              tableColumns={leftView === "trend" ? TREND_TABLE_COLUMNS : PARTNER_FIG_COLUMNS}
-              tableRows={leftView === "trend" ? TREND_TABLE_ROWS : PARTNER_FIG_ROWS}
-              exportName={leftView === "trend" ? "mdes-trade-trend" : "mdes-trade-partners"}
-              source="中国海关总署统计快讯（8 位 HS 编码归并）"
-              note={
-                leftView === "trend"
-                  ? "2021—2025 年为全年报关值，2026Q1-Q3 为 1—9 月累计值"
-                  : "进口按申报原产国统计，出口按最终目的国统计"
-              }
-            />
+                    <button
+                      type="button"
+                      aria-pressed={leftView === "trend"}
+                      onClick={() => setLeftView("trend")}
+                      className={cn(
+                        "cursor-pointer rounded-sm border px-3 py-1 caption font-semibold transition-colors focus-ring",
+                        leftView === "trend"
+                          ? "border-brand-navy bg-brand-navy text-on-brand"
+                          : "border-border bg-surface text-ink-muted hover:text-ink",
+                      )}
+                    >
+                      进出口规模演变
+                    </button>
+                    <button
+                      type="button"
+                      aria-pressed={leftView === "partners"}
+                      onClick={() => setLeftView("partners")}
+                      className={cn(
+                        "cursor-pointer rounded-sm border px-3 py-1 caption font-semibold transition-colors focus-ring",
+                        leftView === "partners"
+                          ? "border-brand-navy bg-brand-navy text-on-brand"
+                          : "border-border bg-surface text-ink-muted hover:text-ink",
+                      )}
+                    >
+                      前五大伙伴国份额
+                    </button>
+                  </div>
+                }
+                option={leftView === "trend" ? tradeTrendPartialOption : partnerShareBarOption}
+                ariaLabel={
+                  leftView === "trend"
+                    ? "2021至2026年前三季度中国海关医疗器械出口额、进口额与贸易顺差演变折线图，末尾前三季度以虚线与浅底色带区分非完整年度"
+                    : "2026年前三季度前五大贸易伙伴占我国医疗器械进口与出口比重分组柱状图"
+                }
+                height={292}
+                tableColumns={leftView === "trend" ? TREND_TABLE_COLUMNS : PARTNER_FIG_COLUMNS}
+                tableRows={leftView === "trend" ? TREND_TABLE_ROWS : PARTNER_FIG_ROWS}
+                exportName={leftView === "trend" ? "mdes-trade-trend" : "mdes-trade-partners"}
+                source="中国海关总署统计快讯（8 位 HS 编码归并）"
+                note={
+                  leftView === "trend"
+                    ? "2021—2025 年为全年报关值，2026Q1-Q3 为 1—9 月累计值"
+                    : "进口按申报原产国统计，出口按最终目的国统计"
+                }
+              />
 
-            {/* Right Figure: Supply Chain CR3 Horizontal Bar Ranking */}
-            <StatistaFigure
-              id="fig-trade-concentration"
-              eyebrow="图 2 · 供应链来源国集中度"
-              title="高端影像与内镜核心部件进口高度集中，前三来源国占比均逾七成"
-              subtitle="2026年前三季度 · 关键整机零部件与五大品类进口来源国 CR3（单位：%）"
-              badge={{ label: "核心组件 CR3 最高 83.6%", tone: "warning" }}
-              option={tradeConcentrationBarOption}
-              ariaLabel="2026年前三季度关键整机零部件与五大品类进口来源国集中度 CR3 横向排名条形图"
-              height={328}
-              tableColumns={CR3_TABLE_COLUMNS}
-              tableRows={CR3_TABLE_ROWS}
-              exportName="mdes-trade-cr3"
-              source="中国海关 8 位 HS 商品编码原产国统计"
-              note="CR3 指前三位进口原产国金额占同类进口总额比重"
-            />
+              <StatistaFigure
+                id="fig-trade-concentration"
+                eyebrow="图 2 · 供应链来源国集中度"
+                title="高端影像与内镜核心部件进口高度集中，前三来源国占比均逾七成"
+                subtitle="2026年前三季度 · 关键整机零部件与五大品类进口来源国 CR3（单位：%）"
+                badge={{ label: "核心组件 CR3 最高 83.6%", tone: "warning" }}
+                option={tradeConcentrationBarOption}
+                ariaLabel="2026年前三季度关键整机零部件与五大品类进口来源国集中度 CR3 横向排名条形图"
+                height={328}
+                tableColumns={CR3_TABLE_COLUMNS}
+                tableRows={CR3_TABLE_ROWS}
+                exportName="mdes-trade-cr3"
+                source="中国海关 8 位 HS 商品编码原产国统计"
+                note="CR3 指前三位进口原产国金额占同类进口总额比重"
+              />
+            </div>
           </div>
-        </div>
-      </section>
+        </section>
+      )}
 
       {/* Band 3: Full-Width 1200px Trade Structure & Key HS Tariff Directory */}
       <section className="bg-surface" aria-labelledby="trade-directory-heading">
@@ -392,9 +401,27 @@ export default function TradePage() {
                 2026 年前三季度海关 8 位 HS 编码汇总；海关报关离岸与到岸统计口径不同于上市企业年报境外本地产销营业收入。
               </p>
             </div>
-            <span className="caption text-ink-muted tabular-nums">
-              当前栏目共 {formatNumber(activeTabMeta.count)} 条记录
-            </span>
+            <div className="flex flex-wrap items-center gap-3">
+              <label htmlFor="trade-local-filter" className="sr-only">
+                本表关键词筛选
+              </label>
+              <input
+                id="trade-local-filter"
+                type="search"
+                value={queryText}
+                onChange={(e) => {
+                  const next = new URLSearchParams(searchParams);
+                  if (e.target.value.trim()) next.set("q", e.target.value);
+                  else next.delete("q");
+                  setSearchParams(next, { replace: true });
+                }}
+                placeholder="筛选本表品类、HS税号或国家…"
+                className="h-9 w-56 rounded-sm border border-border-strong bg-surface px-3 body-sm text-ink outline-none focus:border-brand-navy"
+              />
+              <span className="caption text-ink-muted tabular-nums">
+                当前栏目共 {formatNumber(activeTabMeta.count)} 条记录
+              </span>
+            </div>
           </div>
 
           {/* 3 Clean Full-Width Underline Tabs */}

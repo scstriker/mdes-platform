@@ -1,4 +1,4 @@
-import type { IndicatorListItem } from "@mdes/shared";
+import { matchesQuery, type IndicatorListItem } from "@mdes/shared";
 
 /** 目录筛选条件，全部来自 URL query；空字符串表示不限 */
 export type CatalogFilters = {
@@ -24,8 +24,7 @@ function matches(i: IndicatorListItem, f: CatalogFilters, skip?: keyof CatalogFi
   if (skip !== "data" && f.data === "with" && i.obs_count === 0) return false;
   if (skip !== "data" && f.data === "without" && i.obs_count > 0) return false;
   if (skip !== "q" && f.q) {
-    const q = f.q.trim().toLowerCase();
-    if (q && !i.id.toLowerCase().includes(q) && !i.name.toLowerCase().includes(q)) return false;
+    if (!matchesQuery(`${i.id} ${i.name}`, f.q)) return false;
   }
   return true;
 }

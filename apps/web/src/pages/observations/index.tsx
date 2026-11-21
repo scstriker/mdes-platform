@@ -40,7 +40,7 @@ const GEO_OPTIONS: readonly { value: string; label: string }[] = [
 export default function ObservationsPage() {
   const url = useUrlState();
   const applied: Filters = Object.fromEntries(FIELDS.map((k) => [k, url.get(k)])) as Filters;
-  const keywordQ = url.get("q").trim().toLowerCase();
+  const keywordQ = url.get("q").trim();
   const appliedKey = JSON.stringify(applied);
   const page = Math.max(0, Number.parseInt(url.get("page") || "1", 10) - 1 || 0);
   const [draft, setDraft] = useState<Filters>(applied);
@@ -50,8 +50,9 @@ export default function ObservationsPage() {
     const f = JSON.parse(appliedKey) as Filters;
     const q: ObservationQuery = { limit: PAGE_SIZE, offset: page * PAGE_SIZE };
     for (const k of FIELDS) if (f[k]) q[k] = f[k];
+    if (keywordQ) q.q = keywordQ;
     return q;
-  }, [appliedKey, page]);
+  }, [appliedKey, keywordQ, page]);
 
   const result = useObservations(query);
   const indicators = useIndicators();
@@ -62,16 +63,8 @@ export default function ObservationsPage() {
 
   const names = useMemo(() => new Map((indicators.data ?? []).map((i) => [i.id, i.name])), [indicators.data]);
   const anyFilter = FIELDS.some((k) => applied[k]) || Boolean(keywordQ);
+  const items = result.data?.items ?? [];
   const total = result.data?.total ?? 0;
-
-  const visibleItems = useMemo(() => {
-    const raw = result.data?.items ?? [];
-    if (!keywordQ) return raw;
-    return raw.filter((r) => {
-      const indName = names.get(r.indicator_id) ?? "";
-      return `${r.indicator_id} ${indName} ${r.period} ${geoLabel(r.geo)} ${formatDims(r.dims)}`.toLowerCase().includes(keywordQ);
-    });
-  }, [result.data?.items, keywordQ, names]);
 
   function submit(e: FormEvent) {
     e.preventDefault();
@@ -84,16 +77,18 @@ export default function ObservationsPage() {
   async function exportCsv() {
     setExporting({ busy: true });
     try {
-      const base = { ...query };
-      let items: Observation[] = [];
-      while (items.length < Math.min(total, EXPORT_MAX)) {
-        const next = await api.observations({ ...base, limit: 500, offset: items.length });
+      const { limit: _limit, offset: _offset, ...base } = query;
+      void _limit;
+      void _offset;
+      let exported: Observation[] = [];
+      while (exported.length < Math.min(total, EXPORT_MAX)) {
+        const next = await api.observations({ ...base, limit: 500, offset: exported.length });
         if (next.items.length === 0) break;
-        items = items.concat(next.items);
+        exported = exported.concat(next.items);
       }
       const csv = toCsv(
         ["indicator_id", "period", "geo", "value_num", "unit", "value_text", "dims", "batch_id", "created_at"],
-        items.map((r) => [
+        exported.map((r) => [
           r.indicator_id,
           r.period,
           r.geo,
@@ -218,7 +213,7 @@ export default function ObservationsPage() {
                   "查询中"
                 ) : (
                   <>
-                    共 <b className="tabular-nums">{formatNumber(keywordQ ? visibleItems.length : total)}</b> 条
+                    共 <b className="tabular-nums">{formatNumber(total)}</b> 条
                     {applied.indicator_id && (
                       <span className="text-ink-muted">
                         {" "}
@@ -226,6 +221,12 @@ export default function ObservationsPage() {
                         <TextLink inline to={`/admin/indicators/${applied.indicator_id}`}>
                           {applied.indicator_id} {names.get(applied.indicator_id) ?? ""}
                         </TextLink>
+                      </span>
+                    )}
+                    {keywordQ && (
+                      <span className="text-ink-muted">
+                        {" "}
+                        · 关键词「<span className="font-semibold text-ink">{keywordQ}</span>」
                       </span>
                     )}
                     {result.isFetching && <span className="ml-2 caption text-ink-muted">更新中</span>}
@@ -239,7 +240,7 @@ export default function ObservationsPage() {
             </div>
             {exporting.error && <Notice tone="danger" title={`导出失败：${exporting.error}`} />}
 
-            {!result.isPending && visibleItems.length === 0 ? (
+            {!result.isPending && total === 0 ? (
               anyFilter ? (
                 <EmptyState
                   title="没有符合条件的观测值"
@@ -268,14 +269,14 @@ export default function ObservationsPage() {
               <DataTable
                 caption="观测值查询结果"
                 columns={columns(names, (batchId) => url.set({ batch_id: batchId, page: null }, { push: true }))}
-                data={visibleItems}
+                data={items}
                 getRowId={(r) => r.id}
                 loading={result.isPending}
                 dense
                 pagination={{
                   page,
                   pageSize: PAGE_SIZE,
-                  total: keywordQ ? visibleItems.length : total,
+                  total,
                   onPageChange: (p) => {
                     url.set({ page: p > 0 ? p + 1 : null }, { push: true });
                     window.scrollTo({ top: 0 });

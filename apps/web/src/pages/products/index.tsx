@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { useSearchParams } from "react-router";
 import type { SortingState } from "@tanstack/react-table";
 import { IconArrowRight, IconRotate, IconX } from "@tabler/icons-react";
+import { matchesQuery } from "@mdes/shared";
 import bannerProducts from "@/assets/visuals/banner-products.webp";
 import { DataTable, formatNumber, Tag, TextLink, type DataTableColumn, type TagTone } from "@/components/itei";
 import { PageVisualBanner } from "@/components/layout/page-visual-banner";
@@ -168,9 +169,14 @@ export default function ProductsPage() {
     for (const row of PRODUCT_EXPLORER_ROWS) {
       if (origin && row.origin !== origin) continue;
       if (category && row.category !== category) continue;
-      if (normalizedQuery) {
-        const hay = `${row.certOrCode} ${row.productName} ${row.specAndScope} ${row.registrant} ${row.category} ${row.originRegion}`.toLowerCase();
-        if (!hay.includes(normalizedQuery)) continue;
+      if (
+        normalizedQuery &&
+        !matchesQuery(
+          `${row.certOrCode} ${row.productName} ${row.specAndScope} ${row.registrant} ${row.category} ${row.origin} ${row.originRegion} ${row.channelLabel}`,
+          normalizedQuery,
+        )
+      ) {
+        continue;
       }
       counts.all += 1;
       counts[row.channel] += 1;
@@ -184,8 +190,10 @@ export default function ProductsPage() {
       if (origin && row.origin !== origin) return false;
       if (category && row.category !== category) return false;
       if (!normalizedQuery) return true;
-      const hay = `${row.certOrCode} ${row.productName} ${row.specAndScope} ${row.registrant} ${row.category} ${row.originRegion}`.toLowerCase();
-      return hay.includes(normalizedQuery);
+      return matchesQuery(
+        `${row.certOrCode} ${row.productName} ${row.specAndScope} ${row.registrant} ${row.category} ${row.origin} ${row.originRegion} ${row.channelLabel}`,
+        normalizedQuery,
+      );
     });
   }, [channel, origin, category, normalizedQuery]);
 
@@ -309,47 +317,49 @@ export default function ProductsPage() {
         </div>
       </section>
 
-      {/* Band 2: Side-by-Side Flagship Statista Infographics */}
-      <section className="border-y border-border bg-surface-sunken" aria-labelledby="reg-structure-heading">
-        <div className="mx-auto w-full max-w-content px-4 py-8 md:px-8 md:py-10">
-          <h2 id="reg-structure-heading" className="sr-only">
-            审评准入趋势与重点赛道存量结构分析
-          </h2>
-          <div className="grid gap-6 lg:grid-cols-2">
-            <StatistaFigure
-              id="fig-products-trend"
-              eyebrow="图 1 · 审评准入趋势"
-              title="国产第三类医疗器械首次注册占比五年跃升至 71.2%"
-              subtitle="2021—2026年前三季度 · 境内与进口首次注册获批数量（单位：件）"
-              badge={{ label: "2026Q1-Q3 同比 +9.6%", tone: "info" }}
-              option={regTrendOption}
-              ariaLabel="2021至2026年前三季度国产与进口第三类医疗器械首次注册数量趋势折线图"
-              height={280}
-              tableColumns={TREND_TABLE_COLUMNS}
-              tableRows={TREND_TABLE_ROWS}
-              exportName="products-first-registration-trend"
-              source="国家药监局医疗器械批准证明文件库"
-              note="2026Q1-Q3 为 1–9 月累计值；历年数据与药监统计年报交叉核验偏差均小于 0.5%"
-            />
+      {/* Band 2: Side-by-Side Flagship Statista Infographics（仅在未执行关键词筛选的总览态展示，避免检索时图表压住结果表） */}
+      {!trimmedQuery && (
+        <section className="border-y border-border bg-surface-sunken" aria-labelledby="reg-structure-heading">
+          <div className="mx-auto w-full max-w-content px-4 py-8 md:px-8 md:py-10">
+            <h2 id="reg-structure-heading" className="sr-only">
+              审评准入趋势与重点赛道存量结构分析
+            </h2>
+            <div className="grid gap-6 lg:grid-cols-2">
+              <StatistaFigure
+                id="fig-products-trend"
+                eyebrow="图 1 · 审评准入趋势"
+                title="国产第三类医疗器械首次注册占比五年跃升至 71.2%"
+                subtitle="2021—2026年前三季度 · 境内与进口首次注册获批数量（单位：件）"
+                badge={{ label: "2026Q1-Q3 同比 +9.6%", tone: "info" }}
+                option={regTrendOption}
+                ariaLabel="2021至2026年前三季度国产与进口第三类医疗器械首次注册数量趋势折线图"
+                height={280}
+                tableColumns={TREND_TABLE_COLUMNS}
+                tableRows={TREND_TABLE_ROWS}
+                exportName="products-first-registration-trend"
+                source="国家药监局医疗器械批准证明文件库"
+                note="2026Q1-Q3 为 1–9 月累计值；历年数据与药监统计年报交叉核验偏差均小于 0.5%"
+              />
 
-            <StatistaFigure
-              id="fig-products-tracks"
-              eyebrow="图 2 · 重点赛道存量结构"
-              title="无源植介入与体外诊断领跑有效三类注册证存量"
-              subtitle="截至 2026年9月末 · 六大重点赛道有效三类注册证规模及占比（单位：件）"
-              badge={{ label: "国产存量占 74.2%", tone: "info" }}
-              option={trackDistributionOption}
-              ariaLabel="六大重点医疗器械产品赛道有效三类注册证规模及占比横向条形图"
-              height={280}
-              tableColumns={TRACK_TABLE_COLUMNS}
-              tableRows={TRACK_TABLE_ROWS}
-              exportName="products-track-distribution"
-              source="国家药监局注册数据库"
-              note="六大赛道合计有效三类注册证 24,680 件，其中境内注册证 18,315 件、进口注册证 6,365 件"
-            />
+              <StatistaFigure
+                id="fig-products-tracks"
+                eyebrow="图 2 · 重点赛道存量结构"
+                title="无源植介入与体外诊断领跑有效三类注册证存量"
+                subtitle="截至 2026年9月末 · 六大重点赛道有效三类注册证规模及占比（单位：件）"
+                badge={{ label: "国产存量占 74.2%", tone: "info" }}
+                option={trackDistributionOption}
+                ariaLabel="六大重点医疗器械产品赛道有效三类注册证规模及占比横向条形图"
+                height={280}
+                tableColumns={TRACK_TABLE_COLUMNS}
+                tableRows={TRACK_TABLE_ROWS}
+                exportName="products-track-distribution"
+                source="国家药监局注册数据库"
+                note="六大赛道合计有效三类注册证 24,680 件，其中境内注册证 18,315 件、进口注册证 6,365 件"
+              />
+            </div>
           </div>
-        </div>
-      </section>
+        </section>
+      )}
 
       {/* Band 3: Representative Approvals, Innovation & UDI Directory */}
       <section className="bg-surface" aria-labelledby="product-explorer-heading">
@@ -441,6 +451,20 @@ export default function ProductsPage() {
                     </option>
                   ))}
                 </select>
+              </div>
+
+              <div className="grid w-56 gap-1 sm:w-64">
+                <label htmlFor="product-local-filter" className="caption font-semibold text-ink-muted">
+                  本表关键词筛选
+                </label>
+                <input
+                  id="product-local-filter"
+                  type="search"
+                  value={q}
+                  onChange={(e) => updateSearchParam("q", e.target.value)}
+                  placeholder="筛选证号、器械名称或企业…"
+                  className={cn(controlClass, "h-10")}
+                />
               </div>
             </div>
 

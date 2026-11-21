@@ -7,6 +7,7 @@ import { importRoutes } from "./routes/import";
 import { indicatorRoutes } from "./routes/indicators";
 import { metaRoutes } from "./routes/meta";
 import { observationRoutes } from "./routes/observations";
+import { searchRoutes } from "./routes/search";
 import { statsRoutes } from "./routes/stats";
 
 export type { AppEnv } from "./env";
@@ -20,6 +21,7 @@ export function createApp(bindDeps: MiddlewareHandler<AppEnv>) {
   metaRoutes(app);
   indicatorRoutes(app);
   observationRoutes(app);
+  searchRoutes(app);
   importRoutes(app);
   statsRoutes(app);
 

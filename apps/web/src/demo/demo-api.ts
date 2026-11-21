@@ -5,10 +5,14 @@
  */
 import {
   errorBody,
+  matchesQuery,
+  observationMatchesQuery,
   parseObservationCsv,
+  tokenizeQuery,
   type ClusterStats,
   type ErrorCode,
   type ErrorParams,
+  type GlobalSearchResult,
   type ImportBatch,
   type ImportResult,
   type ImportStatus,
@@ -56,6 +60,7 @@ const indicators: Indicator[] = seed.indicators
   .sort((a, b) => a.id.localeCompare(b.id));
 
 const knownIds = new Set(indicators.map((i) => i.id));
+const indicatorById = new Map(indicators.map((i) => [i.id, i]));
 const observations: Observation[] = [];
 const batches: ImportBatch[] = [];
 let nextObservationId = 1;
@@ -139,7 +144,7 @@ async function handle(method: string, url: URL, body: BodyInit | null | undefine
 
   if (method === "GET" && path === "/api/observations") {
     const f = Object.fromEntries(
-      ["indicator_id", "period", "period_from", "period_to", "geo", "batch_id"].map((k) => [k, text(q, k)]),
+      ["indicator_id", "period", "period_from", "period_to", "geo", "batch_id", "q"].map((k) => [k, text(q, k)]),
     );
     const limit = int(q.get("limit"), 100, 1, OBSERVATION_LIMIT_MAX);
     const offset = int(q.get("offset"), 0, 0);
@@ -151,10 +156,55 @@ async function handle(method: string, url: URL, body: BodyInit | null | undefine
           (!f.period_from || o.period >= f.period_from) &&
           (!f.period_to || o.period.slice(0, f.period_to.length) <= f.period_to) &&
           (!f.geo || o.geo === f.geo) &&
-          (!f.batch_id || o.batch_id === f.batch_id),
+          (!f.batch_id || o.batch_id === f.batch_id) &&
+          observationMatchesQuery(o, indicatorById.get(o.indicator_id)?.name ?? "", f.q),
       )
       .sort((a, b) => b.period.localeCompare(a.period) || Number(b.id) - Number(a.id));
     return json({ items: matched.slice(offset, offset + limit), total: matched.length, limit, offset });
+  }
+
+  if (method === "GET" && path === "/api/search") {
+    const rawQ = text(q, "q") ?? "";
+    const tokens = tokenizeQuery(rawQ);
+    const limit = int(q.get("limit"), 12, 1, 50);
+    if (tokens.length === 0) {
+      const empty: GlobalSearchResult = {
+        query: "",
+        observations: { items: [], total: 0 },
+        indicators: { items: [], total: 0 },
+      };
+      return json(empty);
+    }
+    const matchedObs = observations
+      .filter((o) => observationMatchesQuery(o, indicatorById.get(o.indicator_id)?.name ?? "", rawQ))
+      .sort((a, b) => b.period.localeCompare(a.period) || Number(b.id) - Number(a.id))
+      .map((o) => {
+        const ind = indicatorById.get(o.indicator_id);
+        return {
+          ...o,
+          indicator_name: ind?.name ?? o.indicator_id,
+          cluster_code: ind?.cluster_code ?? "",
+        };
+      });
+    const matchedInds = indicators
+      .filter((i) => {
+        const def = String(i.spec_json.definition ?? "");
+        const src = String(i.spec_json.source ?? "");
+        return matchesQuery(`${i.id} ${i.name} ${i.cluster_code} ${def} ${src}`, tokens);
+      })
+      .map((i) => {
+        const { spec_json: _spec, ...rest } = withStats(i);
+        void _spec;
+        return rest;
+      })
+      .sort((a, b) => b.obs_count - a.obs_count || a.id.localeCompare(b.id));
+
+    const body: GlobalSearchResult = {
+      query: rawQ,
+      observations: { items: matchedObs.slice(0, limit), total: matchedObs.length },
+      indicators: { items: matchedInds.slice(0, limit), total: matchedInds.length },
+    };
+    return json(body);
   }
 
   if (method === "POST" && path === "/api/import/csv") {

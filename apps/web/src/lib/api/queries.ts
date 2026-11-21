@@ -10,6 +10,7 @@ export const queryKeys = {
   indicators: (params: { phase?: Phase; cluster?: string } = {}) => ["indicators", params] as const,
   indicator: (id: string) => ["indicator", id] as const,
   observations: (params: ObservationQuery) => ["observations", params] as const,
+  search: (q: string, limit = 12) => ["search", q, limit] as const,
   batches: ["batches"] as const,
 };
 
@@ -66,15 +67,29 @@ export const useAllObservations = (params: ObservationQuery, enabled = true) =>
     },
   });
 
-export const useBatches = () =>
-  useQuery({ queryKey: queryKeys.batches, queryFn: ({ signal }) => api.batches({ signal }).then((r) => r.items) });
+export const useBatches = (enabled = true) =>
+  useQuery({
+    queryKey: queryKeys.batches,
+    queryFn: ({ signal }) => api.batches({ signal }).then((r) => r.items),
+    enabled,
+  });
+
+export const useGlobalSearch = (q: string, limit = 12, enabled = true) => {
+  const trimmed = q.trim();
+  return useQuery({
+    queryKey: queryKeys.search(trimmed, limit),
+    queryFn: ({ signal }) => api.search({ q: trimmed, limit }, { signal }),
+    placeholderData: keepPreviousData,
+    enabled: enabled && trimmed.length > 0,
+  });
+};
 
 export function useImportCsv() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (file: File) => api.importCsv(file),
     onSuccess: () => {
-      for (const key of [["observations"], ["indicators"], ["indicator"], ["stats"], ["batches"]]) {
+      for (const key of [["observations"], ["indicators"], ["indicator"], ["stats"], ["batches"], ["search"]]) {
         qc.invalidateQueries({ queryKey: key });
       }
     },

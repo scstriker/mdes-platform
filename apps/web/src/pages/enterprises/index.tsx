@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router";
 import { IconX } from "@tabler/icons-react";
+import { matchesQuery } from "@mdes/shared";
 import bannerEnterprises from "@/assets/visuals/banner-enterprises.webp";
 import { DataTable, formatNumber, Tag, TextLink, type DataTableColumn } from "@/components/itei";
 import { PageVisualBanner } from "@/components/layout/page-visual-banner";
@@ -59,18 +60,20 @@ export default function EnterprisesPage() {
     setSearchParams(next, { replace: true });
   }
 
-  // 1. 重点企业筛选（响应顶部本栏范围检索词 q）
+  // 1. 重点企业筛选（响应顶部本栏范围检索词 q，与全站搜索共用多词项匹配规则）
   const filteredFirms = useMemo(() => {
     return ENTERPRISE_POOL_ROWS.filter((r) => {
       if (group !== "all" && !r.groups.includes(group)) return false;
       if (province && r.province !== province) return false;
       if (!q) return true;
-      const hay = `${r.shortName} ${r.entityCode} ${r.coreBusiness} ${r.boardLabel} ${r.province} ${r.statusBatch}`.toLowerCase();
-      return hay.includes(q);
+      return matchesQuery(
+        `${r.shortName} ${r.entityCode} ${r.coreBusiness} ${r.boardLabel} ${r.province} ${r.statusBatch} ${r.revenueAndRd} ${r.overseasNote}`,
+        q,
+      );
     });
   }, [group, province, q]);
 
-  // 2. 研发创新、检验检测与临床试验备案机构合并全集（彻底修复此前企业页检索框漏搜机构表的 Bug！）
+  // 2. 研发创新、检验检测与临床试验备案机构合并全集
   const allInstitutions = useMemo<readonly ServiceInstitutionRow[]>(
     () => [...RD_CLINICAL_PLATFORMS, ...TESTING_GCP_INSTITUTIONS],
     [],
@@ -81,8 +84,10 @@ export default function EnterprisesPage() {
       if (instTab !== "all" && inst.instGroup !== instTab) return false;
       if (province && inst.province !== province) return false;
       if (!q) return true;
-      const hay = `${inst.name} ${inst.hostUnit} ${inst.categoryLabel} ${inst.province} ${inst.specialtyScope} ${inst.qualificationNote}`.toLowerCase();
-      return hay.includes(q);
+      return matchesQuery(
+        `${inst.name} ${inst.hostUnit} ${inst.categoryLabel} ${inst.province} ${inst.specialtyScope} ${inst.qualificationNote}`,
+        q,
+      );
     });
   }, [allInstitutions, instTab, province, q]);
 
@@ -258,59 +263,61 @@ export default function EnterprisesPage() {
         </div>
       </div>
 
-      {/* Band 2：双栏 Statista 级区域产业集聚与研发密度分化信息图（彻底消除左图右表 100% 重复） */}
-      <section aria-label="区域集聚与研发密度分析" className="grid gap-6 lg:grid-cols-2">
-        <StatistaFigure
-          id="fig-enterprises-provinces"
-          eyebrow="图 1 · 区域产业集聚格局"
-          title="粤苏京沪浙五省市集聚全国逾七成三类有效注册证"
-          subtitle="截至 2026年9月末 · 前十省市有效第三类医疗器械注册证存量（单位：件）"
-          badge={{ label: "前五省市占 74.1%", tone: "info" }}
-          ariaLabel="前十省市有效第三类医疗器械注册证存量横向排名条形图"
-          height={292}
-          option={(t) =>
-            statistaHorizontalBarOption(t, {
-              categories: PROVINCIAL_CONCENTRATION.map((r) => r.province),
-              values: PROVINCIAL_CONCENTRATION.map((r) => r.class3ValidCerts),
-              labels: PROVINCIAL_CONCENTRATION.map(
-                (r) => `${r.class3ValidCerts.toLocaleString("zh-CN")}（${r.class3SharePct}）`,
-              ),
-              highlightTopN: 5,
-              rightPadding: 108,
-            })
-          }
-          tableColumns={provinceTableColumns}
-          tableRows={provinceTableRows}
-          exportName="enterprises-provincial-certs"
-          source="国家药监局注册与生产许可数据库"
-          note="按注册人法人登记省份统计；前十省市合计占全国有效三类证存量的 92.7%"
-        />
+      {/* Band 2：双栏 Statista 级区域产业集聚与研发密度分化信息图（关键词筛选态自动收起，优先呈现匹配名录） */}
+      {!rawQuery && (
+        <section aria-label="区域集聚与研发密度分析" className="grid gap-6 lg:grid-cols-2">
+          <StatistaFigure
+            id="fig-enterprises-provinces"
+            eyebrow="图 1 · 区域产业集聚格局"
+            title="粤苏京沪浙五省市集聚全国逾七成三类有效注册证"
+            subtitle="截至 2026年9月末 · 前十省市有效第三类医疗器械注册证存量（单位：件）"
+            badge={{ label: "前五省市占 74.1%", tone: "info" }}
+            ariaLabel="前十省市有效第三类医疗器械注册证存量横向排名条形图"
+            height={292}
+            option={(t) =>
+              statistaHorizontalBarOption(t, {
+                categories: PROVINCIAL_CONCENTRATION.map((r) => r.province),
+                values: PROVINCIAL_CONCENTRATION.map((r) => r.class3ValidCerts),
+                labels: PROVINCIAL_CONCENTRATION.map(
+                  (r) => `${r.class3ValidCerts.toLocaleString("zh-CN")}（${r.class3SharePct}）`,
+                ),
+                highlightTopN: 5,
+                rightPadding: 108,
+              })
+            }
+            tableColumns={provinceTableColumns}
+            tableRows={provinceTableRows}
+            exportName="enterprises-provincial-certs"
+            source="国家药监局注册与生产许可数据库"
+            note="按注册人法人登记省份统计；前十省市合计占全国有效三类证存量的 92.7%"
+          />
 
-        <StatistaFigure
-          id="fig-enterprises-density"
-          eyebrow="图 2 · 区域研发密度分化"
-          title="京沪呈现高研发持证密度特征，粤苏兼顾大规模制造基底"
-          subtitle="截至 2026年9月末 · 前十省市每百家生产企业平均持有三类有效证数（单位：件/百家）"
-          badge={{ label: "北京 254 件/百家", tone: "info" }}
-          ariaLabel="重点省市每百家生产企业平均持有三类注册证密度横向条形图"
-          height={292}
-          option={(t) =>
-            statistaHorizontalBarOption(t, {
-              categories: densityRanked.map((r) => r.province),
-              values: densityRanked.map((r) => r.certsPer100Firms),
-              labels: densityRanked.map((r) => `${r.certsPer100Firms} 件/百企`),
-              highlightTopN: 2,
-              referenceLine: { value: 118, label: "十省均值 118" },
-              rightPadding: 92,
-            })
-          }
-          tableColumns={densityTableColumns}
-          tableRows={densityTableRows}
-          exportName="enterprises-rd-density"
-          source="机械工业仪器仪表综合技术经济研究所（ITEI）测算"
-          note="京沪集中大量三甲临床中心与有源高端植介入总部，单位主体高风险三类证产出密度居首"
-        />
-      </section>
+          <StatistaFigure
+            id="fig-enterprises-density"
+            eyebrow="图 2 · 区域研发密度分化"
+            title="京沪呈现高研发持证密度特征，粤苏兼顾大规模制造基底"
+            subtitle="截至 2026年9月末 · 前十省市每百家生产企业平均持有三类有效证数（单位：件/百家）"
+            badge={{ label: "北京 254 件/百家", tone: "info" }}
+            ariaLabel="重点省市每百家生产企业平均持有三类注册证密度横向条形图"
+            height={292}
+            option={(t) =>
+              statistaHorizontalBarOption(t, {
+                categories: densityRanked.map((r) => r.province),
+                values: densityRanked.map((r) => r.certsPer100Firms),
+                labels: densityRanked.map((r) => `${r.certsPer100Firms} 件/百企`),
+                highlightTopN: 2,
+                referenceLine: { value: 118, label: "十省均值 118" },
+                rightPadding: 92,
+              })
+            }
+            tableColumns={densityTableColumns}
+            tableRows={densityTableRows}
+            exportName="enterprises-rd-density"
+            source="机械工业仪器仪表综合技术经济研究所（ITEI）测算"
+            note="京沪集中大量三甲临床中心与有源高端植介入总部，单位主体高风险三类证产出密度居首"
+          />
+        </section>
+      )}
 
       {/* 当前过滤条件反馈条（当顶部范围搜索或省份激活时显示） */}
       {(rawQuery || province || group !== "all") && (
@@ -336,7 +343,7 @@ export default function EnterprisesPage() {
       )}
 
       {/* Band 3：制造业单项冠军与上市企业名录（紧凑单行 + 分页） */}
-      <section aria-label="重点上市与单项冠军企业名录" className="grid gap-4">
+      <section id="enterprise-directory-heading" aria-label="重点上市与单项冠军企业名录" className="grid gap-4">
         <div className="flex flex-wrap items-end justify-between gap-4 border-b border-border pb-3">
           <div>
             <h2 className="title-sub text-brand-navy">制造业单项冠军与上市企业名录</h2>
@@ -345,6 +352,17 @@ export default function EnterprisesPage() {
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-3">
+            <label htmlFor="ent-local-filter" className="sr-only">
+              本表关键词筛选
+            </label>
+            <input
+              id="ent-local-filter"
+              type="search"
+              value={searchParams.get("q") ?? ""}
+              onChange={(e) => updateParam({ q: e.target.value || null })}
+              placeholder="筛选本表企业或机构…"
+              className="h-9 w-48 rounded-sm border border-border-strong bg-surface px-3 body-sm text-ink outline-none focus:border-brand-navy"
+            />
             <label htmlFor="ent-province-filter" className="body-sm text-ink-muted">
               注册省市
             </label>

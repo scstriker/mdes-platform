@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router";
 import { IconCheck, IconChevronDown, IconChevronUp, IconCopy, IconX } from "@tabler/icons-react";
+import { matchesQuery } from "@mdes/shared";
 import bannerReports from "@/assets/visuals/banner-reports.webp";
 import { DataTable, Tag, TextLink, type DataTableColumn } from "@/components/itei";
 import { PageVisualBanner } from "@/components/layout/page-visual-banner";
@@ -61,24 +62,21 @@ function coverLabelFor(series: string): string {
 
 export default function ReportsPage() {
   const [searchParams, setSearchParams] = useSearchParams();
-  const activeTab = parseTab(searchParams.get("tab"));
+  const explicitTab = searchParams.get("tab");
+  const requestedTab = parseTab(explicitTab);
   const rawQuery = searchParams.get("q")?.trim() ?? "";
   const q = rawQuery.toLowerCase();
 
-  // 默认全部收起长结论，实现一屏纵览全部 6 篇智库代表性成果（彻底消除图5下半屏大面积空白截断）
+  // 默认全部收起长结论，实现一屏纵览全部 6 篇智库代表性成果
   const [expandedIds, setExpandedIds] = useState<Set<string>>(() => new Set());
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [policyLevel, setPolicyLevel] = useState<"全部" | PolicyLevel>("全部");
   const [guidelineCat, setGuidelineCat] = useState<"全部" | GuidelineCategory>("全部");
   const [page, setPage] = useState(0);
 
-  useEffect(() => {
-    setPage(0);
-  }, [activeTab, q, policyLevel, guidelineCat]);
-
   function setTab(nextTab: ReportTabKey) {
     const next = new URLSearchParams(searchParams);
-    if (nextTab === "briefings") next.delete("tab");
+    if (nextTab === "briefings" && !rawQuery) next.delete("tab");
     else next.set("tab", nextTab);
     setSearchParams(next, { replace: true });
   }
@@ -108,11 +106,11 @@ export default function ReportsPage() {
     }
   }, []);
 
-  // 各分栏过滤（统一响应顶部 <ScopedSearchBar /> 驱动的 URL ?q=）
+  // 各分栏过滤（统一响应顶部 <ScopedSearchBar /> 驱动的 URL ?q=，与全站共用多词项匹配规则）
   const filteredBriefings = useMemo(
     () =>
       BRIEFING_LEDGER.filter(
-        (b) => !q || `${b.title} ${b.series} ${b.summary} ${b.keyFindings.join(" ")}`.toLowerCase().includes(q),
+        (b) => !q || matchesQuery(`${b.title} ${b.series} ${b.summary} ${b.keyFindings.join(" ")}`, q),
       ),
     [q],
   );
@@ -122,7 +120,7 @@ export default function ReportsPage() {
       POLICY_CLAUSE_ROWS.filter((p) => {
         if (policyLevel !== "全部" && p.level !== policyLevel) return false;
         if (!q) return true;
-        return `${p.docNo} ${p.title} ${p.agency} ${p.topic} ${p.clauseSummary}`.toLowerCase().includes(q);
+        return matchesQuery(`${p.docNo} ${p.title} ${p.agency} ${p.topic} ${p.level} ${p.clauseSummary}`, q);
       }),
     [policyLevel, q],
   );
@@ -132,7 +130,7 @@ export default function ReportsPage() {
       GUIDELINE_ROWS.filter((g) => {
         if (guidelineCat !== "全部" && g.category !== guidelineCat) return false;
         if (!q) return true;
-        return `${g.noticeNo} ${g.title} ${g.category} ${g.classCode} ${g.reviewPoints}`.toLowerCase().includes(q);
+        return matchesQuery(`${g.noticeNo} ${g.title} ${g.category} ${g.classCode} ${g.reviewPoints}`, q);
       }),
     [guidelineCat, q],
   );
@@ -140,7 +138,7 @@ export default function ReportsPage() {
   const filteredAnnuals = useMemo(
     () =>
       ANNUAL_REPORTS_ROWS.filter(
-        (a) => !q || `${a.reportTitle} ${a.publisher} ${a.reconciliationScope}`.toLowerCase().includes(q),
+        (a) => !q || matchesQuery(`${a.reportTitle} ${a.publisher} ${a.latestIssue} ${a.reconciliationScope}`, q),
       ),
     [q],
   );
@@ -148,7 +146,7 @@ export default function ReportsPage() {
   const filteredStandards = useMemo(
     () =>
       STANDARD_CATALOG_ROWS.filter(
-        (s) => !q || `${s.stdNo} ${s.stdName} ${s.scope} ${s.nature} ${s.keyClause}`.toLowerCase().includes(q),
+        (s) => !q || matchesQuery(`${s.stdNo} ${s.stdName} ${s.scope} ${s.nature} ${s.status} ${s.keyClause}`, q),
       ),
     [q],
   );
@@ -159,6 +157,16 @@ export default function ReportsPage() {
     guidelines: filteredGuidelines.length,
     standards: filteredAnnuals.length + filteredStandards.length,
   };
+
+  // 未显式指定 tab 且默认分栏无命中时（如从全站搜索深链进入 /reports?q=GB+9706.1），自动落入首个有命中的分栏
+  const activeTab: ReportTabKey =
+    !explicitTab && q && tabCounts[requestedTab] === 0
+      ? (VALID_TABS.find((k) => tabCounts[k] > 0) ?? requestedTab)
+      : requestedTab;
+
+  useEffect(() => {
+    setPage(0);
+  }, [activeTab, q, policyLevel, guidelineCat]);
 
   // 当激活分栏命中 0 条，但兄弟分栏有命中时，提供智能跨 Tab 检索引导
   const fallbackSiblingTab = useMemo(() => {
@@ -360,56 +368,58 @@ export default function ReportsPage() {
         </div>
       </div>
 
-      {/* Band 2：双栏 Statista 级政策主题与审评指导原则构成信息图（终结原图5 0图表空白） */}
-      <section aria-label="政策焦点与技术规范结构概览" className="grid gap-6 lg:grid-cols-2">
-        <StatistaFigure
-          id="fig-reports-policy"
-          eyebrow="图 1 · 产业政策主题结构"
-          title="设备更新改造与创新审评准入成为国家及地方政策首要着力点"
-          subtitle="截至 2026年9月 · 418 份国家级部委及重点省市医疗器械政策主题分布（单位：份）"
-          badge={{ label: "收录有效政策 418 份", tone: "info" }}
-          ariaLabel="国家及地方医疗器械政策主题分布横向条形图"
-          height={256}
-          option={(t) =>
-            statistaHorizontalBarOption(t, {
-              categories: POLICY_TOPIC_DISTRIBUTION.map((d) => d.topic),
-              values: POLICY_TOPIC_DISTRIBUTION.map((d) => d.count),
-              labels: POLICY_TOPIC_DISTRIBUTION.map((d) => d.barLabel),
-              highlightTopN: 2,
-              rightPadding: 108,
-            })
-          }
-          tableColumns={policyChartCols}
-          tableRows={POLICY_TOPIC_DISTRIBUTION as unknown as Record<string, string | number>[]}
-          exportName="policy-topic-distribution"
-          source="国务院各部委及重点省市人民政府公开公报"
-          note="单份综合政策按核心医疗装备支持条款主方向归类统计"
-        />
+      {/* Band 2：双栏 Statista 级政策主题与审评指导原则构成信息图（关键词筛选态自动收起，优先呈现匹配文献） */}
+      {!rawQuery && (
+        <section aria-label="政策焦点与技术规范结构概览" className="grid gap-6 lg:grid-cols-2">
+          <StatistaFigure
+            id="fig-reports-policy"
+            eyebrow="图 1 · 产业政策主题结构"
+            title="设备更新改造与创新审评准入成为国家及地方政策首要着力点"
+            subtitle="截至 2026年9月 · 418 份国家级部委及重点省市医疗器械政策主题分布（单位：份）"
+            badge={{ label: "收录有效政策 418 份", tone: "info" }}
+            ariaLabel="国家及地方医疗器械政策主题分布横向条形图"
+            height={256}
+            option={(t) =>
+              statistaHorizontalBarOption(t, {
+                categories: POLICY_TOPIC_DISTRIBUTION.map((d) => d.topic),
+                values: POLICY_TOPIC_DISTRIBUTION.map((d) => d.count),
+                labels: POLICY_TOPIC_DISTRIBUTION.map((d) => d.barLabel),
+                highlightTopN: 2,
+                rightPadding: 108,
+              })
+            }
+            tableColumns={policyChartCols}
+            tableRows={POLICY_TOPIC_DISTRIBUTION as unknown as Record<string, string | number>[]}
+            exportName="policy-topic-distribution"
+            source="国务院各部委及重点省市人民政府公开公报"
+            note="单份综合政策按核心医疗装备支持条款主方向归类统计"
+          />
 
-        <StatistaFigure
-          id="fig-reports-guidelines"
-          eyebrow="图 2 · 审评指导原则赛道分布"
-          title="植介入耗材、体外诊断与医学影像合计占现行指导原则逾七成"
-          subtitle="截至 2026年9月 · 506 份现行医疗器械注册审查指导原则技术领域构成（单位：份）"
-          badge={{ label: "现行有效 506 份", tone: "info" }}
-          ariaLabel="医疗器械注册审查指导原则技术赛道分布横向条形图"
-          height={256}
-          option={(t) =>
-            statistaHorizontalBarOption(t, {
-              categories: GUIDELINE_TRACK_DISTRIBUTION.map((d) => d.track),
-              values: GUIDELINE_TRACK_DISTRIBUTION.map((d) => d.count),
-              labels: GUIDELINE_TRACK_DISTRIBUTION.map((d) => d.barLabel),
-              highlightTopN: 3,
-              rightPadding: 108,
-            })
-          }
-          tableColumns={guidelineChartCols}
-          tableRows={GUIDELINE_TRACK_DISTRIBUTION as unknown as Record<string, string | number>[]}
-          exportName="guideline-track-distribution"
-          source="国家药监局医疗器械技术审评中心（CMDE）"
-          note="覆盖全部 22 个《医疗器械分类目录》子目录及 6840 体外诊断试剂"
-        />
-      </section>
+          <StatistaFigure
+            id="fig-reports-guidelines"
+            eyebrow="图 2 · 审评指导原则赛道分布"
+            title="植介入耗材、体外诊断与医学影像合计占现行指导原则逾七成"
+            subtitle="截至 2026年9月 · 506 份现行医疗器械注册审查指导原则技术领域构成（单位：份）"
+            badge={{ label: "现行有效 506 份", tone: "info" }}
+            ariaLabel="医疗器械注册审查指导原则技术赛道分布横向条形图"
+            height={256}
+            option={(t) =>
+              statistaHorizontalBarOption(t, {
+                categories: GUIDELINE_TRACK_DISTRIBUTION.map((d) => d.track),
+                values: GUIDELINE_TRACK_DISTRIBUTION.map((d) => d.count),
+                labels: GUIDELINE_TRACK_DISTRIBUTION.map((d) => d.barLabel),
+                highlightTopN: 3,
+                rightPadding: 108,
+              })
+            }
+            tableColumns={guidelineChartCols}
+            tableRows={GUIDELINE_TRACK_DISTRIBUTION as unknown as Record<string, string | number>[]}
+            exportName="guideline-track-distribution"
+            source="国家药监局医疗器械技术审评中心（CMDE）"
+            note="覆盖全部 22 个《医疗器械分类目录》子目录及 6840 体外诊断试剂"
+          />
+        </section>
+      )}
 
       {/* Band 3：四分栏智库文献与法规标准检索台 */}
       <section id="fig-reports-briefings" aria-label="研究报告与法规标准目录" className="grid gap-5">
@@ -438,16 +448,34 @@ export default function ReportsPage() {
             })}
           </div>
 
-          {rawQuery && (
-            <button
-              type="button"
-              onClick={clearQuery}
-              className="inline-flex cursor-pointer items-center gap-1 body-sm font-semibold text-link hover:underline focus-ring"
-            >
-              <IconX size={15} aria-hidden="true" />
-              清除检索词「{rawQuery}」
-            </button>
-          )}
+          <div className="flex flex-wrap items-center gap-3 pb-1.5">
+            <label htmlFor="reports-local-filter" className="sr-only">
+              本表关键词筛选
+            </label>
+            <input
+              id="reports-local-filter"
+              type="search"
+              value={searchParams.get("q") ?? ""}
+              onChange={(e) => {
+                const next = new URLSearchParams(searchParams);
+                if (e.target.value.trim()) next.set("q", e.target.value);
+                else next.delete("q");
+                setSearchParams(next, { replace: true });
+              }}
+              placeholder="筛选本表报告、字号或标准号…"
+              className="h-9 w-52 rounded-sm border border-border-strong bg-surface px-3 body-sm text-ink outline-none focus:border-brand-navy"
+            />
+            {rawQuery && (
+              <button
+                type="button"
+                onClick={clearQuery}
+                className="inline-flex cursor-pointer items-center gap-1 body-sm font-semibold text-link hover:underline focus-ring"
+              >
+                <IconX size={15} aria-hidden="true" />
+                清除
+              </button>
+            )}
+          </div>
         </div>
 
         {/* 跨 Tab 检索引导（解决原图5搜指导原则/标准词在默认报告 Tab 显示 0 条死胡同的问题） */}

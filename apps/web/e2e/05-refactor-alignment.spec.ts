@@ -40,8 +40,8 @@ test.describe("前端重构专项验收：部委智库门户、同轴范围搜�
       }
     }
 
-    // 校验子页面搜索框默认锁定「指标目录」范围，且聚焦弹出搜索建议面板
-    await expect(page.getByLabel("检索范围")).toHaveValue("/system");
+    // 校验顶部全局搜索框默认面向全站跨库检索，且聚焦弹出搜索建议面板
+    await expect(page.getByLabel("检索范围")).toHaveValue("/search");
     await page.locator("#system-indicator-search").focus();
     await expect(page.getByRole("region", { name: "搜索建议" })).toBeVisible();
   });
@@ -105,15 +105,17 @@ test.describe("前端重构专项验收：部委智库门户、同轴范围搜�
     await page.getByRole("button", { name: /^切换到第 4 帧/ }).click();
     await expect(h1).toContainText("贸易顺差稳步扩大");
 
-    // 验证首页外显分域检索携带查询词直达对应业务子页，且进入子页后搜索框默认锁定该子页范围
+    // 验证前台顶部搜索栏选择领域并检索统一进入独立搜索结果页 /search（零无关宏观图表遮挡）
     const bannerSearch = page.locator("section").first().locator("form[role=search]");
     await bannerSearch.getByLabel("检索范围").selectOption("/products");
-    await bannerSearch.locator("input").first().fill("手术");
+    await bannerSearch.locator("input").first().fill("磁共振");
     await bannerSearch.getByRole("button", { name: /检索/ }).click();
-    await expect(page).toHaveURL(/\/products\?q=/);
-    await expect(page.getByRole("heading", { level: 1, name: /注册准入与产品数据库/ })).toBeVisible();
+    await expect(page).toHaveURL(/\/search\?q=.*&scope=products/);
+    await expect(page.getByRole("heading", { level: 1, name: /「磁共振」的搜索结果/ })).toBeVisible();
+    await expect(page.locator('[data-slot="figure-canvas"]')).toHaveCount(0);
+    await expect(page.locator("main")).toContainText("5.0T 超高场全身磁共振成像系统");
     await expect(page.getByLabel("检索范围")).toHaveValue("/products");
-    await expect(page.getByText("本栏：注册与产品")).toBeVisible();
+    await expect(page.getByText("领域：注册与产品")).toBeVisible();
   });
 
   test("4. 按需输出全量 14+ 页面多视口验收截图", async ({ page }) => {
