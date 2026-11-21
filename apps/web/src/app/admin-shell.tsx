@@ -2,6 +2,7 @@ import { Suspense } from "react";
 import { Link, NavLink, Outlet, ScrollRestoration, useLocation } from "react-router";
 import { IconArrowLeft } from "@tabler/icons-react";
 import { AppFooter, AppHeader } from "@/components/itei";
+import { ScopedSearchBar } from "@/components/layout/scoped-search-bar";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import { useDocumentTitle } from "@/lib/theme";
@@ -10,8 +11,8 @@ import { PRODUCT_NAME } from "./nav";
 import { ThemeMenu } from "./theme-menu";
 
 /**
- * 数据后台外框：白底页眉「数据后台」+ 左侧导航 + 细深蓝页脚。
- * 当前项浅蓝底 + 左侧深蓝竖线；红色留给内容区。
+ * 数据后台外框：白底页眉「数据后台」+ 左侧治理导航 + 顶部后台分域搜索栏 + 细深蓝页脚。
+ * 适度放宽至 max-w-7xl，消除多列台账挤压折行；所有工程指标库与原始观测值核查在后台内形成完整闭环。
  */
 export function AdminShell() {
   useDocumentTitle(`数据后台 · ${PRODUCT_NAME}`);
@@ -36,37 +37,24 @@ export function AdminShell() {
               className="inline-flex items-center gap-1.5 border-b-2 border-transparent py-1 button text-ink transition-colors duration-150 hover:text-brand-navy focus-ring"
             >
               <IconArrowLeft size={18} aria-hidden="true" />
-              返回前台
+              返回门户前台
             </Link>
-            <span className="hidden caption text-ink-muted sm:inline">（示意）数据管理员</span>
+            <span className="hidden caption text-ink-muted sm:inline">数据治理管理员</span>
             <ThemeMenu />
           </>
         }
       />
-      <div className="mx-auto flex w-full max-w-content flex-1 flex-col md:flex-row">
-        <aside className="shrink-0 border-b border-border bg-surface-sunken md:w-56 md:border-r md:border-b-0">
+      <div className="mx-auto flex w-full max-w-7xl flex-1 flex-col md:flex-row">
+        <aside className="shrink-0 border-b border-border bg-surface-sunken md:w-52 md:border-r md:border-b-0">
           <nav aria-label="数据后台导航" className="flex gap-1 overflow-x-auto p-3 md:flex-col md:overflow-visible md:py-6">
             {groups.map((group) => (
-              <div key={group} className="flex shrink-0 flex-col gap-0.5 md:mb-4">
-                <p className="hidden px-3 pb-1 caption text-ink-muted md:block">{group}</p>
+              <div key={group} className="flex shrink-0 flex-col gap-0.5 md:mb-5">
+                <p className="hidden px-3 pb-1.5 label text-ink-muted md:block">{group}</p>
                 {ADMIN_NAV.filter((i) => i.group === group).map((item) => {
                   const active =
                     item.href === "/admin"
                       ? pathname === "/admin"
                       : pathname === item.href || pathname.startsWith(`${item.href}/`);
-                  if (item.disabled) {
-                    return (
-                      <span
-                        key={item.href}
-                        title="本轮未开放"
-                        aria-disabled="true"
-                        className="flex items-center justify-between gap-2 rounded-none px-3 py-2 body text-ink-muted"
-                      >
-                        {item.label}
-                        <span className="caption">未开放</span>
-                      </span>
-                    );
-                  }
                   return (
                     <NavLink
                       key={item.href}
@@ -89,12 +77,13 @@ export function AdminShell() {
           </nav>
         </aside>
         <main id="main" tabIndex={-1} className="min-w-0 flex-1 outline-none">
+          <ScopedSearchBar mode="admin" />
           <Suspense fallback={<AdminFallback />}>
             <Outlet />
           </Suspense>
         </main>
       </div>
-      <AppFooter left={PRODUCT_NAME} center="仅限本所内部使用" right="数据后台" />
+      <AppFooter left={PRODUCT_NAME} center="机械工业仪器仪表综合技术经济研究所 · 内部数据治理台" right="数据管理后台" />
       <ScrollRestoration />
     </div>
   );

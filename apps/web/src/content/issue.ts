@@ -95,11 +95,15 @@ export type HomepageStat = {
   value: number;
   digits?: number;
   unit: string;
+  delta: string;
+  direction: KpiDirection;
+  trend: readonly number[];
   href: string;
 };
 
 export type HomepageInsight = {
   id: string;
+  domainTag: string;
   title: string;
   href: string;
   featured?: boolean;
@@ -109,7 +113,10 @@ export type HomepageBriefing = {
   id: string;
   coverVariant: "quarterly" | "domestic";
   coverLabel: string;
+  issueTag: string;
+  date: string;
   title: string;
+  takeaway: string;
   href: string;
 };
 
@@ -216,13 +223,13 @@ export const ISSUE = {
   ] as const,
 
   tradeTrendSeries: [
-    { period: "2025Q1", exportUsd: 96.2, importUsd: 90.8 },
-    { period: "2025Q2", exportUsd: 99.4, importUsd: 92.1 },
-    { period: "2025Q3", exportUsd: 97.6, importUsd: 91.3 },
-    { period: "2025Q4", exportUsd: 104.8, importUsd: 93.5 },
-    { period: "2026Q1", exportUsd: 101.5, importUsd: 88.6 },
-    { period: "2026Q2", exportUsd: 104.3, importUsd: 89.5 },
-    { period: "2026Q3", exportUsd: 106.8, importUsd: 90.3 },
+    { period: "2025Q1", exportUsd: 96.2, importUsd: 90.8, surplusUsd: 5.4 },
+    { period: "2025Q2", exportUsd: 99.4, importUsd: 92.1, surplusUsd: 7.3 },
+    { period: "2025Q3", exportUsd: 97.6, importUsd: 91.3, surplusUsd: 6.3 },
+    { period: "2025Q4", exportUsd: 104.8, importUsd: 93.5, surplusUsd: 11.3 },
+    { period: "2026Q1", exportUsd: 101.5, importUsd: 88.6, surplusUsd: 12.9 },
+    { period: "2026Q2", exportUsd: 104.3, importUsd: 89.5, surplusUsd: 14.8 },
+    { period: "2026Q3", exportUsd: 106.8, importUsd: 90.3, surplusUsd: 16.5 },
   ] as const,
 
   innovTrackSeries: [
@@ -446,7 +453,7 @@ export const ISSUE = {
     },
   ] satisfies readonly RegulatoryArchiveItem[],
 
-  /** 首页 4 帧经典克制轮播：2 张 Gemini 多模态智库视觉 + 2 张 ECharts 真实趋势主图 */
+  /** 首页 4 帧经典克制轮播：2 张 Gemini 多模态智库视觉 + 2 张 Statista 级真实趋势主图 */
   heroSlides: [
     {
       id: "slide-bluebook",
@@ -454,8 +461,8 @@ export const ISSUE = {
       thumbLabel: "季度监测报告",
       title: "《2026 年前三季度医疗器械产业运行监测报告》发布",
       synopsis:
-        "2026 年 10 月，机械工业仪器仪表综合技术经济研究所依托《指标体系 V3.0》发布总第 3 期季度监测报告。前三季度批准第三类首次注册 2,814 件、国产占比升至 71.2%，获批创新器械 49 件，海关出口 312.6 亿美元。",
-      href: "/reports",
+        "机械工业仪器仪表综合技术经济研究所正式发布 2026 年第三季度产业运行监测报告（总第 3 期），统筹药监审评审批、重点企业运行与海关贸易多源数据，系统研判境内审评准入提速、高端装备本土替代及全球供应链韧性演变态势。",
+      href: "/reports#fig-reports-briefings",
       ctaLabel: "查看报告详情",
       posterKicker: "ITEI · 2026 年第 3 季度",
       posterLines: ["医疗器械产业运行", "监测报告"],
@@ -470,7 +477,7 @@ export const ISSUE = {
         "2026 年前三季度国家药监局正式批准创新医疗器械 49 件，较上年同期增加 11 件。腔镜手术机器人、5.0T 超高场磁共振、植入式脑机接口等高端装备集中获批，审评转正周期稳步缩短。",
       href: "/products?channel=innov",
       ctaLabel: "进入注册与产品库",
-      posterKicker: "创新审查专题 · 指标 02",
+      posterKicker: "ITEI · 创新审评观察",
       posterLines: ["高端医疗装备创新", "获批态势观察"],
       posterFoot: "前三季度获批 49 件 · 同比增 11 件",
     },
@@ -481,7 +488,7 @@ export const ISSUE = {
       title: "第三类医疗器械首次注册国产占比连续五年攀升至七成",
       synopsis:
         "2021 年至 2026 年前三季度，境内第三类首次注册占比由 52.1% 提升至 71.2%。有源手术器械、医用成像设备与无源植入成为本土替代主要拉动赛道，粤苏沪京浙五省市承载逾六成新增量。",
-      href: "/products",
+      href: "/products#fig-products-trend",
       ctaLabel: "查看注册结构明细",
     },
     {
@@ -490,65 +497,114 @@ export const ISSUE = {
       thumbLabel: "海关进出口走势",
       title: "医疗器械贸易顺差稳步扩大，高端核心部件集中度仍须关注",
       synopsis:
-        "2026 年前三季度医疗器械累计出口 312.6 亿美元（同比 +6.6%），进口 268.4 亿美元（同比 -2.1%）。中端常规设备本土替代提速，但超导磁体与高端探测器进口来源集中度仍逾七成。",
+        "2026 年第三季度医疗器械单季出口达 106.8 亿美元、进口 90.3 亿美元，单季贸易顺差扩至 16.5 亿美元。中端常规诊疗设备本土替代持续提速，但超导磁体、高热容量球管与高端探测器进口来源集中度仍逾七成。",
       href: "/trade",
       ctaLabel: "进入进出口贸易库",
     },
   ] satisfies readonly HeroCarouselSlide[],
 
-  /** 首页极静单行 4 项压舱石核心数字 */
+  /** 首页核心监测指标（2026 年前三季度累计 · numeral-lg 大数 + 同比增量 + 同期微趋势线） */
   homepageStats: [
-    { id: "stat-reg", label: "三类首次注册", value: 2814, unit: "件", href: "/products" },
-    { id: "stat-innov", label: "获批创新器械", value: 49, unit: "件", href: "/products?channel=innov" },
-    { id: "stat-exp", label: "器械出口额", value: 312.6, digits: 1, unit: "亿美元", href: "/trade" },
-    { id: "stat-imp", label: "器械进口额", value: 268.4, digits: 1, unit: "亿美元", href: "/trade" },
+    {
+      id: "stat-reg",
+      label: "三类首次注册",
+      value: 2814,
+      unit: "件",
+      delta: "同比 +9.6%",
+      direction: "up",
+      trend: [1640, 1785, 1972, 2260, 2568, 2814],
+      href: "/products",
+    },
+    {
+      id: "stat-innov",
+      label: "获批创新器械",
+      value: 49,
+      unit: "件",
+      delta: "较上年同期 +11 件",
+      direction: "up",
+      trend: [24, 29, 33, 36, 38, 49],
+      href: "/products?channel=innov",
+    },
+    {
+      id: "stat-exp",
+      label: "器械出口额",
+      value: 312.6,
+      digits: 1,
+      unit: "亿美元",
+      delta: "同比 +6.6%",
+      direction: "up",
+      trend: [264.8, 275.4, 283.6, 288.5, 293.2, 312.6],
+      href: "/trade",
+    },
+    {
+      id: "stat-imp",
+      label: "器械进口额",
+      value: 268.4,
+      digits: 1,
+      unit: "亿美元",
+      delta: "同比 -2.1%",
+      direction: "down",
+      trend: [289.6, 284.2, 279.5, 276.8, 274.2, 268.4],
+      href: "/trade",
+    },
   ] satisfies readonly HomepageStat[],
 
-  /** 首页「ITEI 研判」5 条纯单行（零摘要段落，对标信通院 CAICT 观点） */
+  /** 首页「ITEI 研判」5 条领域观点（配领域微标 + 子页图表锚点直达） */
   homepageInsights: [
     {
       id: "ins-1",
+      domainTag: "供应链",
       title: "进口回落伴随结构升级，高端影像核心部件来源集中度仍逾七成",
-      href: "/trade",
+      href: "/trade#fig-trade-concentration",
       featured: true,
     },
     {
       id: "ins-2",
+      domainTag: "创新准入",
       title: "创新审查持续向有源手术装备与高端植介入倾斜",
-      href: "/products?channel=innov",
+      href: "/products?channel=innov#fig-products-tracks",
     },
     {
       id: "ins-3",
+      domainTag: "区域集聚",
       title: "粤苏沪京浙五省市承载逾六成第三类首次注册新增量",
-      href: "/enterprises",
+      href: "/enterprises#fig-enterprises-provinces",
     },
     {
       id: "ins-4",
+      domainTag: "结构跃迁",
       title: "国产第三类医疗器械首次注册占比连续五年稳步攀升",
-      href: "/products",
+      href: "/products#fig-products-trend",
     },
     {
       id: "ins-5",
+      domainTag: "口径辨析",
       title: "海关出口额与上市龙头境外营收口径差异辨析",
-      href: "/reports",
+      href: "/reports#fig-reports-briefings",
     },
   ] satisfies readonly HomepageInsight[],
 
-  /** 首页「权威发布」2 份旗舰报告（Gemini 封面图 + 纯单行报告名） */
+  /** 首页「权威发布」2 份旗舰报告（封面缩略图 + 期号标签 + 发布日期 + 核心结论提要） */
   homepageBriefings: [
     {
       id: "pub-1",
       coverVariant: "quarterly",
       coverLabel: "监测报告",
+      issueTag: "总第 3 期 · 季度报告",
+      date: "2026-10-28",
       title: "2026 年前三季度医疗器械产业运行监测报告",
-      href: "/reports",
+      takeaway: "三类首次注册同比增 9.6%，有源手术与医学影像贡献近七成国产增量，诊疗整机拉动贸易顺差走阔。",
+      href: "/reports#fig-reports-briefings",
     },
     {
       id: "pub-2",
       coverVariant: "domestic",
       coverLabel: "专题简报",
+      issueTag: "专报第 7 期 · 赛道解构",
+      date: "2026-09-19",
       title: "国产第三类首次注册突破七成赛道解构简报",
-      href: "/reports",
+      takeaway: "复盘 22 类子目录五年替代斜率，无源植入与有源手术领跑，高场磁共振球管及高端导管仍存进口依赖。",
+      href: "/reports#fig-reports-briefings",
     },
   ] satisfies readonly HomepageBriefing[],
 } as const;

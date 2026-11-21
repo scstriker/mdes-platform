@@ -1,233 +1,225 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router";
-import { IconArrowRight, IconRotate } from "@tabler/icons-react";
+import { IconX } from "@tabler/icons-react";
+import { matchesQuery } from "@mdes/shared";
 import bannerEnterprises from "@/assets/visuals/banner-enterprises.webp";
 import { DataTable, formatNumber, Tag, TextLink, type DataTableColumn } from "@/components/itei";
 import { PageVisualBanner } from "@/components/layout/page-visual-banner";
-import { Button } from "@/components/ui/button";
-import { controlClass, Input } from "@/components/ui/input";
-import { SYSTEM_INDICATORS, type SystemIndicator } from "@/content/system-v3";
-import type { ChartOption } from "@/lib/charts/echarts";
-import { baseOption, categoryAxis, LazyChart, valueAxis, type ChartTheme } from "@/lib/charts/lazy-chart";
+import { StatistaFigure } from "@/components/layout/statista-figure";
+import { statistaHorizontalBarOption } from "@/lib/charts/theme";
 import { cn } from "@/lib/utils";
 import {
   ENTERPRISE_KPIS,
   ENTERPRISE_POOL_ROWS,
   ENTERPRISE_PROVINCE_OPTIONS,
   GROUP_TABS,
+  INSTITUTION_TABS,
   PROVINCIAL_CONCENTRATION,
   RD_CLINICAL_PLATFORMS,
   TESTING_GCP_INSTITUTIONS,
   type EnterpriseGroup,
   type EnterprisePoolRow,
+  type InstitutionTab,
   type ServiceInstitutionRow,
 } from "./data";
 
 const VALID_GROUPS = new Set<EnterpriseGroup>(["all", "champion", "ashare", "hk"]);
-
-type InstitutionTab = "rd-clinical" | "testing-gcp";
+const PAGE_SIZE = 8;
 
 function parseGroup(raw: string | null): EnterpriseGroup {
-  if (raw && VALID_GROUPS.has(raw as EnterpriseGroup)) {
-    return raw as EnterpriseGroup;
-  }
+  if (raw && VALID_GROUPS.has(raw as EnterpriseGroup)) return raw as EnterpriseGroup;
   return "all";
 }
 
-function provincialBarOption(t: ChartTheme): ChartOption {
-  const ordered = [...PROVINCIAL_CONCENTRATION].reverse();
-  const provinces = ordered.map((d) => d.province);
-  const class3Certs = ordered.map((d) => d.class3ValidCerts);
-  const manufacturers = ordered.map((d) => d.manufacturers);
-
-  return {
-    ...baseOption(t, 2),
-    xAxis: valueAxis(t, { name: "数量（件/家）", scale: false }),
-    yAxis: categoryAxis(t, provinces),
-    series: [
-      {
-        type: "bar",
-        name: "三类有效注册证（件）",
-        data: class3Certs,
-        barMaxWidth: 11,
-        itemStyle: { color: t.series[0] },
-      },
-      {
-        type: "bar",
-        name: "二三类生产企业（家）",
-        data: manufacturers,
-        barMaxWidth: 11,
-        itemStyle: { color: t.series[1] },
-      },
-    ],
-  };
-}
-
-const ENTERPRISE_INDICATORS: readonly SystemIndicator[] = SYSTEM_INDICATORS.filter(
-  (item) => item.level1 === "三、企业与机构",
-);
-
 export default function EnterprisesPage() {
   const [searchParams, setSearchParams] = useSearchParams();
-  const q = searchParams.get("q") ?? "";
   const group = parseGroup(searchParams.get("group"));
+  const province = searchParams.get("province") ?? "";
+  const rawQuery = searchParams.get("q")?.trim() ?? "";
+  const q = rawQuery.toLowerCase();
 
-  const [province, setProvince] = useState<string>("");
-  const [instTab, setInstTab] = useState<InstitutionTab>("rd-clinical");
+  const [entPage, setEntPage] = useState(0);
+  const [instTab, setInstTab] = useState<InstitutionTab>("all");
+  const [instPage, setInstPage] = useState(0);
 
-  const updateSearchParam = (key: "q" | "group", value: string) => {
+  useEffect(() => {
+    setEntPage(0);
+    setInstPage(0);
+  }, [group, province, q]);
+
+  useEffect(() => {
+    setInstPage(0);
+  }, [instTab]);
+
+  function updateParam(updates: Record<string, string | null>) {
     const next = new URLSearchParams(searchParams);
-    if (!value || (key === "group" && value === "all")) {
-      next.delete(key);
-    } else {
-      next.set(key, value);
+    for (const [k, v] of Object.entries(updates)) {
+      if (!v || v === "all") next.delete(k);
+      else next.set(k, v);
     }
     setSearchParams(next, { replace: true });
-  };
+  }
 
-  const resetFilters = () => {
-    setProvince("");
-    const next = new URLSearchParams(searchParams);
-    next.delete("q");
-    next.delete("group");
-    setSearchParams(next, { replace: true });
-  };
-
-  const normalizedQuery = q.trim().toLowerCase();
-
-  const groupCounts = useMemo(() => {
-    const counts: Record<EnterpriseGroup, number> = {
-      all: 0,
-      champion: 0,
-      ashare: 0,
-      hk: 0,
-    };
-    for (const row of ENTERPRISE_POOL_ROWS) {
-      if (province && row.province !== province) continue;
-      if (normalizedQuery) {
-        const hay = `${row.entityCode} ${row.shortName} ${row.coreBusiness} ${row.boardLabel} ${row.province} ${row.overseasNote}`.toLowerCase();
-        if (!hay.includes(normalizedQuery)) continue;
-      }
-      counts.all += 1;
-      for (const g of row.groups) {
-        counts[g] += 1;
-      }
-    }
-    return counts;
-  }, [province, normalizedQuery]);
-
-  const filteredEnterprises = useMemo(() => {
-    return ENTERPRISE_POOL_ROWS.filter((row) => {
-      if (group !== "all" && !row.groups.includes(group)) return false;
-      if (province && row.province !== province) return false;
-      if (!normalizedQuery) return true;
-      const hay = `${row.entityCode} ${row.shortName} ${row.coreBusiness} ${row.boardLabel} ${row.province} ${row.overseasNote}`.toLowerCase();
-      return hay.includes(normalizedQuery);
+  // 1. 重点企业筛选（响应顶部本栏范围检索词 q，与全站搜索共用多词项匹配规则）
+  const filteredFirms = useMemo(() => {
+    return ENTERPRISE_POOL_ROWS.filter((r) => {
+      if (group !== "all" && !r.groups.includes(group)) return false;
+      if (province && r.province !== province) return false;
+      if (!q) return true;
+      return matchesQuery(
+        `${r.shortName} ${r.entityCode} ${r.coreBusiness} ${r.boardLabel} ${r.province} ${r.statusBatch} ${r.revenueAndRd} ${r.overseasNote}`,
+        q,
+      );
     });
-  }, [group, province, normalizedQuery]);
+  }, [group, province, q]);
 
-  const hasActiveFilter = group !== "all" || Boolean(province) || Boolean(normalizedQuery);
+  // 2. 研发创新、检验检测与临床试验备案机构合并全集
+  const allInstitutions = useMemo<readonly ServiceInstitutionRow[]>(
+    () => [...RD_CLINICAL_PLATFORMS, ...TESTING_GCP_INSTITUTIONS],
+    [],
+  );
 
-  const enterpriseColumns = useMemo<DataTableColumn<EnterprisePoolRow>[]>(
+  const filteredInstitutions = useMemo(() => {
+    return allInstitutions.filter((inst) => {
+      if (instTab !== "all" && inst.instGroup !== instTab) return false;
+      if (province && inst.province !== province) return false;
+      if (!q) return true;
+      return matchesQuery(
+        `${inst.name} ${inst.hostUnit} ${inst.categoryLabel} ${inst.province} ${inst.specialtyScope} ${inst.qualificationNote}`,
+        q,
+      );
+    });
+  }, [allInstitutions, instTab, province, q]);
+
+  // 计算每百家生产企业平均持有三类有效注册证数（密度排行）
+  const densityRanked = useMemo(() => {
+    return [...PROVINCIAL_CONCENTRATION]
+      .map((r) => ({
+        ...r,
+        certsPer100Firms: Math.round((r.class3ValidCerts / r.manufacturers) * 100),
+      }))
+      .sort((a, b) => b.certsPer100Firms - a.certsPer100Firms);
+  }, []);
+
+  const provinceTableColumns = [
+    { key: "province", title: "省市" },
+    { key: "class3ValidCerts", title: "三类有效证(件)", align: "right" as const },
+    { key: "class3SharePct", title: "全国占比", align: "right" as const },
+    { key: "manufacturers", title: "生产企业(家)", align: "right" as const },
+    { key: "champions", title: "单项冠军", align: "right" as const },
+    { key: "listedFirms", title: "上市企业", align: "right" as const },
+  ];
+
+  const provinceTableRows = useMemo(
+    () =>
+      PROVINCIAL_CONCENTRATION.map((r) => ({
+        province: r.province,
+        class3ValidCerts: formatNumber(r.class3ValidCerts),
+        class3SharePct: r.class3SharePct,
+        manufacturers: formatNumber(r.manufacturers),
+        champions: r.champions,
+        listedFirms: r.listedFirms,
+      })),
+    [],
+  );
+
+  const densityTableColumns = [
+    { key: "province", title: "省市" },
+    { key: "certsPer100Firms", title: "每百企三类证(件)", align: "right" as const },
+    { key: "champions", title: "单项冠军(家/项)", align: "right" as const },
+    { key: "gcpInstitutions", title: "临床备案机构(家)", align: "right" as const },
+  ];
+
+  const densityTableRows = useMemo(
+    () =>
+      densityRanked.map((r) => ({
+        province: r.province,
+        certsPer100Firms: r.certsPer100Firms,
+        champions: r.champions,
+        gcpInstitutions: r.gcpInstitutions,
+      })),
+    [densityRanked],
+  );
+
+  const firmColumns: DataTableColumn<EnterprisePoolRow>[] = useMemo(
     () => [
-      {
-        key: "entityCode",
-        title: "证券/主体代码",
-        type: "code",
-        colClassName: "w-28",
-      },
+      { key: "entityCode", title: "证券代码", type: "code", colClassName: "w-28" },
       {
         key: "shortName",
-        title: "企业简称与核心业务",
+        title: "企业简称与核心装备产线",
         primary: true,
-        cell: (row) => (
-          <div className="grid gap-0.5">
-            <span className="font-semibold text-ink">{row.shortName}</span>
-            <span className="caption text-ink-muted">{row.coreBusiness}</span>
+        cell: (r) => (
+          <div className="grid min-w-0 gap-0.5">
+            <span className="font-semibold text-brand-navy">{r.shortName}</span>
+            <span className="truncate caption text-ink-muted">{r.coreBusiness}</span>
           </div>
         ),
       },
       {
         key: "boardLabel",
-        title: "资质/上市板块",
+        title: "资质与板块",
         type: "status",
-        colClassName: "w-36",
-        cell: (row) => (
-          <Tag size="sm" tone={row.tagTone}>
-            {row.boardLabel}
+        colClassName: "w-40",
+        cell: (r) => (
+          <Tag size="sm" tone={r.tagTone}>
+            {r.boardLabel}
           </Tag>
         ),
       },
-      {
-        key: "province",
-        title: "省份",
-        colClassName: "w-16",
-      },
+      { key: "province", title: "省市", colClassName: "w-16" },
       {
         key: "revenueAndRd",
-        title: "器械分部营收/研发强度口径",
-        colClassName: "w-40",
-        cell: (row) => (
+        title: "器械营收与研发强度",
+        colClassName: "w-48",
+        cell: (r) => (
           <div className="grid gap-0.5">
-            <span className="tabular-nums font-semibold text-ink">{row.revenueAndRd}</span>
-            <span className="caption text-ink-muted">{row.overseasNote}</span>
+            <span className="body-sm font-semibold tabular-nums text-ink">{r.revenueAndRd}</span>
+            <span className="truncate caption text-ink-muted">{r.overseasNote}</span>
           </div>
         ),
       },
       {
         key: "statusBatch",
-        title: "状态/批次",
-        colClassName: "w-24",
-        cell: (row) => <span className="caption font-semibold text-brand-navy">{row.statusBatch}</span>,
+        title: "批次与上市形态",
+        colClassName: "w-32",
+        cell: (r) => <span className="body-sm text-ink-muted">{r.statusBatch}</span>,
       },
     ],
     [],
   );
 
-  const institutionColumns = useMemo<DataTableColumn<ServiceInstitutionRow>[]>(
+  const instColumns: DataTableColumn<ServiceInstitutionRow>[] = useMemo(
     () => [
       {
-        key: "seq",
-        title: "指标项",
-        type: "code",
-        colClassName: "w-20",
-        cell: (row) => <TextLink to={`/system/${row.seq}`}>{row.seq}号</TextLink>,
-      },
-      {
         key: "name",
-        title: "机构/平台名称与依托主体",
+        title: "机构名称与依托主体",
         primary: true,
-        colClassName: "w-72",
-        cell: (row) => (
-          <div className="grid gap-0.5">
-            <span className="font-semibold text-ink">{row.name}</span>
-            <span className="caption text-ink-muted">依托单位：{row.hostUnit}</span>
+        cell: (r) => (
+          <div className="grid min-w-0 gap-0.5">
+            <span className="font-semibold text-brand-navy">{r.name}</span>
+            <span className="truncate caption text-ink-muted">依托单位：{r.hostUnit}</span>
           </div>
         ),
       },
       {
         key: "categoryLabel",
-        title: "机构层级类别",
+        title: "机构类别",
         type: "status",
-        colClassName: "w-40",
-        cell: (row) => (
-          <Tag size="sm" tone={row.seq === "19" || row.seq === "21" ? "info" : "neutral"}>
-            {row.categoryLabel}
+        colClassName: "w-44",
+        cell: (r) => (
+          <Tag size="sm" tone={r.tagTone}>
+            {r.categoryLabel}
           </Tag>
         ),
       },
-      {
-        key: "province",
-        title: "省份",
-        colClassName: "w-16",
-      },
+      { key: "province", title: "省市", colClassName: "w-16" },
       {
         key: "specialtyScope",
-        title: "专业攻关方向 / CMA 承检与临床备案范围",
-        cell: (row) => (
-          <div className="grid gap-0.5">
-            <span className="text-ink">{row.specialtyScope}</span>
-            <span className="caption text-ink-muted">{row.qualificationNote}</span>
+        title: "专业攻关与承检/临床备案范围",
+        cell: (r) => (
+          <div className="grid min-w-0 gap-0.5">
+            <span className="truncate body-sm text-ink">{r.specialtyScope}</span>
+            <span className="caption text-ink-muted">{r.qualificationNote}</span>
           </div>
         ),
       },
@@ -235,384 +227,256 @@ export default function EnterprisesPage() {
     [],
   );
 
-  const ledgerColumns = useMemo<DataTableColumn<SystemIndicator>[]>(
-    () => [
-      {
-        key: "seq",
-        title: "序号",
-        type: "code",
-        colClassName: "w-16",
-      },
-      {
-        key: "name",
-        title: "三级指标",
-        primary: true,
-        colClassName: "w-56",
-        cell: (row) => (
-          <div className="grid gap-0.5">
-            <TextLink to={`/system/${row.seq}`} className="font-semibold">
-              {row.name}
-            </TextLink>
-            <span className="caption text-ink-muted">{row.level2}</span>
-          </div>
-        ),
-      },
-      {
-        key: "grain",
-        title: "记录粒度与消歧主键",
-        cell: (row) => (
-          <div className="grid gap-0.5">
-            <span className="text-ink">{row.grain}</span>
-            <span className="caption text-ink-muted">主键：{row.entityKeys}</span>
-          </div>
-        ),
-      },
-      {
-        key: "source",
-        title: "数据来源",
-        colClassName: "w-40",
-        cell: (row) => (
-          <span className="text-ink">
-            {row.source}
-            <span className="ml-1 caption text-ink-muted">（{row.frequency}）</span>
-          </span>
-        ),
-      },
-      {
-        key: "phase",
-        title: "建设阶段",
-        type: "status",
-        colClassName: "w-28",
-        cell: (row) =>
-          row.phase1 ? (
-            <Tag size="sm" tone="info">
-              一期已纳入
-            </Tag>
-          ) : (
-            <Tag size="sm" tone="neutral">
-              二期规划
-            </Tag>
-          ),
-      },
-    ],
-    [],
+  const pagedFirms = useMemo(
+    () => filteredFirms.slice(entPage * PAGE_SIZE, (entPage + 1) * PAGE_SIZE),
+    [filteredFirms, entPage],
+  );
+  const pagedInstitutions = useMemo(
+    () => filteredInstitutions.slice(instPage * PAGE_SIZE, (instPage + 1) * PAGE_SIZE),
+    [filteredInstitutions, instPage],
   );
 
   return (
-    <div>
-      {/* Band 1: Page Header & Open 5-Column Rule-Line KPI Strip */}
-      <section className="bg-surface" aria-labelledby="enterprises-page-title">
-        <div className="mx-auto grid w-full max-w-content gap-6 px-4 py-8 md:px-8 md:py-10">
-          <PageVisualBanner
-            titleId="enterprises-page-title"
-            title="企业主体、省市分布与服务机构库"
-            summary="以统一社会信用代码为枢纽，汇聚生产企业（09）、制造业单项冠军（12）、上市样本池（13–16）及研发检测临床支撑机构。"
-            image={bannerEnterprises}
-            actions={
-              <TextLink to="/system#l1-ent" className="inline-flex items-center gap-1 body">
-                指标体系释义（09–22）
-                <IconArrowRight size={15} aria-hidden="true" />
-              </TextLink>
+    <div className="mx-auto grid w-full max-w-content gap-10 px-4 py-8 md:px-8 md:py-10">
+      {/* Band 1：智库页头 + 5 列核心产业主体指标 */}
+      <div className="grid gap-6">
+        <PageVisualBanner
+          title="企业主体、省市分布与服务机构库"
+          summary="按统一社会信用代码法人去重，统筹全国医疗器械生产主体、制造业单项冠军、上市龙头及国家级创新检测临床支撑平台。"
+          image={bannerEnterprises}
+          actions={<TextLink to="/system#l1-ent">查看企业与服务机构统计口径 →</TextLink>}
+        />
+
+        <div className="grid grid-cols-2 border-t-2 border-t-brand-navy border-b border-border sm:grid-cols-3 lg:grid-cols-5 lg:divide-x lg:divide-border">
+          {ENTERPRISE_KPIS.map((kpi) => (
+            <div key={kpi.label} className="grid content-between gap-1.5 px-3 py-3.5 lg:px-4 lg:first:pl-1">
+              <p className="body-sm font-semibold text-ink-muted">{kpi.label}</p>
+              <div>
+                <p className="inline-flex items-baseline gap-1 tabular-nums">
+                  <span className="numeral text-brand-navy">{kpi.value}</span>
+                  <span className="caption text-ink-muted">{kpi.unit}</span>
+                </p>
+                <p className="mt-0.5 caption text-ink-muted">{kpi.subnote}</p>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Band 2：双栏 Statista 级区域产业集聚与研发密度分化信息图（关键词筛选态自动收起，优先呈现匹配名录） */}
+      {!rawQuery && (
+        <section aria-label="区域集聚与研发密度分析" className="grid gap-6 lg:grid-cols-2">
+          <StatistaFigure
+            id="fig-enterprises-provinces"
+            eyebrow="图 1 · 区域产业集聚格局"
+            title="粤苏京沪浙五省市集聚全国逾七成三类有效注册证"
+            subtitle="截至 2026年9月末 · 前十省市有效第三类医疗器械注册证存量（单位：件）"
+            badge={{ label: "前五省市占 74.1%", tone: "info" }}
+            ariaLabel="前十省市有效第三类医疗器械注册证存量横向排名条形图"
+            height={292}
+            option={(t) =>
+              statistaHorizontalBarOption(t, {
+                categories: PROVINCIAL_CONCENTRATION.map((r) => r.province),
+                values: PROVINCIAL_CONCENTRATION.map((r) => r.class3ValidCerts),
+                labels: PROVINCIAL_CONCENTRATION.map(
+                  (r) => `${r.class3ValidCerts.toLocaleString("zh-CN")}（${r.class3SharePct}）`,
+                ),
+                highlightTopN: 5,
+                rightPadding: 108,
+              })
             }
+            tableColumns={provinceTableColumns}
+            tableRows={provinceTableRows}
+            exportName="enterprises-provincial-certs"
+            source="国家药监局注册与生产许可数据库"
+            note="按注册人法人登记省份统计；前十省市合计占全国有效三类证存量的 92.7%"
           />
 
-          <div
-            role="region"
-            aria-label="企业与服务机构核心指标通栏"
-            className="grid grid-cols-2 gap-y-5 border-t-2 border-brand-navy border-b border-border py-4 md:grid-cols-5 md:gap-y-0 md:divide-x md:divide-border md:py-0"
+          <StatistaFigure
+            id="fig-enterprises-density"
+            eyebrow="图 2 · 区域研发密度分化"
+            title="京沪呈现高研发持证密度特征，粤苏兼顾大规模制造基底"
+            subtitle="截至 2026年9月末 · 前十省市每百家生产企业平均持有三类有效证数（单位：件/百家）"
+            badge={{ label: "北京 254 件/百家", tone: "info" }}
+            ariaLabel="重点省市每百家生产企业平均持有三类注册证密度横向条形图"
+            height={292}
+            option={(t) =>
+              statistaHorizontalBarOption(t, {
+                categories: densityRanked.map((r) => r.province),
+                values: densityRanked.map((r) => r.certsPer100Firms),
+                labels: densityRanked.map((r) => `${r.certsPer100Firms} 件/百企`),
+                highlightTopN: 2,
+                referenceLine: { value: 118, label: "十省均值 118" },
+                rightPadding: 92,
+              })
+            }
+            tableColumns={densityTableColumns}
+            tableRows={densityTableRows}
+            exportName="enterprises-rd-density"
+            source="机械工业仪器仪表综合技术经济研究所（ITEI）测算"
+            note="京沪集中大量三甲临床中心与有源高端植介入总部，单位主体高风险三类证产出密度居首"
+          />
+        </section>
+      )}
+
+      {/* 当前过滤条件反馈条（当顶部范围搜索或省份激活时显示） */}
+      {(rawQuery || province || group !== "all") && (
+        <div
+          role="status"
+          className="flex flex-wrap items-center justify-between gap-3 border border-border bg-info-bg px-4 py-2.5 body-sm text-ink"
+        >
+          <span>
+            当前本栏筛选{rawQuery ? `「${rawQuery}」` : ""}
+            {province ? ` · 省市：${province}` : ""}：匹配重点企业{" "}
+            <strong className="font-semibold tabular-nums text-brand-navy">{filteredFirms.length}</strong> 家，研发检验临床机构{" "}
+            <strong className="font-semibold tabular-nums text-brand-navy">{filteredInstitutions.length}</strong> 家。
+          </span>
+          <button
+            type="button"
+            onClick={() => updateParam({ q: null, province: null, group: null })}
+            className="inline-flex cursor-pointer items-center gap-1 font-semibold text-link hover:underline focus-ring"
           >
-            {ENTERPRISE_KPIS.map((kpi) => (
-              <div key={kpi.label} className="grid content-start gap-1 pr-3 md:px-4 md:py-4 md:first:pl-0 md:last:pr-0">
-                <div className="flex items-baseline justify-between gap-2">
-                  <span className="label text-ink-muted">{kpi.label}</span>
-                  <TextLink to={kpi.seqHref} className="code text-link">
-                    {kpi.seqDisplay}
-                  </TextLink>
-                </div>
-                <p className="numeral tabular-nums text-brand-navy">
-                  {kpi.value}
-                  <span className="ml-1 body-sm font-normal text-ink-muted">{kpi.unit}</span>
-                </p>
-                <p className="caption text-ink-muted">{kpi.subnote}</p>
-              </div>
-            ))}
-          </div>
+            <IconX size={15} aria-hidden="true" />
+            重置全部筛选
+          </button>
         </div>
-      </section>
+      )}
 
-      {/* Band 2: Provincial Industry Concentration Workbench */}
-      <section className="border-y border-border bg-surface-sunken" aria-labelledby="provincial-workbench-heading">
-        <div className="mx-auto w-full max-w-content px-4 py-8 md:px-8 md:py-10">
-          <div className="grid gap-8 lg:grid-cols-12 lg:gap-0 lg:divide-x lg:divide-border">
-            {/* Left: Horizontal Comparative Bar Chart */}
-            <div className="grid content-start gap-4 lg:col-span-6 lg:pr-8">
-              <div className="grid gap-1">
-                <h2 id="provincial-workbench-heading" className="title-sub text-brand-navy">
-                  前十省市三类有效注册证与生产企业分布
-                </h2>
-                <p className="caption text-ink-muted">
-                  广东、江苏、北京、上海、浙江、山东、湖南、湖北、四川、天津（前十省市合计占境内三类有效注册证 92.7%）
-                </p>
-              </div>
-
-              <LazyChart
-                option={provincialBarOption}
-                ariaLabel="前十省市三类有效注册证数量与二三类医疗器械生产企业数量水平对比条形图"
-                height={336}
-              />
-
-              <p className="border-l-2 border-brand-sky pl-3 caption text-ink-muted">
-                结构特征：广东、江苏兼具规模制造与三类持证总量优势；北京、上海出现「三类有效注册证数量反超生产企业法人数」的高研发密度特征，集中分布高端影像、手术机器人与心血管神经植介入企业。
-              </p>
-            </div>
-
-            {/* Right: Academic Three-Line Provincial Table */}
-            <div className="grid content-start gap-4 lg:col-span-6 lg:pl-8">
-              <div className="flex flex-wrap items-baseline justify-between gap-2">
-                <h2 className="title-sub text-brand-navy">重点省市产业规模与支撑机构统计表</h2>
-                <span className="caption text-ink-muted">按境内三类注册证占比降序</span>
-              </div>
-
-              <div className="overflow-x-auto focus-ring" tabIndex={0}>
-                <table className="w-full border-collapse border-t-2 border-brand-navy border-b border-border body-sm">
-                  <caption className="sr-only">前十省市医疗器械生产企业、三类注册证占比、单项冠军、上市企业与临床试验机构统计表</caption>
-                  <thead>
-                    <tr className="border-b-2 border-brand-sky">
-                      <th scope="col" className="py-2 pr-2 text-left label font-bold text-brand-navy">
-                        省份
-                      </th>
-                      <th scope="col" className="px-2 py-2 text-right label font-bold text-brand-navy">
-                        生产企业(家)
-                      </th>
-                      <th scope="col" className="px-2 py-2 text-right label font-bold text-brand-navy">
-                        三类注册证占比
-                      </th>
-                      <th scope="col" className="px-2 py-2 text-right label font-bold text-brand-navy">
-                        单项冠军(项)
-                      </th>
-                      <th scope="col" className="px-2 py-2 text-right label font-bold text-brand-navy">
-                        上市企业(家)
-                      </th>
-                      <th scope="col" className="py-2 pl-2 text-right label font-bold text-brand-navy">
-                        临床试验机构(家)
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-border">
-                    {PROVINCIAL_CONCENTRATION.map((row) => (
-                      <tr key={row.province}>
-                        <td className="py-1.5 pr-2 font-semibold text-ink">{row.province}</td>
-                        <td className="px-2 py-1.5 text-right tabular-nums text-ink">{formatNumber(row.manufacturers)}</td>
-                        <td className="px-2 py-1.5 text-right code text-brand-navy">{row.class3SharePct}</td>
-                        <td className="px-2 py-1.5 text-right tabular-nums text-ink">{row.champions}</td>
-                        <td className="px-2 py-1.5 text-right tabular-nums text-ink">{row.listedFirms}</td>
-                        <td className="py-1.5 pl-2 text-right tabular-nums text-ink-muted">{row.gcpInstitutions}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-
-              <p className="border-l-2 border-brand-sky pl-3 caption text-ink-muted">
-                注：遵循审图规范采用分省统计表与条形对比；企业工商注册地与异地生产基地按统一社会信用代码去重统计。
-              </p>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      {/* Band 3: Single-Champion (12) & Listed Enterprise Pool (13 + 14–16 Annual Report Linkage) Explorer */}
-      <section className="bg-surface" aria-labelledby="enterprise-explorer-heading">
-        <div className="mx-auto grid w-full max-w-content gap-5 px-4 py-8 md:px-8 md:py-10">
-          <div className="flex flex-wrap items-end justify-between gap-3">
-            <div className="grid gap-1">
-              <h2 id="enterprise-explorer-heading" className="title-sub text-brand-navy">
-                制造业单项冠军（12）与上市企业标准样本池（13–16）检索
-              </h2>
-              <p className="caption text-ink-muted">
-                衔接工信部制造业单项冠军名录、Wind 医疗器械上市样本池及年报医疗器械分部营收、研发投入强度与境外收入口径
-              </p>
-            </div>
-            <div className="flex items-center gap-3">
-              <span className="body-sm tabular-nums text-ink-muted">
-                当前显示 <strong className="font-semibold text-brand-navy">{filteredEnterprises.length}</strong> /{" "}
-                {ENTERPRISE_POOL_ROWS.length} 家代表主体
-              </span>
-              {hasActiveFilter && (
-                <Button variant="ghost" size="sm" onClick={resetFilters}>
-                  <IconRotate size={14} aria-hidden="true" />
-                  重置筛选
-                </Button>
-              )}
-            </div>
-          </div>
-
-          {/* Group Underline Tabs */}
-          <div role="tablist" aria-label="重点企业样本分组" className="flex flex-wrap gap-5 border-b border-border">
-            {GROUP_TABS.map((tab) => {
-              const active = group === tab.id;
-              return (
-                <button
-                  key={tab.id}
-                  type="button"
-                  role="tab"
-                  aria-selected={active}
-                  onClick={() => updateSearchParam("group", tab.id)}
-                  className={cn(
-                    "-mb-px inline-flex cursor-pointer items-center gap-1.5 border-b-2 pb-2.5 pt-1 body-sm transition-colors duration-150 focus-ring",
-                    active
-                      ? "border-brand-navy font-semibold text-brand-navy"
-                      : "border-transparent text-ink-muted hover:border-border-strong hover:text-ink",
-                  )}
-                >
-                  <span>{tab.label}</span>
-                  <span className="caption tabular-nums text-ink-muted">({groupCounts[tab.id]})</span>
-                </button>
-              );
-            })}
-          </div>
-
-          {/* Filter Controls */}
-          <div className="grid gap-3 md:grid-cols-12">
-            <div className="grid gap-1 md:col-span-4">
-              <label htmlFor="enterprise-province-select" className="caption font-semibold text-ink-muted">
-                注册省份
-              </label>
-              <select
-                id="enterprise-province-select"
-                value={province}
-                onChange={(e) => setProvince(e.target.value)}
-                className={cn(controlClass, "h-11 md:h-10")}
-              >
-                <option value="">全部省份</option>
-                {ENTERPRISE_PROVINCE_OPTIONS.map((prov) => (
-                  <option key={prov} value={prov}>
-                    {prov}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div className="grid gap-1 md:col-span-8">
-              <label htmlFor="enterprise-keyword-input" className="caption font-semibold text-ink-muted">
-                关键词检索（同步 URL 参数 q）
-              </label>
-              <Input
-                id="enterprise-keyword-input"
-                type="search"
-                value={q}
-                onChange={(e) => updateSearchParam("q", e.target.value)}
-                placeholder="输入企业简称、证券代码（如 688271 / 01066.HK）、冠军产品或业务赛道…"
-              />
-            </div>
-          </div>
-
-          <DataTable
-            caption="国家级制造业单项冠军与医疗器械上市企业样本池明细表"
-            columns={enterpriseColumns}
-            data={filteredEnterprises}
-            getRowId={(r) => r.id}
-            fixedLayout
-            dense
-            empty="未找到符合当前板块分组、省份或关键词条件的企业记录。"
-          />
-
-          <p className="border-l-2 border-brand-sky pl-3 caption text-ink-muted">
-            K01/K02 实体消歧与年报口径规则：A+H 两地上市主体按统一社会信用代码仅计 1 家，母子公司同时上市时须标注并表归属防止行业重复加总；年报境外营业收入（含海外并购工厂本地产销，16号）在统计口径上不等于中国海关医疗器械出口贸易额（38号）。
-          </p>
-        </div>
-      </section>
-
-      {/* Band 4: R&D, Testing & Clinical Service Institutions (19–22) + Indicator Ledger (09–22) */}
-      <section className="border-t border-border bg-surface-sunken" aria-labelledby="service-institutions-heading">
-        <div className="mx-auto grid w-full max-w-content gap-10 px-4 py-8 md:px-8 md:py-10">
-          {/* Sub-block A: Institutions Underline-Tabbed Open Table */}
-          <div className="grid gap-5">
-            <div className="flex flex-wrap items-end justify-between gap-3">
-              <div className="grid gap-1">
-                <h2 id="service-institutions-heading" className="title-sub text-brand-navy">
-                  研发创新、检验检测与临床研究服务机构（19–22）
-                </h2>
-                <p className="caption text-ink-muted">
-                  分类呈现国家级制造业创新中心、国家临床医学研究中心，以及具备 CMA 资质的法定器检院所与临床试验备案医院
-                </p>
-              </div>
-            </div>
-
-            <div role="tablist" aria-label="研发检测与临床机构切换" className="flex flex-wrap gap-6 border-b border-border">
-              <button
-                type="button"
-                role="tab"
-                aria-selected={instTab === "rd-clinical"}
-                onClick={() => setInstTab("rd-clinical")}
-                className={cn(
-                  "-mb-px cursor-pointer border-b-2 pb-2.5 pt-1 body-sm transition-colors duration-150 focus-ring",
-                  instTab === "rd-clinical"
-                    ? "border-brand-navy font-semibold text-brand-navy"
-                    : "border-transparent text-ink-muted hover:border-border-strong hover:text-ink",
-                )}
-              >
-                创新研发与临床研究平台 (19-20)
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={instTab === "testing-gcp"}
-                onClick={() => setInstTab("testing-gcp")}
-                className={cn(
-                  "-mb-px cursor-pointer border-b-2 pb-2.5 pt-1 body-sm transition-colors duration-150 focus-ring",
-                  instTab === "testing-gcp"
-                    ? "border-brand-navy font-semibold text-brand-navy"
-                    : "border-transparent text-ink-muted hover:border-border-strong hover:text-ink",
-                )}
-              >
-                检验检测与临床试验备案机构 (21-22)
-              </button>
-            </div>
-
-            <DataTable
-              caption={
-                instTab === "rd-clinical"
-                  ? "医疗器械国家级创新研发平台与国家临床医学研究中心名录"
-                  : "医疗器械国家级及省级检验检测院所与临床试验备案医疗机构名录"
-              }
-              columns={institutionColumns}
-              data={instTab === "rd-clinical" ? RD_CLINICAL_PLATFORMS : TESTING_GCP_INSTITUTIONS}
-              getRowId={(r) => r.id}
-              fixedLayout
-              dense
-            />
-
-            <p className="border-l-2 border-brand-sky pl-3 caption text-ink-muted">
-              资质核验提示（20/21/22）：国家临床医学研究中心认定不等同于药监局临床试验机构备案；检验机构在册须结合 CMA 授权附表核对具体 GB 9706 / YY 专用标准版次承检范围。
+      {/* Band 3：制造业单项冠军与上市企业名录（紧凑单行 + 分页） */}
+      <section id="enterprise-directory-heading" aria-label="重点上市与单项冠军企业名录" className="grid gap-4">
+        <div className="flex flex-wrap items-end justify-between gap-4 border-b border-border pb-3">
+          <div>
+            <h2 className="title-sub text-brand-navy">制造业单项冠军与上市企业名录</h2>
+            <p className="mt-0.5 body-sm text-ink-muted">
+              剥离医药商业流通分部口径，聚焦医疗器械制造主业营收、研发投入强度与国际化布局。
             </p>
           </div>
-
-          {/* Sub-block B: Domain Indicator Coverage Ledger (09–22) + Compact Link Row */}
-          <div className="grid gap-5 border-t border-border pt-8">
-            <div className="flex flex-wrap items-end justify-between gap-3">
-              <div className="grid gap-1">
-                <h2 className="title-sub text-brand-navy">本域三级指标覆盖台账（09–22）</h2>
-                <p className="caption text-ink-muted">
-                  《指标体系 V3.0》「三、企业与机构」共 12 项三级指标（注：原 V2.0 第 17、18 号指标已精简归并，保持编码连续稳定）
-                </p>
-              </div>
-              <TextLink to="/system#l1-ent" className="inline-flex items-center gap-1 body-sm font-semibold">
-                定位至指标目录「三、企业与机构」
-                <IconArrowRight size={14} aria-hidden="true" />
-              </TextLink>
-            </div>
-
-            <DataTable
-              caption="企业与机构领域三级指标覆盖台账"
-              columns={ledgerColumns}
-              data={ENTERPRISE_INDICATORS}
-              getRowId={(r) => r.seq}
-              fixedLayout
-              dense
+          <div className="flex flex-wrap items-center gap-3">
+            <label htmlFor="ent-local-filter" className="sr-only">
+              本表关键词筛选
+            </label>
+            <input
+              id="ent-local-filter"
+              type="search"
+              value={searchParams.get("q") ?? ""}
+              onChange={(e) => updateParam({ q: e.target.value || null })}
+              placeholder="筛选本表企业或机构…"
+              className="h-9 w-48 rounded-sm border border-border-strong bg-surface px-3 body-sm text-ink outline-none focus:border-brand-navy"
             />
+            <label htmlFor="ent-province-filter" className="body-sm text-ink-muted">
+              注册省市
+            </label>
+            <select
+              id="ent-province-filter"
+              value={province}
+              onChange={(e) => updateParam({ province: e.target.value || null })}
+              className="h-9 cursor-pointer rounded-sm border border-border-strong bg-surface px-3 body-sm text-ink focus-ring"
+            >
+              <option value="">全部省市</option>
+              {ENTERPRISE_PROVINCE_OPTIONS.map((p) => (
+                <option key={p} value={p}>
+                  {p}
+                </option>
+              ))}
+            </select>
           </div>
         </div>
+
+        <div role="tablist" aria-label="企业分组切换" className="flex flex-wrap gap-2">
+          {GROUP_TABS.map((t) => {
+            const active = group === t.id;
+            return (
+              <button
+                key={t.id}
+                role="tab"
+                type="button"
+                aria-selected={active}
+                onClick={() => updateParam({ group: t.id === "all" ? null : t.id })}
+                className={cn(
+                  "cursor-pointer border px-3.5 py-1.5 body-sm font-semibold transition-colors focus-ring",
+                  active
+                    ? "border-brand-navy bg-brand-navy text-on-brand"
+                    : "border-border bg-surface text-ink hover:border-brand-navy hover:text-brand-navy",
+                )}
+              >
+                {t.label}
+              </button>
+            );
+          })}
+        </div>
+
+        <DataTable
+          caption="制造业单项冠军与上市企业名录"
+          columns={firmColumns}
+          data={pagedFirms}
+          getRowId={(r) => r.id}
+          empty={
+            filteredInstitutions.length > 0 && rawQuery
+              ? `重点企业名录无直接匹配；下方「科研检验与临床试验机构」匹配到 ${filteredInstitutions.length} 家机构。`
+              : "未找到符合当前筛选条件的重点企业"
+          }
+          pagination={
+            filteredFirms.length > PAGE_SIZE
+              ? { page: entPage, pageSize: PAGE_SIZE, total: filteredFirms.length, onPageChange: setEntPage }
+              : undefined
+          }
+        />
+      </section>
+
+      {/* Band 4：国家级创新中心、检验院与临床试验备案机构名录（统一检索联动 + 分页） */}
+      <section id="institutions-directory" aria-label="研发创新、检验检测与临床服务机构名录" className="grid gap-4">
+        <div className="flex flex-wrap items-end justify-between gap-4 border-b border-border pb-3">
+          <div>
+            <h2 className="title-sub text-brand-navy">国家级研发创新、法定检验与临床试验服务机构</h2>
+            <p className="mt-0.5 body-sm text-ink-muted">
+              汇集国家级制造业创新中心、国家临床医学研究中心、CMA/CNAS 法定器检院及临床试验备案三甲医院。
+            </p>
+          </div>
+          <span className="body-sm tabular-nums text-ink-muted">
+            代表性名录共 <strong className="font-semibold text-ink">{filteredInstitutions.length}</strong> 家
+          </span>
+        </div>
+
+        <div role="tablist" aria-label="服务机构类别切换" className="flex flex-wrap gap-2">
+          {INSTITUTION_TABS.map((t) => {
+            const active = instTab === t.id;
+            return (
+              <button
+                key={t.id}
+                role="tab"
+                type="button"
+                aria-selected={active}
+                onClick={() => setInstTab(t.id)}
+                className={cn(
+                  "cursor-pointer border px-3.5 py-1.5 body-sm font-semibold transition-colors focus-ring",
+                  active
+                    ? "border-brand-navy bg-brand-navy text-on-brand"
+                    : "border-border bg-surface text-ink hover:border-brand-navy hover:text-brand-navy",
+                )}
+              >
+                {t.label}
+              </button>
+            );
+          })}
+        </div>
+
+        <DataTable
+          caption="研发创新、检验检测与临床服务机构名录"
+          columns={instColumns}
+          data={pagedInstitutions}
+          getRowId={(r) => r.id}
+          empty="未找到符合当前筛选条件的服务机构"
+          pagination={
+            filteredInstitutions.length > PAGE_SIZE
+              ? {
+                  page: instPage,
+                  pageSize: PAGE_SIZE,
+                  total: filteredInstitutions.length,
+                  onPageChange: setInstPage,
+                }
+              : undefined
+          }
+        />
       </section>
     </div>
   );

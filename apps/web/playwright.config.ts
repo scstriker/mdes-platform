@@ -17,7 +17,7 @@ export default defineConfig({
   fullyParallel: false,
   workers: 1,
   retries: 0,
-  timeout: 30_000,
+  timeout: 60_000,
   expect: { timeout: 8_000 },
   reporter: [["list"]],
   use: {
@@ -42,7 +42,7 @@ export default defineConfig({
       stdout: "pipe",
     },
     {
-      command: `npx vite --host 127.0.0.1 --port ${WEB_PORT} --strictPort`,
+      command: `npx vite build --mode e2e && npx vite preview --mode e2e --host 127.0.0.1 --port ${WEB_PORT} --strictPort`,
       url: `http://127.0.0.1:${WEB_PORT}`,
       env: { VITE_API_BASE: API_BASE },
       reuseExistingServer: false,

@@ -5,14 +5,12 @@ export type AdminNavItem = {
   group: string;
   /** 角标数字；undefined 不显示 */
   count?: number;
-  /** 未开放：可点但进占位，或禁用 */
-  disabled?: boolean;
 };
 
 export const ADMIN_NAV: AdminNavItem[] = [
-  { href: "/admin", label: "概况", group: "数据导入" },
+  { href: "/admin", label: "入库概况", group: "数据导入" },
   { href: "/admin/import", label: "新建导入", group: "数据导入" },
   { href: "/admin/batches", label: "导入记录", group: "数据导入" },
-  { href: "/admin/files", label: "原始文件", group: "资料", disabled: true },
-  { href: "/admin/release", label: "本期发布", group: "发布", disabled: true },
+  { href: "/admin/indicators", label: "工程指标库", group: "底座与核查" },
+  { href: "/admin/observations", label: "观测值核查", group: "底座与核查" },
 ];

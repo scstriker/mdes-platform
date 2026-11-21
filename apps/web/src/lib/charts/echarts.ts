@@ -8,6 +8,8 @@ import {
   AriaComponent,
   GridComponent,
   LegendComponent,
+  MarkAreaComponent,
+  MarkLineComponent,
   MarkPointComponent,
   TooltipComponent,
 } from "echarts/components";
@@ -17,12 +19,25 @@ import type {
   AriaComponentOption,
   GridComponentOption,
   LegendComponentOption,
+  MarkAreaComponentOption,
+  MarkLineComponentOption,
   MarkPointComponentOption,
   TooltipComponentOption,
 } from "echarts/components";
 import type { ComposeOption } from "echarts/core";
 
-echarts.use([LineChart, BarChart, GridComponent, TooltipComponent, LegendComponent, MarkPointComponent, AriaComponent, SVGRenderer]);
+echarts.use([
+  LineChart,
+  BarChart,
+  GridComponent,
+  TooltipComponent,
+  LegendComponent,
+  MarkPointComponent,
+  MarkLineComponent,
+  MarkAreaComponent,
+  AriaComponent,
+  SVGRenderer,
+]);
 
 export type ChartOption = ComposeOption<
   | LineSeriesOption
@@ -31,6 +46,8 @@ export type ChartOption = ComposeOption<
   | TooltipComponentOption
   | LegendComponentOption
   | MarkPointComponentOption
+  | MarkLineComponentOption
+  | MarkAreaComponentOption
   | AriaComponentOption
 >;
 
