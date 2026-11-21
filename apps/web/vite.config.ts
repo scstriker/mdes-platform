@@ -78,6 +78,11 @@ export default defineConfig(({ mode }) => ({
       "/api": "http://127.0.0.1:8787",
     },
   },
+  preview: {
+    proxy: {
+      "/api": "http://127.0.0.1:8787",
+    },
+  },
   // 演示版：打成一个 JS 包、资源全部内联，再由 scripts/inline-demo.mjs 合成单个 HTML
   build:
     mode === "demo"
