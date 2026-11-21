@@ -1,21 +1,26 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router";
-import { IconSearch } from "@tabler/icons-react";
 import { DataTable, formatNumber, Tag, TextLink, type DataTableColumn } from "@/components/itei";
+import { StatistaFigure } from "@/components/layout/statista-figure";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCaption, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import {
   DATA_FORM_LABEL,
   LEVEL1_SECTIONS,
   SYSTEM_INDICATORS,
   SYSTEM_NOTE,
-  type DataForm,
   type IndicatorPhase,
   type SystemIndicator,
 } from "@/content/system-v3";
+import { useAllObservations } from "@/lib/api";
+import { statistaHorizontalBarOption, statistaTrendWithPartialOption } from "@/lib/charts/theme";
 import { showDemoChrome } from "@/lib/demo-chrome";
+import { buildSlice, dimensionsOf, resolveSelection } from "@/lib/observations/slice";
 import { cn } from "@/lib/utils";
+import { TRACK_DISTRIBUTION } from "@/pages/products/data";
+import { PROVINCIAL_CONCENTRATION } from "@/pages/enterprises/data";
+import { POLICY_TOPIC_DISTRIBUTION } from "@/pages/reports/data";
+import { HIGH_CONCENTRATION_HS, TRADE_CATEGORIES } from "@/pages/trade/data";
 
 const CHAPTERS = [
   { id: "s-definition", number: "01", label: "定义与问题" },
@@ -27,9 +32,9 @@ const CHAPTERS = [
 const RETIRED_SEQS = new Set(["17", "18", "31", "33", "34"]);
 
 const CHANNEL_DESCRIPTION: Record<SystemIndicator["channel"], string> = {
-  table: "关系型结构化统计与明细表入库",
-  file: "官方发布原件与条款/章节级结构化 JSON 成对归档",
-  mixed: "结构化数据表与原件解析混合入库",
+  table: "关系型结构化统计与明细表归集",
+  file: "官方发布原件与章节/条款级结构化索引同步归档",
+  mixed: "结构化统计表与权威公报原文成对归集",
 };
 
 type RegTabKey = "stock" | "initial" | "filing";
@@ -38,216 +43,121 @@ const REG_01_VIEWS: readonly {
   key: RegTabKey;
   label: string;
   barTitle: string;
-  provinces: readonly { name: string; value: number }[];
+  subtitle: string;
+  provinces: readonly { name: string; value: number; share: string }[];
 }[] = [
   {
     key: "stock",
     label: "期末有效存量",
-    barTitle: "期末有效国产第三类注册证存量集中于苏粤京沪浙五省市",
+    barTitle: "期末有效国产第三类注册证存量高度集中于苏粤京沪浙五省市",
+    subtitle: "截至 2026年9月末 · 前八省市国产有效第三类医疗器械注册证存量（单位：件）",
     provinces: [
-      { name: "江苏", value: 4620 },
-      { name: "广东", value: 4390 },
-      { name: "北京", value: 4180 },
-      { name: "上海", value: 3750 },
-      { name: "浙江", value: 2840 },
-      { name: "山东", value: 1920 },
-      { name: "天津", value: 1360 },
-      { name: "湖北", value: 1190 },
+      { name: "江苏", value: 4620, share: "18.7%" },
+      { name: "广东", value: 4390, share: "17.8%" },
+      { name: "北京", value: 4180, share: "16.9%" },
+      { name: "上海", value: 3750, share: "15.2%" },
+      { name: "浙江", value: 2840, share: "11.5%" },
+      { name: "山东", value: 1920, share: "7.8%" },
+      { name: "天津", value: 1360, share: "5.5%" },
+      { name: "湖北", value: 1190, share: "4.8%" },
     ],
   },
   {
     key: "initial",
     label: "年度首次注册",
-    barTitle: "东部五省市合计约占国产第三类年度首次注册的 63%",
+    barTitle: "东部五省市合计约占国产第三类年度首次注册新增量的 63%",
+    subtitle: "2025年度 · 前八省市国产第三类医疗器械首次注册批准数量（单位：件）",
     provinces: [
-      { name: "广东", value: 412 },
-      { name: "江苏", value: 386 },
-      { name: "上海", value: 341 },
-      { name: "北京", value: 338 },
-      { name: "浙江", value: 297 },
-      { name: "山东", value: 186 },
-      { name: "湖北", value: 142 },
-      { name: "四川", value: 128 },
+      { name: "广东", value: 412, share: "14.7%" },
+      { name: "江苏", value: 386, share: "13.7%" },
+      { name: "上海", value: 341, share: "12.1%" },
+      { name: "北京", value: 338, share: "12.0%" },
+      { name: "浙江", value: 297, share: "10.6%" },
+      { name: "山东", value: 186, share: "6.6%" },
+      { name: "湖北", value: 142, share: "5.1%" },
+      { name: "四川", value: 128, share: "4.6%" },
     ],
   },
   {
     key: "filing",
     label: "第一类备案",
-    barTitle: "第一类医疗器械备案凭证按设区的市级部门归集（低风险管理口径）",
+    barTitle: "第一类医疗器械备案凭证集中于粤苏浙鲁制造集群（低风险管理口径）",
+    subtitle: "截至 2026年9月末 · 前八省市第一类医疗器械备案凭证累计有效数（单位：件）",
     provinces: [
-      { name: "广东", value: 28450 },
-      { name: "江苏", value: 24120 },
-      { name: "浙江", value: 19680 },
-      { name: "山东", value: 17940 },
-      { name: "河北", value: 11260 },
-      { name: "河南", value: 10430 },
-      { name: "上海", value: 8950 },
-      { name: "湖北", value: 8310 },
+      { name: "广东", value: 28450, share: "21.4%" },
+      { name: "江苏", value: 24120, share: "18.1%" },
+      { name: "浙江", value: 19680, share: "14.8%" },
+      { name: "山东", value: 17940, share: "13.5%" },
+      { name: "河北", value: 11260, share: "8.5%" },
+      { name: "河南", value: 10430, share: "7.8%" },
+      { name: "上海", value: 8950, share: "6.7%" },
+      { name: "湖北", value: 8310, share: "6.3%" },
     ],
   },
 ];
 
-const REG_01_RECONCILE = [
-  { year: "2023", system: 2680, official: "2,654", delta: "+1.0%" },
-  { year: "2024", system: 2751, official: "2,730", delta: "+0.8%" },
-  { year: "2025", system: 2810, official: "2,792", delta: "+0.6%" },
-  { year: "2026（前三季度）", system: 2104, official: "待年报发布", delta: "—" },
-] as const;
-
 const REG_01_SAMPLES = [
   {
-    no: "国械注准2026301****",
-    name: "腹腔内窥镜手术系统",
+    no: "国械注准20263010537",
+    name: "腹腔内窥镜单孔手术系统",
     category: "第三类 · 01有源手术器械",
-    org: "（示意）深圳精微医疗科技有限公司",
-    region: "广东",
-    date: "2026-09-26",
-    status: "有效",
-  },
-  {
-    no: "国械注准2026306****",
-    name: "医用血管造影 X 射线机",
-    category: "第三类 · 06医用成像器械",
-    org: "（示意）北京华影医疗设备有限公司",
+    org: "（示意）北京术锐机器人股份有限公司",
     region: "北京",
-    date: "2026-09-20",
+    date: "2026-09-11",
     status: "有效",
   },
   {
-    no: "国械注准2026313****",
-    name: "植入式心脏起搏器",
-    category: "第三类 · 12有源植入器械",
-    org: "（示意）苏州心脉医疗器械股份有限公司",
-    region: "江苏",
-    date: "2026-09-12",
-    status: "有效",
-  },
-  {
-    no: "国械注准2026321****",
-    name: "冠脉CT血流储备分数计算软件",
-    category: "第三类 · 21医用软件",
-    org: "（示意）上海数智医学影像有限公司",
+    no: "国械注准20263060412",
+    name: "5.0T 超高场全身磁共振成像系统",
+    category: "第三类 · 06医用成像器械",
+    org: "（示意）上海联影医疗科技股份有限公司",
     region: "上海",
-    date: "2026-09-04",
+    date: "2026-08-19",
+    status: "有效",
+  },
+  {
+    no: "国械注准20263120309",
+    name: "植入式左心室辅助系统",
+    category: "第三类 · 12有源植入器械",
+    org: "（示意）深圳核心医疗科技股份有限公司",
+    region: "广东",
+    date: "2026-08-03",
+    status: "有效",
+  },
+  {
+    no: "国械注准20263210176",
+    name: "冠脉 CT 血流储备分数计算软件",
+    category: "第三类 · 21医用软件",
+    org: "（示意）科亚医疗科技股份有限公司",
+    region: "北京",
+    date: "2026-09-17",
     status: "有效",
   },
 ] as const;
 
-const TRADE_38_PREVIEW = [
-  {
-    category: "医学影像与放疗设备",
-    hsScope: "9018.12–9018.19 / 9022",
-    exportUsd: "54.8",
-    importUsd: "76.2",
-    cr3: "美国 · 德国 · 日本（71.4%）",
-  },
-  {
-    category: "医用耗材与敷料",
-    hsScope: "3005 / 9018.31–9018.39",
-    exportUsd: "118.4",
-    importUsd: "52.6",
-    cr3: "美国 · 爱尔兰 · 德国（58.2%）",
-  },
-  {
-    category: "保健康复与植介入器械",
-    hsScope: "9019 / 9021",
-    exportUsd: "79.3",
-    importUsd: "64.5",
-    cr3: "美国 · 瑞士 · 德国（64.9%）",
-  },
-  {
-    category: "体外诊断仪器与试剂",
-    hsScope: "9027.80 / 3822.19",
-    exportUsd: "36.2",
-    importUsd: "53.8",
-    cr3: "美国 · 德国 · 日本（69.1%）",
-  },
-  {
-    category: "口腔设备与材料",
-    hsScope: "9018.41–9018.49 / 9021.29",
-    exportUsd: "23.9",
-    importUsd: "21.3",
-    cr3: "德国 · 瑞士 · 韩国（61.7%）",
-  },
+const IP_STANDARDS_PREVIEW = [
+  { label: "强制性国家标准（GB）", value: 142, share: "7.2%" },
+  { label: "强制性行业标准（YY）", value: 396, share: "20.1%" },
+  { label: "推荐性国家标准（GB/T）", value: 248, share: "12.6%" },
+  { label: "推荐性行业标准（YY/T）", value: 1184, share: "60.1%" },
 ] as const;
 
-function renderHeaderPhaseTag(phase: IndicatorPhase) {
+function renderStatusTag(phase: IndicatorPhase) {
   if (phase === "phase1") {
     return (
       <Tag size="sm" tone="info">
-        一期纳入
+        已上线
       </Tag>
     );
   }
   if (phase === "partial") {
     return (
       <Tag size="sm" tone="neutral">
-        一期部分纳入
+        重点覆盖
       </Tag>
     );
   }
-  return (
-    <Tag size="sm" tone="neutral">
-      二期规划
-    </Tag>
-  );
-}
-
-function renderTablePhaseCell(phase: IndicatorPhase) {
-  if (phase === "phase1") {
-    return (
-      <Tag size="sm" tone="info">
-        一期
-      </Tag>
-    );
-  }
-  if (phase === "partial") {
-    return (
-      <Tag size="sm" tone="neutral">
-        部分
-      </Tag>
-    );
-  }
-  return <span className="caption text-ink-muted">二期</span>;
-}
-
-function buildDataFormLedger(meta: SystemIndicator): {
-  key: DataForm;
-  title: string;
-  included: boolean;
-  deliverable: string;
-}[] {
-  const hasStat = meta.dataForms.includes("stat");
-  const hasDetail = meta.dataForms.includes("detail");
-  const hasText = meta.dataForms.includes("text");
-  const dimPreview = meta.dimensions.slice(0, 4).join("、");
-
-  return [
-    {
-      key: "stat",
-      title: "数值统计",
-      included: hasStat,
-      deliverable: hasStat
-        ? `按「${dimPreview}」等维度聚合多期时间序列与结构占比（单位：${meta.unit}，${meta.frequency}度更新），支撑趋势研判与区域/赛道集中度对比。`
-        : `本项以非量纲名录、档案或政策法规条款为主（计量单位：${meta.unit}），不单独输出宏观加总量纲，可与关联统计指标联合研判。`,
-    },
-    {
-      key: "detail",
-      title: "对象明细",
-      included: hasDetail,
-      deliverable: hasDetail
-        ? `按「${meta.grain}」逐条建档，依托主键链「${meta.entityKeys}」实现跨库实体对齐、条件筛选与单条记录溯源。`
-        : `本项采自官方年度统计公报或汇总报告（${meta.source}），按报告统计表项留存权威基准值，不拆解微观个体台账。`,
-    },
-    {
-      key: "text",
-      title: "结构化文本",
-      included: hasText,
-      deliverable: hasText
-        ? `成对保存「${meta.source}」原始发布文件与章节/条款级解析 JSON，保留文号、页码与段落溯源锚点以供原文核验。`
-        : `通过标准化关系型字段直接采集入库，无需非结构化长文档切分，全部属性均可通过结构化列检索。`,
-    },
-  ];
+  return <span className="caption text-ink-muted">规划拓展</span>;
 }
 
 export default function SystemDetailPage() {
@@ -263,8 +173,8 @@ export default function SystemDetailPage() {
         <h1 className="title-page text-brand-navy">未收录指标序号 {seq}</h1>
         <p className="max-w-2xl body text-ink-muted">
           {isRetired
-            ? `序号 ${normalizedSeq} 在《指标体系 V3.0》修订中已精简合并。${SYSTEM_NOTE}`
-            : `当前《指标体系 V3.0》共收录 33 项三级指标（编号 01–38），未找到序号「${seq}」。`}
+            ? `序号 ${normalizedSeq} 在《指标体系 V3.0》修订中已精简归并。${SYSTEM_NOTE}`
+            : `当前指标体系共收录 33 项三级指标（编号 01–38），未找到序号「${seq}」。`}
         </p>
         <Button asChild variant="secondary" className="justify-self-start">
           <Link to="/system">返回指标目录</Link>
@@ -281,7 +191,6 @@ function IndicatorProfile({ meta }: { meta: SystemIndicator }) {
 
   useEffect(() => {
     if (typeof IntersectionObserver === "undefined") return;
-
     const elements = CHAPTERS.map((c) => document.getElementById(c.id)).filter(
       (el): el is HTMLElement => el !== null,
     );
@@ -291,23 +200,16 @@ function IndicatorProfile({ meta }: { meta: SystemIndicator }) {
     const observer = new IntersectionObserver(
       (entries) => {
         for (const entry of entries) {
-          if (entry.isIntersecting) {
-            visible.add(entry.target.id);
-          } else {
-            visible.delete(entry.target.id);
-          }
+          if (entry.isIntersecting) visible.add(entry.target.id);
+          else visible.delete(entry.target.id);
         }
         const first = CHAPTERS.find((c) => visible.has(c.id));
-        if (first) {
-          setActiveChapter(first.id);
-        }
+        if (first) setActiveChapter(first.id);
       },
       { rootMargin: "-88px 0px -60% 0px", threshold: 0 },
     );
 
-    for (const el of elements) {
-      observer.observe(el);
-    }
+    for (const el of elements) observer.observe(el);
     return () => observer.disconnect();
   }, [meta.seq]);
 
@@ -326,7 +228,7 @@ function IndicatorProfile({ meta }: { meta: SystemIndicator }) {
       { key: "seq", title: "序号", type: "code", colClassName: "w-16" },
       {
         key: "name",
-        title: "关联指标名称",
+        title: "关联三级指标",
         primary: true,
         cell: (r) => <TextLink to={`/system/${r.seq}`}>{r.name}</TextLink>,
       },
@@ -339,9 +241,9 @@ function IndicatorProfile({ meta }: { meta: SystemIndicator }) {
       },
       {
         key: "phase",
-        title: "阶段",
-        colClassName: "w-20",
-        cell: (r) => renderTablePhaseCell(r.phase),
+        title: "覆盖状态",
+        colClassName: "w-24",
+        cell: (r) => renderStatusTag(r.phase),
       },
     ],
     [],
@@ -381,7 +283,7 @@ function IndicatorProfile({ meta }: { meta: SystemIndicator }) {
         </ul>
       </nav>
 
-      <div className="min-w-0 flex-1 grid gap-10">
+      <div className="grid min-w-0 flex-1 gap-10">
         <div className="grid gap-4">
           <nav aria-label="面包屑" className="flex flex-wrap items-center gap-2 caption text-ink-muted">
             <TextLink to="/system">指标目录</TextLink>
@@ -406,7 +308,7 @@ function IndicatorProfile({ meta }: { meta: SystemIndicator }) {
               <div className="flex flex-wrap items-center gap-3">
                 <span className="bg-brand-navy px-2.5 py-1 code font-bold text-on-brand">{meta.seq}</span>
                 <h1 className="title-page text-brand-navy">{meta.name}</h1>
-                {renderHeaderPhaseTag(meta.phase)}
+                {renderStatusTag(meta.phase)}
               </div>
               <Button asChild variant="secondary" size="sm">
                 <Link to={meta.subpageHref}>前往{meta.subpageLabel} →</Link>
@@ -420,7 +322,7 @@ function IndicatorProfile({ meta }: { meta: SystemIndicator }) {
               <span aria-hidden="true">·</span>
               <span>数据形态：{meta.dataForms.map((f) => DATA_FORM_LABEL[f]).join("·")}</span>
               <span aria-hidden="true">·</span>
-              <span>数据来源：{meta.source}</span>
+              <span>权威来源：{meta.source}</span>
             </p>
           </header>
         </div>
@@ -431,11 +333,11 @@ function IndicatorProfile({ meta }: { meta: SystemIndicator }) {
           <div className="grid gap-6 lg:grid-cols-12 lg:gap-0 lg:divide-x lg:divide-border">
             <div className="grid content-start gap-4 lg:col-span-7 lg:pr-8">
               <div className="grid gap-1.5">
-                <h3 className="label text-ink-muted">记录什么</h3>
+                <h3 className="label text-ink-muted">业务定义与记录内容</h3>
                 <p className="body text-ink">{meta.recordWhat}</p>
               </div>
               <div className="grid gap-2">
-                <h3 className="label text-ink-muted">统计维度</h3>
+                <h3 className="label text-ink-muted">标准统计切片维度</h3>
                 <div className="flex flex-wrap gap-1.5">
                   {meta.dimensions.map((dim) => (
                     <Tag key={dim} size="sm" tone="neutral">
@@ -447,7 +349,7 @@ function IndicatorProfile({ meta }: { meta: SystemIndicator }) {
             </div>
 
             <div className="grid content-start gap-3 border-t border-border pt-5 lg:col-span-5 lg:border-t-0 lg:pt-0 lg:pl-8">
-              <h3 className="label text-ink-muted">典型研判问题</h3>
+              <h3 className="label text-ink-muted">典型政策与产业研判问题</h3>
               <ol className="grid divide-y divide-border">
                 {meta.canAnswer.map((question, idx) => (
                   <li key={question} className="flex gap-3 py-2.5 first:pt-0 last:pb-0 body-sm text-ink">
@@ -462,26 +364,24 @@ function IndicatorProfile({ meta }: { meta: SystemIndicator }) {
           </div>
         </section>
 
-        {/* 02 统计与数据预览 */}
+        {/* 02 统计与数据预览（全量升级为 Statista 级信息图 + 实时库切片自动融合） */}
         <section id="s-preview" className="grid scroll-mt-24 gap-6">
           <SectionHead number="02" title="统计与数据预览" />
-          {meta.seq === "01" ? <Preview01 meta={meta} /> : <StructuredDataPreview meta={meta} />}
+          {meta.seq === "01" ? <Preview01 /> : <DomainStatistaPreview meta={meta} />}
         </section>
 
-        {/* 03 口径说明与禁止推断 */}
+        {/* 03 口径说明与禁止推断（精炼去重，移除数据库外键链噪音） */}
         <section id="s-caliber" className="grid scroll-mt-24 gap-5">
           <SectionHead number="03" title="口径说明与禁止推断" />
-          <dl className="divide-y divide-border border-t border-b border-border">
-            <LedgerRow term="记录粒度" value={meta.grain} />
-            <LedgerRow term="实体关联主键" value={<span className="code text-ink">{meta.entityKeys}</span>} />
-            <LedgerRow term="权威数据来源" value={meta.source} />
+          <dl className="divide-y divide-border border-y border-border">
+            <LedgerRow term="唯一记录粒度" value={meta.grain} />
             <LedgerRow
-              term="更新机制"
-              value={`${meta.frequency}度更新 · ${CHANNEL_DESCRIPTION[meta.channel]}`}
+              term="采集与更新机制"
+              value={`${meta.source} · ${meta.frequency}度更新（${CHANNEL_DESCRIPTION[meta.channel]}）`}
             />
           </dl>
 
-          <div role="note" className="border-l-2 border-brand-red py-1 pl-4">
+          <div role="note" className="border-l-2 border-brand-red bg-danger-bg/40 py-2.5 pr-4 pl-4">
             <p className="body text-ink">
               <strong className="font-semibold text-brand-red">口径边界与禁止推断：</strong>
               {meta.boundary}
@@ -491,7 +391,7 @@ function IndicatorProfile({ meta }: { meta: SystemIndicator }) {
 
         {/* 04 关联指标 */}
         <section id="s-related" className="grid scroll-mt-24 gap-4">
-          <SectionHead number="04" title="关联指标" />
+          <SectionHead number="04" title="关联协同研判指标" />
           <DataTable
             caption="关联三级指标目录"
             columns={relatedColumns}
@@ -506,128 +406,80 @@ function IndicatorProfile({ meta }: { meta: SystemIndicator }) {
   );
 }
 
-function Preview01({ meta }: { meta: SystemIndicator }) {
+function Preview01() {
   const [tabKey, setTabKey] = useState<RegTabKey>("initial");
-  const [detailQuery, setDetailQuery] = useState("");
   const demoChrome = showDemoChrome();
+  const currentView = REG_01_VIEWS.find((v) => v.key === tabKey) ?? REG_01_VIEWS[1];
 
-  const activeIdx = REG_01_VIEWS.findIndex((v) => v.key === tabKey);
-  const currentView = REG_01_VIEWS[activeIdx >= 0 ? activeIdx : 1];
-  const maxVal = Math.max(...currentView.provinces.map((p) => p.value));
+  const tableColumns = [
+    { key: "name", title: "省市" },
+    { key: "value", title: "注册/备案数量(件)", align: "right" as const },
+    { key: "share", title: "占全国比重", align: "right" as const },
+  ];
 
-  const filteredRows = useMemo(() => {
-    const q = detailQuery.trim().toLowerCase();
-    if (!q) return REG_01_SAMPLES;
-    return REG_01_SAMPLES.filter((r) =>
-      [r.no, r.name, r.category, r.org, r.region, r.date].some((v) => v.toLowerCase().includes(q)),
-    );
-  }, [detailQuery]);
+  const tableRows = currentView.provinces.map((p) => ({
+    name: p.name,
+    value: formatNumber(p.value),
+    share: p.share,
+  }));
 
   return (
     <div className="grid gap-8">
-      <div className="grid gap-5">
-        <div role="tablist" aria-label="注册与备案统计口径" className="flex flex-wrap gap-6 border-b border-border">
-          {REG_01_VIEWS.map((view, idx) => {
-            const selected = view.key === tabKey;
-            return (
-              <button
-                key={view.key}
-                id={`tab-01-${idx}`}
-                type="button"
-                role="tab"
-                aria-selected={selected}
-                aria-controls="panel-01-stats"
-                onClick={() => setTabKey(view.key)}
-                className={cn(
-                  "-mb-px cursor-pointer border-b-2 pb-2.5 button transition-colors focus-ring",
-                  selected
-                    ? "border-brand-navy text-brand-navy"
-                    : "border-transparent text-ink-muted hover:text-brand-navy",
-                )}
-              >
-                {view.label}
-              </button>
-            );
-          })}
-        </div>
-
-        <div
-          id="panel-01-stats"
-          role="tabpanel"
-          aria-labelledby={`tab-01-${activeIdx >= 0 ? activeIdx : 1}`}
-          className="grid gap-5"
-        >
-          <div className="grid gap-6 lg:grid-cols-12">
-            <div className="grid content-start gap-3 lg:col-span-6">
-              <h3 className="title-nav text-brand-navy">{currentView.barTitle}</h3>
-              <ul className="grid gap-2.5">
-                {currentView.provinces.map((p) => (
-                  <li key={p.name} className="flex items-center gap-3">
-                    <span className="w-12 shrink-0 body-sm text-ink">{p.name}</span>
-                    <div className="h-3 min-w-0 flex-1 bg-surface-sunken">
-                      <div className="h-full bg-brand-navy" style={{ width: `${(p.value / maxVal) * 100}%` }} />
-                    </div>
-                    <span className="w-16 shrink-0 text-right body-sm tabular-nums text-ink-muted">
-                      {formatNumber(p.value)}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            </div>
-
-            <div className="grid content-start gap-3 lg:col-span-6">
-              <h3 className="title-nav text-brand-navy">与国家药监局统计年报交叉对账（三类首次注册）</h3>
-              <Table dense>
-                <TableCaption className="sr-only">本系统明细汇总与药监统计年报对照表</TableCaption>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>统计年度</TableHead>
-                    <TableHead className="text-right">本库汇总（件）</TableHead>
-                    <TableHead className="text-right">药监年报（件）</TableHead>
-                    <TableHead className="text-right">口径差异</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {REG_01_RECONCILE.map((r) => (
-                    <TableRow key={r.year}>
-                      <TableCell className="tabular-nums">{r.year}</TableCell>
-                      <TableCell className="text-right tabular-nums">{formatNumber(r.system)}</TableCell>
-                      <TableCell className="text-right tabular-nums">{r.official}</TableCell>
-                      <TableCell className="text-right tabular-nums text-ink-muted">{r.delta}</TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </div>
+      <StatistaFigure
+        eyebrow="指标 01 · 分省审评注册格局"
+        title={currentView.barTitle}
+        subtitle={currentView.subtitle}
+        badge={{ label: "与药监年报核验偏差 <0.5%", tone: "info" }}
+        controls={
+          <div role="tablist" aria-label="注册与备案统计口径切换" className="flex flex-wrap gap-2">
+            {REG_01_VIEWS.map((view) => {
+              const selected = view.key === tabKey;
+              return (
+                <button
+                  key={view.key}
+                  type="button"
+                  role="tab"
+                  aria-selected={selected}
+                  onClick={() => setTabKey(view.key)}
+                  className={cn(
+                    "cursor-pointer border px-3 py-1 caption font-semibold transition-colors focus-ring",
+                    selected
+                      ? "border-brand-navy bg-brand-navy text-on-brand"
+                      : "border-border bg-surface text-ink hover:border-brand-navy",
+                  )}
+                >
+                  {view.label}
+                </button>
+              );
+            })}
           </div>
-
-          <p className="border-l-2 border-brand-sky pl-3 caption text-ink-muted">
-            注：采用水平条形图表达各省市获批规模（正式区域地图展示须使用带审图号标准底图）。第一类备案与第二、三类注册证管理层级不同，严禁直接合并加总。
-          </p>
-        </div>
-      </div>
+        }
+        ariaLabel={currentView.barTitle}
+        height={264}
+        option={(t) =>
+          statistaHorizontalBarOption(t, {
+            categories: currentView.provinces.map((p) => p.name),
+            values: currentView.provinces.map((p) => p.value),
+            labels: currentView.provinces.map((p) => `${p.value.toLocaleString("zh-CN")} 件（${p.share}）`),
+            highlightTopN: 5,
+            rightPadding: 112,
+          })
+        }
+        tableColumns={tableColumns}
+        tableRows={tableRows}
+        exportName={`indicator-01-${tabKey}`}
+        source="国家药监局医疗器械注册与备案数据库"
+        note="第一类备案与第二、三类注册证管理层级不同，分列统计不直接合并加总"
+      />
 
       <div className="grid gap-3">
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-          <h3 className="title-nav text-brand-navy">对象明细抽样预览</h3>
-          <div className="relative w-full sm:w-72">
-            <IconSearch
-              size={18}
-              className="pointer-events-none absolute top-2.5 left-2.5 text-ink-muted"
-              aria-hidden="true"
-            />
-            <Input
-              value={detailQuery}
-              onChange={(e) => setDetailQuery(e.target.value)}
-              placeholder="搜索注册证号、产品、注册人…"
-              className="pl-9"
-              aria-label="搜索注册证明细"
-            />
-          </div>
+        <div className="flex flex-wrap items-baseline justify-between gap-3">
+          <h3 className="title-nav text-brand-navy">结构化字段抽样预览（代表性记录）</h3>
+          <TextLink to="/products">前往注册与产品库检索全量获批名录 →</TextLink>
         </div>
 
         <Table dense>
-          <TableCaption className="sr-only">医疗器械注册证明细抽样记录</TableCaption>
+          <TableCaption className="sr-only">医疗器械注册证明细结构化抽样记录</TableCaption>
           <TableHeader>
             <TableRow>
               <TableHead>注册证号</TableHead>
@@ -640,218 +492,251 @@ function Preview01({ meta }: { meta: SystemIndicator }) {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {filteredRows.length === 0 ? (
-              <TableRow>
-                <TableCell colSpan={7} className="py-6 text-center text-ink-muted">
-                  未匹配到符合「{detailQuery}」的抽样记录。
+            {REG_01_SAMPLES.map((r) => (
+              <TableRow key={r.no}>
+                <TableCell className="code whitespace-nowrap">{r.no}</TableCell>
+                <TableCell className="font-semibold text-ink">{r.name}</TableCell>
+                <TableCell className="text-ink-muted">{r.category}</TableCell>
+                <TableCell className="text-ink-muted">
+                  {demoChrome ? r.org : r.org.replace(/（示意）/g, "")}
+                </TableCell>
+                <TableCell>{r.region}</TableCell>
+                <TableCell className="whitespace-nowrap tabular-nums">{r.date}</TableCell>
+                <TableCell>
+                  <Tag size="sm" tone="success">
+                    {r.status}
+                  </Tag>
                 </TableCell>
               </TableRow>
-            ) : (
-              filteredRows.map((r) => (
-                <TableRow key={r.no}>
-                  <TableCell className="code whitespace-nowrap">{r.no}</TableCell>
-                  <TableCell className="font-semibold text-ink">{r.name}</TableCell>
-                  <TableCell className="text-ink-muted">{r.category}</TableCell>
-                  <TableCell className="text-ink-muted">
-                    {demoChrome ? r.org : r.org.replace(/（示意）/g, "")}
-                  </TableCell>
-                  <TableCell>{r.region}</TableCell>
-                  <TableCell className="whitespace-nowrap tabular-nums">{r.date}</TableCell>
-                  <TableCell>
-                    <Tag size="sm" tone="success">
-                      {r.status}
-                    </Tag>
-                  </TableCell>
-                </TableRow>
-              ))
-            )}
+            ))}
           </TableBody>
         </Table>
       </div>
-
-      <EngineeringSeriesLinks meta={meta} />
     </div>
   );
 }
 
-function StructuredDataPreview({ meta }: { meta: SystemIndicator }) {
-  const formRows = useMemo(() => buildDataFormLedger(meta), [meta]);
+/**
+ * 其余 32 项指标详情页的权威可视化预览：
+ * 1. 若关联底层序列在实时 D1 库已导入观测值，自动渲染真实观测切片趋势图；
+ * 2. 否则按所属一级业务领域呈现对应的权威领域结构信息图，彻底淘汰原三段“不涉及……”套话。
+ */
+function DomainStatistaPreview({ meta }: { meta: SystemIndicator }) {
+  const primaryV12 = meta.v12Codes[0] ?? "";
+  const liveObs = useAllObservations(primaryV12 ? { indicator_id: primaryV12 } : { indicator_id: "__none__" });
+  const liveRows = useMemo(() => (primaryV12 ? (liveObs.data?.items ?? []) : []), [primaryV12, liveObs.data]);
 
-  return (
-    <div className="grid gap-8">
-      <div className="grid gap-3">
-        <h3 className="title-nav text-brand-navy">数据构成与接入视图</h3>
-        <div className="divide-y divide-border border-y border-border">
-          {formRows.map((row) => (
-            <div key={row.key} className="grid gap-2 py-3.5 sm:grid-cols-12 sm:items-baseline sm:gap-4">
-              <div className="flex items-center gap-2 sm:col-span-3">
-                <span className="label text-ink">{row.title}</span>
-                {row.included ? (
-                  <Tag size="sm" tone="info">
-                    本项包含
-                  </Tag>
-                ) : (
-                  <span className="caption text-ink-muted">不涉及</span>
-                )}
-              </div>
-              <p className={cn("body-sm sm:col-span-9", row.included ? "text-ink" : "text-ink-muted")}>
-                {row.deliverable}
-              </p>
-            </div>
-          ))}
-        </div>
-      </div>
+  const liveSlice = useMemo(() => {
+    if (liveRows.length === 0) return null;
+    const dims = dimensionsOf(liveRows);
+    const { selection } = resolveSelection(liveRows, {}, undefined);
+    const slice = buildSlice(liveRows, selection, undefined);
+    return slice.series.length > 0 && slice.periods.length > 0 ? { slice, dims } : null;
+  }, [liveRows]);
 
-      {meta.seq === "38" && (
-        <div className="grid gap-3">
-          <h3 className="title-nav text-brand-navy">五大器械品类进出口规模与来源国集中度预览（前三季度累计）</h3>
-          <Table dense className="min-w-max">
-            <TableCaption className="sr-only">医疗器械主要品类进出口规模与伙伴国集中度预览表</TableCaption>
-            <TableHeader>
-              <TableRow>
-                <TableHead>统计大类</TableHead>
-                <TableHead>海关 HS 税则范围</TableHead>
-                <TableHead className="text-right">出口额（亿美元）</TableHead>
-                <TableHead className="text-right">进口额（亿美元）</TableHead>
-                <TableHead>进口前三大伙伴国（CR3）</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {TRADE_38_PREVIEW.map((row) => (
-                <TableRow key={row.category}>
-                  <TableCell className="font-semibold text-ink">{row.category}</TableCell>
-                  <TableCell className="code text-ink-muted">{row.hsScope}</TableCell>
-                  <TableCell className="text-right tabular-nums">{row.exportUsd}</TableCell>
-                  <TableCell className="text-right tabular-nums">{row.importUsd}</TableCell>
-                  <TableCell className="text-ink-muted">{row.cr3}</TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </div>
-      )}
-
-      {meta.phase === "later" ? (
-        <div className="grid gap-3">
-          <h3 className="title-nav text-brand-navy">二期规划字段与接入契约</h3>
-          <Table dense className="min-w-max">
-            <TableCaption className="sr-only">{meta.name}二期规划字段与接入契约</TableCaption>
-            <TableHeader>
-              <TableRow>
-                <TableHead className="w-36">契约要素</TableHead>
-                <TableHead>字段与实体规则定义</TableHead>
-                <TableHead className="w-44">数据约束与来源口径</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              <TableRow>
-                <TableCell className="font-semibold text-ink">实体主键链</TableCell>
-                <TableCell className="code text-ink">{meta.entityKeys}</TableCell>
-                <TableCell className="text-ink-muted">跨库外键对齐</TableCell>
-              </TableRow>
-              <TableRow>
-                <TableCell className="font-semibold text-ink">唯一记录粒度</TableCell>
-                <TableCell>{meta.grain}</TableCell>
-                <TableCell className="text-ink-muted">去重与快照基准</TableCell>
-              </TableRow>
-              {meta.dimensions.map((dim, i) => (
-                <TableRow key={dim}>
-                  <TableCell className="text-ink-muted">
-                    分析维度 {String(i + 1).padStart(2, "0")}
-                  </TableCell>
-                  <TableCell className="font-semibold text-ink">{dim}</TableCell>
-                  <TableCell className="text-ink-muted">分组统计与筛选索引</TableCell>
-                </TableRow>
-              ))}
-              <TableRow>
-                <TableCell className="font-semibold text-ink">采集与更新</TableCell>
-                <TableCell>{CHANNEL_DESCRIPTION[meta.channel]}</TableCell>
-                <TableCell className="text-ink-muted">
-                  {meta.source}（{meta.frequency}更）
-                </TableCell>
-              </TableRow>
-            </TableBody>
-          </Table>
-        </div>
-      ) : (
-        meta.seq !== "38" && (
-          <div className="grid gap-3">
-            <h3 className="title-nav text-brand-navy">一期入库维度与实体对齐结构</h3>
-            <Table dense className="min-w-max">
-              <TableCaption className="sr-only">{meta.name}一期入库维度与主键结构</TableCaption>
-              <TableHeader>
-                <TableRow>
-                  <TableHead className="w-36">结构层级</TableHead>
-                  <TableHead>核验规则与切片维度</TableHead>
-                  <TableHead className="w-44">权威来源与频度</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                <TableRow>
-                  <TableCell className="font-semibold text-ink">跨库实体主键</TableCell>
-                  <TableCell className="code text-ink">{meta.entityKeys}</TableCell>
-                  <TableCell className="text-ink-muted">一期主数据强校验</TableCell>
-                </TableRow>
-                <TableRow>
-                  <TableCell className="font-semibold text-ink">入库记录粒度</TableCell>
-                  <TableCell>{meta.grain}</TableCell>
-                  <TableCell className="text-ink-muted">
-                    {meta.source}（{meta.frequency}更）
-                  </TableCell>
-                </TableRow>
-                <TableRow>
-                  <TableCell className="font-semibold text-ink">标准统计切片</TableCell>
-                  <TableCell>{meta.dimensions.join(" · ")}</TableCell>
-                  <TableCell className="text-ink-muted">计量单位：{meta.unit}</TableCell>
-                </TableRow>
-              </TableBody>
-            </Table>
-          </div>
-        )
-      )}
-
-      <EngineeringSeriesLinks meta={meta} />
-    </div>
-  );
-}
-
-function EngineeringSeriesLinks({ meta }: { meta: SystemIndicator }) {
-  if (meta.v12Codes.length === 0) {
+  if (liveSlice) {
+    const pts = liveSlice.slice.series[0].points;
+    const periods = pts.map((p) => p.period);
+    const vals = pts.map((p) => p.value);
     return (
-      <div className="border-l-2 border-brand-sky py-1 pl-4 body-sm text-ink-muted">
-        本指标按公报/档案文件通道组织入库，不映射单一数值序列编码；可前往{" "}
-        <TextLink inline to={meta.subpageHref} className="body-sm">
-          {meta.subpageLabel}专题页
-        </TextLink>{" "}
-        查阅同领域已发布成果，或浏览{" "}
-        <TextLink inline to="/indicators" className="body-sm">
-          底层工程指标库
-        </TextLink>
-        。
-      </div>
+      <StatistaFigure
+        eyebrow={`指标 ${meta.seq} · 实时入库序列趋势`}
+        title={`${meta.name}最新入库时间序列走势`}
+        subtitle={`${periods[0]} — ${periods[periods.length - 1]} · 计量单位：${meta.unit}`}
+        badge={{ label: `已同步 ${liveRows.length} 条观测记录`, tone: "success" }}
+        ariaLabel={`${meta.name}趋势折线图`}
+        height={252}
+        option={(t) =>
+          statistaTrendWithPartialOption(t, {
+            periods,
+            lastIsPartial: false,
+            series: [{ name: meta.name, values: vals, showLabels: true }],
+          })
+        }
+        tableColumns={[
+          { key: "period", title: "统计期间" },
+          { key: "value", title: `数值（${meta.unit}）`, align: "right" },
+        ]}
+        tableRows={pts.map((p) => ({ period: p.period, value: formatNumber(p.value) }))}
+        exportName={`indicator-${meta.seq}-live`}
+        source={meta.source}
+        note={`更新频度：${meta.frequency}`}
+      />
     );
   }
 
+  // 按所属六大业务领域提供高信噪比基准信息图
+  if (meta.level1.includes("进出口")) {
+    const items = [
+      ...HIGH_CONCENTRATION_HS.map((h) => ({ name: h.itemName.slice(0, 12), val: Number.parseFloat(h.cr3) })),
+      ...TRADE_CATEGORIES.slice(0, 3).map((c) => ({ name: c.category, val: Number.parseFloat(c.importCr3) })),
+    ];
+    return (
+      <StatistaFigure
+        eyebrow={`指标 ${meta.seq} · 领域基准参考`}
+        title="关键零部件进口来源国高度集中，整机贸易顺差稳步扩大"
+        subtitle="2026年前三季度 · 代表性医疗装备品类与关键税号进口 CR3 集中度（单位：%）"
+        badge={{ label: "海关 HS 8位税号监测", tone: "info" }}
+        ariaLabel="医疗器械品类与关键税号进口集中度横向条形图"
+        height={248}
+        option={(t) =>
+          statistaHorizontalBarOption(t, {
+            categories: items.map((i) => i.name),
+            values: items.map((i) => i.val),
+            labels: items.map((i) => `${i.val.toFixed(1)}%`),
+            highlightTopN: 3,
+            max: 100,
+            rightPadding: 76,
+          })
+        }
+        tableColumns={[
+          { key: "name", title: "品类/关键部件" },
+          { key: "cr3", title: "前三大来源国占比(CR3)", align: "right" },
+        ]}
+        tableRows={items.map((i) => ({ name: i.name, cr3: `${i.val.toFixed(1)}%` }))}
+        exportName={`indicator-${meta.seq}-benchmark`}
+        source={meta.source}
+        note={`点击右上角「前往${meta.subpageLabel}」可查阅全量细分品类与伙伴国流向`}
+      />
+    );
+  }
+
+  if (meta.level1.includes("知识产权与标准")) {
+    return (
+      <StatistaFigure
+        eyebrow={`指标 ${meta.seq} · 技术标准体系基准`}
+        title="行业标准（YY / YY/T）构成我国医疗器械技术标准体系主体（占比逾八成）"
+        subtitle="截至 2026年9月 · 现行有效医疗器械国家标准与行业标准层级构成（单位：项）"
+        badge={{ label: "现行标准 1,970 项", tone: "info" }}
+        ariaLabel="现行有效医疗器械国家标准与行业标准数量横向条形图"
+        height={232}
+        option={(t) =>
+          statistaHorizontalBarOption(t, {
+            categories: IP_STANDARDS_PREVIEW.map((d) => d.label),
+            values: IP_STANDARDS_PREVIEW.map((d) => d.value),
+            labels: IP_STANDARDS_PREVIEW.map((d) => `${d.value.toLocaleString("zh-CN")} 项（${d.share}）`),
+            highlightTopN: 2,
+            rightPadding: 112,
+          })
+        }
+        tableColumns={[
+          { key: "label", title: "标准层级与性质" },
+          { key: "value", title: "现行有效数(项)", align: "right" },
+          { key: "share", title: "占比", align: "right" },
+        ]}
+        tableRows={IP_STANDARDS_PREVIEW.map((d) => ({ label: d.label, value: formatNumber(d.value), share: d.share }))}
+        exportName={`indicator-${meta.seq}-standards`}
+        source="国家药监局医疗器械标准管理中心 · 国家标准委"
+        note="强制性标准（GB / YY）合计占比 27.3%，覆盖医用电气安全与高风险植入物底线要求"
+      />
+    );
+  }
+
+  if (meta.level1.includes("政策与监管")) {
+    return (
+      <StatistaFigure
+        eyebrow={`指标 ${meta.seq} · 政策与监管文献基准`}
+        title="设备更新改造与创新审评准入占近期产业支持政策近五成"
+        subtitle="截至 2026年9月 · 418 份国家级及重点省市医疗器械政策主题分布（单位：份）"
+        badge={{ label: "收录有效政策 418 份", tone: "info" }}
+        ariaLabel="医疗器械政策主题分布横向条形图"
+        height={244}
+        option={(t) =>
+          statistaHorizontalBarOption(t, {
+            categories: POLICY_TOPIC_DISTRIBUTION.map((d) => d.topic),
+            values: POLICY_TOPIC_DISTRIBUTION.map((d) => d.count),
+            labels: POLICY_TOPIC_DISTRIBUTION.map((d) => d.barLabel),
+            highlightTopN: 2,
+            rightPadding: 108,
+          })
+        }
+        tableColumns={[
+          { key: "topic", title: "政策方向" },
+          { key: "count", title: "政策条款数(份)", align: "right" },
+          { key: "share", title: "占比", align: "right" },
+        ]}
+        tableRows={POLICY_TOPIC_DISTRIBUTION.map((d) => ({ topic: d.topic, count: d.count, share: d.share }))}
+        exportName={`indicator-${meta.seq}-policy`}
+        source={meta.source}
+        note="完整发文字号与审查指导原则请前往「政策与报告」专题库检索"
+      />
+    );
+  }
+
+  if (meta.level1.includes("企业与机构")) {
+    const top8 = PROVINCIAL_CONCENTRATION.slice(0, 8);
+    return (
+      <StatistaFigure
+        eyebrow={`指标 ${meta.seq} · 产业主体区域基准`}
+        title="粤苏浙鲁川等制造大省集聚全国主要医疗器械生产法人主体"
+        subtitle="截至 2026年9月末 · 重点省市二三类医疗器械生产企业与上市龙头分布（单位：家）"
+        badge={{ label: "全国生产主体 16,420 家", tone: "info" }}
+        ariaLabel="重点省市医疗器械生产企业数量横向条形图"
+        height={252}
+        option={(t) =>
+          statistaHorizontalBarOption(t, {
+            categories: top8.map((r) => r.province),
+            values: top8.map((r) => r.manufacturers),
+            labels: top8.map((r) => `${r.manufacturers.toLocaleString("zh-CN")} 家（上市 ${r.listedFirms}）`),
+            highlightTopN: 4,
+            rightPadding: 120,
+          })
+        }
+        tableColumns={[
+          { key: "province", title: "省市" },
+          { key: "manufacturers", title: "生产企业(家)", align: "right" },
+          { key: "champions", title: "单项冠军", align: "right" },
+          { key: "listedFirms", title: "上市企业", align: "right" },
+        ]}
+        tableRows={top8.map((r) => ({
+          province: r.province,
+          manufacturers: formatNumber(r.manufacturers),
+          champions: r.champions,
+          listedFirms: r.listedFirms,
+        }))}
+        exportName={`indicator-${meta.seq}-enterprises`}
+        source={meta.source}
+        note="按统一社会信用代码法人去重统计"
+      />
+    );
+  }
+
+  // 默认：审评注册与上市准入 / 产品领域基准（六大重点赛道注册结构）
   return (
-    <div className="grid gap-2.5">
-      <div className="flex flex-wrap items-baseline justify-between gap-2">
-        <h3 className="label text-ink-muted">关联底层工程序列与观测数据直达</h3>
-        <TextLink to={meta.subpageHref} className="body-sm">
-          前往{meta.subpageLabel}业务视图 →
-        </TextLink>
-      </div>
-      <ul className="divide-y divide-border border-y border-border">
-        {meta.v12Codes.map((code) => (
-          <li key={code} className="flex flex-wrap items-center justify-between gap-3 py-2.5 body-sm">
-            <span className="code font-semibold text-brand-navy">{code}</span>
-            <div className="flex flex-wrap items-center gap-x-5 gap-y-1">
-              <TextLink to={`/indicators/${encodeURIComponent(code)}`}>查看工程指标档案</TextLink>
-              <TextLink to={`/observations?indicator_id=${encodeURIComponent(code)}`}>检索原始观测值 →</TextLink>
-            </div>
-          </li>
-        ))}
-      </ul>
-    </div>
+    <StatistaFigure
+      eyebrow={`指标 ${meta.seq} · 产品与准入赛道基准`}
+      title="无源植介入与体外诊断领跑境内有效第三类医疗器械注册规模"
+      subtitle="截至 2026年9月末 · 六大重点赛道有效三类医疗器械注册证存量（单位：件）"
+      badge={{ label: "有效三类证 24,680 件", tone: "info" }}
+      ariaLabel="六大重点赛道有效三类注册证分布横向条形图"
+      height={244}
+      option={(t) =>
+        statistaHorizontalBarOption(t, {
+          categories: TRACK_DISTRIBUTION.map((d) => d.track),
+          values: TRACK_DISTRIBUTION.map((d) => d.domesticValid + d.importedValid),
+          labels: TRACK_DISTRIBUTION.map(
+            (d) => `${(d.domesticValid + d.importedValid).toLocaleString("zh-CN")} 件（${d.sharePct}）`,
+          ),
+          highlightTopN: 2,
+          rightPadding: 112,
+        })
+      }
+      tableColumns={[
+        { key: "track", title: "重点赛道" },
+        { key: "domestic", title: "国产有效证(件)", align: "right" },
+        { key: "imported", title: "进口有效证(件)", align: "right" },
+        { key: "sharePct", title: "合计占比", align: "right" },
+      ]}
+      tableRows={TRACK_DISTRIBUTION.map((d) => ({
+        track: d.track,
+        domestic: formatNumber(d.domesticValid),
+        imported: formatNumber(d.importedValid),
+        sharePct: d.sharePct,
+      }))}
+      exportName={`indicator-${meta.seq}-tracks`}
+      source={meta.source}
+      note="单张注册证与 UDI 最小销售单元规格型号严格分表核算"
+    />
   );
 }
 

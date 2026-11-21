@@ -1,9 +1,8 @@
 import { Suspense } from "react";
 import { Link, Outlet, ScrollRestoration, useLocation, useMatches } from "react-router";
-import { IconDatabase } from "@tabler/icons-react";
 import { AppFooter, AppHeader, TabBar } from "@/components/itei";
-import { IndicatorSearch } from "@/components/layout/indicator-search";
 import { PublicationFooter } from "@/components/layout/publication-footer";
+import { ScopedSearchBar } from "@/components/layout/scoped-search-bar";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useDocumentTitle } from "@/lib/theme";
 import { MOBILE_NAV, PRODUCT_NAME, PUBLIC_NAV, isCurrent } from "./nav";
@@ -12,8 +11,9 @@ import { ThemeMenu } from "./theme-menu";
 export type RouteHandle = { title?: string };
 
 /**
- * 前台外框：白底页眉（1200px 居中轴线 + 双色全宽底线）+ 内容 + 编制说明与深蓝页脚 / 窄屏 TabBar。
- * 「数据管理」置于右侧工具区，与公开研究检索视图分离。
+ * 前台外框（部委智库门户态）：
+ * - 白底页眉（1200px 居中轴线 + 双色底线）+ 紧贴页眉的全站同轴分域检索带 + 内容区 + 编制说明与深蓝页脚 / 窄屏 TabBar。
+ * - 「数据管理」从顶栏移除并下沉至页脚右侧工具链接，保持公开智库门户纯净庄重。
  */
 export function AppShell() {
   const { pathname } = useLocation();
@@ -33,29 +33,14 @@ export function AppShell() {
       >
         跳到主要内容
       </a>
-      <AppHeader
-        title={PRODUCT_NAME}
-        nav={nav}
-        actions={
-          <>
-            <IndicatorSearch variant="button" className="hidden xl:inline-flex" />
-            <Link
-              to="/admin"
-              className="hidden items-center gap-1.5 border-b-2 border-transparent py-1 button text-ink transition-colors duration-150 hover:text-brand-navy focus-ring md:inline-flex"
-            >
-              <IconDatabase size={18} aria-hidden="true" />
-              数据管理
-            </Link>
-            <ThemeMenu />
-          </>
-        }
-      />
+      <AppHeader title={PRODUCT_NAME} nav={nav} actions={<ThemeMenu />} />
       {import.meta.env.MODE === "demo" && (
         <p role="note" className="border-b border-border bg-info-bg px-4 py-1.5 text-center caption text-ink md:px-6">
-          演示版：不连后端，数据为样例与结构化演示序列，保存在浏览器内存中，刷新即重置。
+          离线演示版：采用本所标准样例序列运行，数据变更暂存于当前浏览器会话。
         </p>
       )}
       <main id="main" tabIndex={-1} className="flex-1 outline-none">
+        {pathname !== "/__design" && <ScopedSearchBar mode="public" />}
         <Suspense fallback={<PageFallback />}>
           <Outlet />
         </Suspense>
@@ -64,7 +49,17 @@ export function AppShell() {
       <AppFooter
         left={PRODUCT_NAME}
         center="机械工业仪器仪表综合技术经济研究所（ITEI）"
-        right="统计口径 · 引用规范"
+        right={
+          <>
+            <Link to="/system" className="text-on-brand underline-offset-4 hover:underline focus-ring">
+              统计口径
+            </Link>
+            {" · "}
+            <Link to="/admin" className="text-on-brand underline-offset-4 hover:underline focus-ring">
+              数据管理
+            </Link>
+          </>
+        }
       />
       <TabBar nav={mobileNav} />
       <ScrollRestoration />

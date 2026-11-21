@@ -75,7 +75,7 @@ export function DataTab({ indicator }: { indicator: Indicator }) {
         description="导入 CSV 观测值后，这里显示图表与数据表。"
         action={
           <Button asChild>
-            <Link to="/import">
+            <Link to="/admin/import">
               <IconUpload aria-hidden="true" />
               去导入
             </Link>
@@ -140,8 +140,8 @@ export function DataTab({ indicator }: { indicator: Indicator }) {
       {all.data?.truncated && (
         <Notice tone="warning" title={`观测值超过 ${formatNumber(ALL_OBSERVATIONS_MAX)} 条，这里只取前 ${formatNumber(ALL_OBSERVATIONS_MAX)} 条`}>
           完整数据请到
-          <TextLink inline to={`/observations?indicator_id=${indicator.id}`}>
-            观测值页
+          <TextLink inline to={`/admin/observations?indicator_id=${indicator.id}`}>
+            观测值核查页
           </TextLink>
           查询。
         </Notice>
@@ -199,7 +199,7 @@ export function DataTab({ indicator }: { indicator: Indicator }) {
               导出当前切片 CSV
             </Button>
             <Button variant="ghost" size="sm" asChild>
-              <Link to={`/observations?indicator_id=${indicator.id}`}>在观测值页查看全部</Link>
+              <Link to={`/admin/observations?indicator_id=${indicator.id}`}>在观测值核查页查看全部</Link>
             </Button>
           </div>
         </div>

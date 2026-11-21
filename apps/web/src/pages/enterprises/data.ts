@@ -1,12 +1,12 @@
 export type EnterpriseGroup = "all" | "champion" | "ashare" | "hk";
 
+export type InstitutionTab = "all" | "rd-clinical" | "testing-gcp";
+
 export type EnterpriseKpiItem = {
   label: string;
   value: string;
   unit: string;
   subnote: string;
-  seqDisplay: string;
-  seqHref: string;
 };
 
 export const ENTERPRISE_KPIS: readonly EnterpriseKpiItem[] = [
@@ -14,41 +14,31 @@ export const ENTERPRISE_KPIS: readonly EnterpriseKpiItem[] = [
     label: "二三类生产企业主体",
     value: "16,420",
     unit: "家",
-    subnote: "按统一社会信用代码法人去重",
-    seqDisplay: "09",
-    seqHref: "/system/09",
+    subnote: "全国持证法人主体存量快照",
   },
   {
     label: "国家级制造业单项冠军",
     value: "27",
     unit: "家/项",
     subnote: "第 1–8 批示范企业与冠军产品",
-    seqDisplay: "12",
-    seqHref: "/system/12",
   },
   {
-    label: "医疗器械上市企业样本池",
+    label: "医疗器械上市企业",
     value: "172",
     unit: "家",
-    subnote: "A/H 去重 · 含科创板与港股 18A",
-    seqDisplay: "13",
-    seqHref: "/system/13",
+    subnote: "涵盖科创板、创业板与港股 18A",
   },
   {
     label: "国家研发与临床医学中心",
     value: "68",
     unit: "个",
     subnote: "制造业创新中心与国家临床中心",
-    seqDisplay: "19–20",
-    seqHref: "/system/19",
   },
   {
-    label: "检验检测与临床试验备案机构",
+    label: "检验检测与临床试验机构",
     value: "1,340",
     unit: "家",
-    subnote: "CMA 承检院所与药监备案医院",
-    seqDisplay: "21–22",
-    seqHref: "/system/21",
+    subnote: "CMA 承检院所与临床试验备案医院",
   },
 ];
 
@@ -170,20 +160,27 @@ export type EnterprisePoolRow = {
 };
 
 export const GROUP_TABS: readonly { id: EnterpriseGroup; label: string }[] = [
-  { id: "all", label: "全部重点主体" },
-  { id: "champion", label: "制造业单项冠军 (12)" },
-  { id: "ashare", label: "A股上市企业 (13)" },
-  { id: "hk", label: "港股及A+H上市 (13)" },
+  { id: "all", label: "全部重点企业" },
+  { id: "champion", label: "制造业单项冠军" },
+  { id: "ashare", label: "A 股上市企业" },
+  { id: "hk", label: "港股及 A+H 上市" },
+];
+
+export const INSTITUTION_TABS: readonly { id: InstitutionTab; label: string }[] = [
+  { id: "all", label: "全部服务机构" },
+  { id: "rd-clinical", label: "研发与临床中心" },
+  { id: "testing-gcp", label: "检验与备案医院" },
 ];
 
 export const ENTERPRISE_PROVINCE_OPTIONS: readonly string[] = [
   "广东",
-  "上海",
-  "北京",
   "江苏",
-  "山东",
+  "北京",
+  "上海",
   "浙江",
+  "山东",
   "湖南",
+  "四川",
 ];
 
 export const ENTERPRISE_POOL_ROWS: readonly EnterprisePoolRow[] = [
@@ -198,7 +195,7 @@ export const ENTERPRISE_POOL_ROWS: readonly EnterprisePoolRow[] = [
     province: "广东",
     revenueAndRd: "367.3 亿元 · R&D 10.9%",
     overseasNote: "2025年报器械主业 · 境外收入占 44.7%",
-    statusBatch: "第3/6批复核",
+    statusBatch: "第3/6批冠军",
   },
   {
     id: "ent-02",
@@ -249,7 +246,7 @@ export const ENTERPRISE_POOL_ROWS: readonly EnterprisePoolRow[] = [
     tagTone: "info",
     province: "江苏",
     revenueAndRd: "27.4 亿元 · R&D 6.8%",
-    overseasNote: "欧美直销子公司并表 · 境外收入占 46.5%",
+    overseasNote: "欧美直销渠道深耕 · 境外收入占 46.5%",
     statusBatch: "第7批冠军产品",
   },
   {
@@ -284,12 +281,12 @@ export const ENTERPRISE_POOL_ROWS: readonly EnterprisePoolRow[] = [
     shortName: "新产业生物",
     coreBusiness: "全自动化学发光免疫分析仪及配套三类/二类体外诊断试剂流水线",
     groups: ["ashare"],
-    boardLabel: "A股样本 · 创业板",
+    boardLabel: "创业板上市",
     tagTone: "neutral",
     province: "广东",
     revenueAndRd: "45.4 亿元 · R&D 9.7%",
     overseasNote: "2025年报器械主业 · 境外装机占 37.9%",
-    statusBatch: "样本池在册",
+    statusBatch: "创业板龙头",
   },
   {
     id: "ent-09",
@@ -297,12 +294,12 @@ export const ENTERPRISE_POOL_ROWS: readonly EnterprisePoolRow[] = [
     shortName: "爱博医疗",
     coreBusiness: "疏水性丙烯酸酯人工晶状体、角膜塑形用硬性透气接触镜（OK镜）",
     groups: ["ashare"],
-    boardLabel: "A股样本 · 科创板",
+    boardLabel: "科创板上市",
     tagTone: "neutral",
     province: "北京",
     revenueAndRd: "14.1 亿元 · R&D 9.8%",
-    overseasNote: "眼科植介入纯器械主体 · 境内为主",
-    statusBatch: "样本池在册",
+    overseasNote: "眼科植介入器械主业 · 境内市场为主",
+    statusBatch: "科创板上市",
   },
   {
     id: "ent-10",
@@ -310,12 +307,12 @@ export const ENTERPRISE_POOL_ROWS: readonly EnterprisePoolRow[] = [
     shortName: "圣湘生物",
     coreBusiness: "呼吸道与妇幼感染核酸分子诊断试剂、POCT 快速检测与基因测序方案",
     groups: ["ashare"],
-    boardLabel: "A股样本 · 科创板",
+    boardLabel: "科创板上市",
     tagTone: "neutral",
     province: "湖南",
     revenueAndRd: "14.9 亿元 · R&D 16.5%",
     overseasNote: "2025年报体外诊断主业 · 境外占 18.2%",
-    statusBatch: "样本池在册",
+    statusBatch: "科创板上市",
   },
   {
     id: "ent-11",
@@ -323,38 +320,38 @@ export const ENTERPRISE_POOL_ROWS: readonly EnterprisePoolRow[] = [
     shortName: "春立医疗",
     coreBusiness: "人工髋膝肩关节假体、脊柱内固定系统与运动医学植入物（688236.SH / 01858.HK）",
     groups: ["ashare", "hk"],
-    boardLabel: "A+H 两地上市",
+    boardLabel: "A+H 双重上市",
     tagTone: "warning",
     province: "北京",
     revenueAndRd: "11.8 亿元 · R&D 13.2%",
-    overseasNote: "按信用代码去重计 1 家 · 境外占 22.6%",
-    statusBatch: "A+H去重计1",
+    overseasNote: "2025年报骨科植入主业 · 境外占 22.6%",
+    statusBatch: "A+H双重上市",
   },
   {
     id: "ent-12",
     entityCode: "01066.HK",
     shortName: "山东威高股份",
-    coreBusiness: "临床护理耗材、骨科植入（威高骨科并表协同）、血液净化与预灌封给药器械",
+    coreBusiness: "临床护理耗材、骨科植入物、血液净化与预灌封给药器械",
     groups: ["champion", "hk"],
     boardLabel: "单项冠军 · 港股主板",
     tagTone: "info",
     province: "山东",
     revenueAndRd: "136.5 亿元 · R&D 4.8%",
-    overseasNote: "港币折算人民币口径 · 标注集团并表关系",
+    overseasNote: "综合性医用耗材龙头 · 港股主板",
     statusBatch: "第4批示范企业",
   },
   {
     id: "ent-13",
     entityCode: "00853.HK",
     shortName: "微创医疗科学",
-    coreBusiness: "冠脉植介入、心律管理、大动脉及外周介入（含科创板子公司并表注释）",
+    coreBusiness: "冠脉植介入、心律管理、大动脉及外周血管介入与神经介入器械",
     groups: ["hk"],
-    boardLabel: "港股主板 · 集团母体",
+    boardLabel: "港股主板上市",
     tagTone: "warning",
     province: "上海",
     revenueAndRd: "74.2 亿元 · R&D 24.1%",
-    overseasNote: "美元财报折算 · 含欧美 CRM 本地工厂产销",
-    statusBatch: "母子并表标注",
+    overseasNote: "全球化植介入布局 · 含欧美心律管理业务",
+    statusBatch: "港股主板龙头",
   },
   {
     id: "ent-14",
@@ -367,7 +364,7 @@ export const ENTERPRISE_POOL_ROWS: readonly EnterprisePoolRow[] = [
     province: "上海",
     revenueAndRd: "2.6 亿元 · R&D 138.0%",
     overseasNote: "商业化放量初期 · 海外 CE 获批装机",
-    statusBatch: "18A样本在册",
+    statusBatch: "港股 18A",
   },
   {
     id: "ent-15",
@@ -386,7 +383,8 @@ export const ENTERPRISE_POOL_ROWS: readonly EnterprisePoolRow[] = [
 
 export type ServiceInstitutionRow = {
   id: string;
-  seq: "19" | "20" | "21" | "22";
+  instGroup: Exclude<InstitutionTab, "all">;
+  tagTone: "info" | "neutral";
   name: string;
   hostUnit: string;
   categoryLabel: string;
@@ -398,7 +396,8 @@ export type ServiceInstitutionRow = {
 export const RD_CLINICAL_PLATFORMS: readonly ServiceInstitutionRow[] = [
   {
     id: "inst-01",
-    seq: "19",
+    instGroup: "rd-clinical",
+    tagTone: "info",
     name: "国家高性能医疗器械创新中心",
     hostUnit: "深圳高性能医疗器械国家研究院有限公司",
     categoryLabel: "国家制造业创新中心",
@@ -408,7 +407,8 @@ export const RD_CLINICAL_PLATFORMS: readonly ServiceInstitutionRow[] = [
   },
   {
     id: "inst-02",
-    seq: "19",
+    instGroup: "rd-clinical",
+    tagTone: "info",
     name: "国家生物医学材料工程技术研究中心",
     hostUnit: "四川大学",
     categoryLabel: "国家工程技术研究中心",
@@ -418,7 +418,8 @@ export const RD_CLINICAL_PLATFORMS: readonly ServiceInstitutionRow[] = [
   },
   {
     id: "inst-03",
-    seq: "19",
+    instGroup: "rd-clinical",
+    tagTone: "info",
     name: "高端医疗装备应用示范与医工转化重点实验室",
     hostUnit: "中国科学院苏州生物医学工程技术研究所",
     categoryLabel: "国立科研工程平台",
@@ -428,7 +429,8 @@ export const RD_CLINICAL_PLATFORMS: readonly ServiceInstitutionRow[] = [
   },
   {
     id: "inst-04",
-    seq: "20",
+    instGroup: "rd-clinical",
+    tagTone: "neutral",
     name: "国家心血管病中心 / 国家心血管病临床医学研究中心",
     hostUnit: "中国医学科学院阜外医院",
     categoryLabel: "国家临床医学研究中心",
@@ -438,7 +440,8 @@ export const RD_CLINICAL_PLATFORMS: readonly ServiceInstitutionRow[] = [
   },
   {
     id: "inst-05",
-    seq: "20",
+    instGroup: "rd-clinical",
+    tagTone: "neutral",
     name: "国家神经系统疾病临床医学研究中心",
     hostUnit: "首都医科大学附属北京天坛医院",
     categoryLabel: "国家临床医学研究中心",
@@ -448,7 +451,8 @@ export const RD_CLINICAL_PLATFORMS: readonly ServiceInstitutionRow[] = [
   },
   {
     id: "inst-06",
-    seq: "20",
+    instGroup: "rd-clinical",
+    tagTone: "neutral",
     name: "国家骨科与运动康复临床医学研究中心",
     hostUnit: "北京积水潭医院",
     categoryLabel: "国家临床医学研究中心",
@@ -458,7 +462,8 @@ export const RD_CLINICAL_PLATFORMS: readonly ServiceInstitutionRow[] = [
   },
   {
     id: "inst-07",
-    seq: "20",
+    instGroup: "rd-clinical",
+    tagTone: "neutral",
     name: "国家放射与治疗临床医学研究中心",
     hostUnit: "复旦大学附属中山医院",
     categoryLabel: "国家临床医学研究中心",
@@ -468,7 +473,8 @@ export const RD_CLINICAL_PLATFORMS: readonly ServiceInstitutionRow[] = [
   },
   {
     id: "inst-08",
-    seq: "20",
+    instGroup: "rd-clinical",
+    tagTone: "neutral",
     name: "国家口腔疾病临床医学研究中心",
     hostUnit: "四川大学华西口腔医院",
     categoryLabel: "国家临床医学研究中心",
@@ -481,7 +487,8 @@ export const RD_CLINICAL_PLATFORMS: readonly ServiceInstitutionRow[] = [
 export const TESTING_GCP_INSTITUTIONS: readonly ServiceInstitutionRow[] = [
   {
     id: "test-01",
-    seq: "21",
+    instGroup: "testing-gcp",
+    tagTone: "info",
     name: "中国食品药品检定研究院（医疗器械检定所）",
     hostUnit: "国家药监局直属法定检验机构",
     categoryLabel: "国家级器检院",
@@ -491,7 +498,8 @@ export const TESTING_GCP_INSTITUTIONS: readonly ServiceInstitutionRow[] = [
   },
   {
     id: "test-02",
-    seq: "21",
+    instGroup: "testing-gcp",
+    tagTone: "info",
     name: "北京市医疗器械检验研究院（BIMT）",
     hostUnit: "北京市药监局所属检验院",
     categoryLabel: "省级权威器检院",
@@ -501,7 +509,8 @@ export const TESTING_GCP_INSTITUTIONS: readonly ServiceInstitutionRow[] = [
   },
   {
     id: "test-03",
-    seq: "21",
+    instGroup: "testing-gcp",
+    tagTone: "info",
     name: "上海市医疗器械检验研究院",
     hostUnit: "上海市药监局所属检验院",
     categoryLabel: "省级权威器检院",
@@ -511,7 +520,8 @@ export const TESTING_GCP_INSTITUTIONS: readonly ServiceInstitutionRow[] = [
   },
   {
     id: "test-04",
-    seq: "21",
+    instGroup: "testing-gcp",
+    tagTone: "info",
     name: "广东省医疗器械质量监督检验所",
     hostUnit: "广东省药监局所属检验所",
     categoryLabel: "省级权威器检院",
@@ -521,7 +531,8 @@ export const TESTING_GCP_INSTITUTIONS: readonly ServiceInstitutionRow[] = [
   },
   {
     id: "test-05",
-    seq: "21",
+    instGroup: "testing-gcp",
+    tagTone: "info",
     name: "山东省医疗器械和药品包装检验研究院",
     hostUnit: "山东省药监局所属检验院",
     categoryLabel: "省级权威器检院",
@@ -531,32 +542,40 @@ export const TESTING_GCP_INSTITUTIONS: readonly ServiceInstitutionRow[] = [
   },
   {
     id: "test-06",
-    seq: "22",
+    instGroup: "testing-gcp",
+    tagTone: "neutral",
     name: "北京协和医院医疗器械临床试验机构",
     hostUnit: "中国医学科学院北京协和医院",
-    categoryLabel: "药监临床试验备案医院",
+    categoryLabel: "临床试验备案医院",
     province: "北京",
     specialtyScope: "备案医学影像、检验医学（IVD）、重症医学、妇产及罕见病器械等 38 个临床专业",
-    qualificationNote: "械临机构备字 · 有效备案在册",
+    qualificationNote: "国家药监局临床试验机构有效备案",
   },
   {
     id: "test-07",
-    seq: "22",
+    instGroup: "testing-gcp",
+    tagTone: "neutral",
     name: "上海交通大学医学院附属瑞金医院临床试验机构",
     hostUnit: "上海交通大学医学院附属瑞金医院",
-    categoryLabel: "药监临床试验备案医院",
+    categoryLabel: "临床试验备案医院",
     province: "上海",
     specialtyScope: "备案质子放疗装备、内分泌代谢传感、微创外科机器人与血液学诊断等 34 个专业",
-    qualificationNote: "械临机构备字 · 有效备案在册",
+    qualificationNote: "国家药监局临床试验机构有效备案",
   },
   {
     id: "test-08",
-    seq: "22",
+    instGroup: "testing-gcp",
+    tagTone: "neutral",
     name: "四川大学华西医院医疗器械临床试验机构",
     hostUnit: "四川大学华西医院",
-    categoryLabel: "药监临床试验备案医院",
+    categoryLabel: "临床试验备案医院",
     province: "四川",
     specialtyScope: "备案心脏大血管外科、呼吸危重症、麻醉监护及人工智能辅助诊断等 41 个专业",
-    qualificationNote: "械临机构备字 · 有效备案在册",
+    qualificationNote: "国家药监局临床试验机构有效备案",
   },
+];
+
+export const ALL_SERVICE_INSTITUTIONS: readonly ServiceInstitutionRow[] = [
+  ...RD_CLINICAL_PLATFORMS,
+  ...TESTING_GCP_INSTITUTIONS,
 ];
