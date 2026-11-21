@@ -24,10 +24,11 @@ export const useClusters = () =>
     staleTime: 5 * 60_000,
   });
 
-export const useIndicators = (params: { phase?: Phase; cluster?: string } = {}) =>
+export const useIndicators = (params: { phase?: Phase; cluster?: string } = {}, enabled = true) =>
   useQuery({
     queryKey: queryKeys.indicators(params),
     queryFn: ({ signal }) => api.indicators(params, { signal }).then((r) => r.items),
+    enabled,
   });
 
 export const useIndicator = (id: string | undefined) =>

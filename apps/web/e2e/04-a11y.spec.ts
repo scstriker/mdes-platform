@@ -8,6 +8,7 @@ import { useTheme } from "./support";
  */
 const ROUTES: [string, string][] = [
   ["首页", "/"],
+  ["全站跨库检索", "/search?q=手术"],
   ["注册与产品", "/products"],
   ["企业与机构", "/enterprises"],
   ["进出口贸易", "/trade"],
@@ -15,15 +16,16 @@ const ROUTES: [string, string][] = [
   ["指标目录", "/system"],
   ["指标详情 01", "/system/01"],
   ["指标详情 35", "/system/35"],
-  ["工程指标库 · 表格", "/indicators"],
-  ["工程指标库 · 矩阵", "/indicators?view=matrix"],
-  ["指标档案 · 数据", "/indicators/TRD-001"],
-  ["指标档案 · 对比", "/indicators/TRD-005?split=d.partner"],
-  ["指标档案 · 规格", "/indicators/TRD-001?tab=spec"],
-  ["指标档案 · 关联", "/indicators/TRD-001?tab=related"],
-  ["观测值", "/observations?indicator_id=TRD-001"],
+  ["工程指标库 · 表格", "/admin/indicators"],
+  ["工程指标库 · 矩阵", "/admin/indicators?view=matrix"],
+  ["指标档案 · 数据", "/admin/indicators/TRD-001"],
+  ["指标档案 · 对比", "/admin/indicators/TRD-005?split=d.partner"],
+  ["指标档案 · 规格", "/admin/indicators/TRD-001?tab=spec"],
+  ["指标档案 · 关联", "/admin/indicators/TRD-001?tab=related"],
+  ["观测值核查", "/admin/observations?indicator_id=TRD-001"],
   ["数据管理 · 概况", "/admin"],
   ["数据管理 · 导入", "/admin/import"],
+  ["数据管理 · 记录", "/admin/batches"],
   ["组件验收", "/__design"],
 ];
 

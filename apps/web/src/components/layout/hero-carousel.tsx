@@ -5,7 +5,8 @@ import heroBluebookImg from "@/assets/visuals/hero-bluebook-q3.webp";
 import heroMedtechImg from "@/assets/visuals/hero-medtech-focus.webp";
 import { ISSUE, type HeroCarouselSlide } from "@/content/issue";
 import type { ChartOption } from "@/lib/charts/echarts";
-import { baseOption, categoryAxis, LazyChart, SERIES_SYMBOLS, valueAxis, type ChartTheme } from "@/lib/charts/lazy-chart";
+import { LazyChart } from "@/lib/charts/lazy-chart";
+import { baseOption, categoryAxis, SERIES_SYMBOLS, valueAxis, type ChartTheme } from "@/lib/charts/theme";
 import { cn } from "@/lib/utils";
 
 const AUTO_INTERVAL_MS = 6500;

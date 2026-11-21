@@ -1,8 +1,7 @@
 import { useMemo } from "react";
 import { Link, useParams } from "react-router";
 import { IconTable } from "@tabler/icons-react";
-import { Breadcrumbs, EmptyState, KpiTile } from "@/components/itei";
-import { Page } from "@/components/layout/page";
+import { Breadcrumbs, EmptyState, KpiTile, SectionTitle } from "@/components/itei";
 import { QueryError } from "@/components/layout/query-error";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -19,8 +18,7 @@ const TABS = ["data", "spec", "related"] as const;
 type Tab = (typeof TABS)[number];
 
 /**
- * 指标档案：「数据 / 规格 / 关联指标」三个页签，当前页签与图表切片都写进 URL
- * （借鉴 open-sdg 的数据 / 元数据页签与 OWID Grapher 的可分享状态）。
+ * 后台 · 工程指标档案：「数据 / 规格 / 关联指标」三个页签，归属 AdminShell 内部治理闭环。
  */
 export default function IndicatorPage() {
   const { id = "" } = useParams();
@@ -32,33 +30,35 @@ export default function IndicatorPage() {
     [clusters.data],
   );
   const tab: Tab = (TABS as readonly string[]).includes(url.get("tab")) ? (url.get("tab") as Tab) : "data";
-  const catalogCrumb = { label: "指标目录", href: "/indicators" };
+  const catalogCrumb = { label: "工程指标库", href: "/admin/indicators" };
 
   if (indicator.isError) {
     const notFound = indicator.error instanceof ApiError && indicator.error.code === "NOT_FOUND";
     return (
-      <Page title={notFound ? "未找到指标" : "指标档案"} breadcrumbs={<Breadcrumbs items={[catalogCrumb, { label: id }]} />}>
+      <div className="grid gap-6 p-4 md:p-8">
+        <Breadcrumbs items={[catalogCrumb, { label: id }]} />
+        <SectionTitle level={1}>{notFound ? "未找到指标" : "工程指标档案"}</SectionTitle>
         {notFound ? (
           <EmptyState
-            title={`指标目录中没有编号 ${id}`}
-            description="请确认编号是否正确，或回到指标目录查找。"
+            title={`工程指标库中没有编号 ${id}`}
+            description="请确认编码是否正确，或返回工程指标库检索。"
             action={
               <Button asChild>
-                <Link to="/indicators">返回指标目录</Link>
+                <Link to="/admin/indicators">返回工程指标库</Link>
               </Button>
             }
           />
         ) : (
           <QueryError error={indicator.error} onRetry={() => indicator.refetch()} />
         )}
-      </Page>
+      </div>
     );
   }
 
   const ind = indicator.data;
   if (!ind) {
     return (
-      <div className="mx-auto grid w-full max-w-content gap-6 px-4 py-6 md:px-8 md:py-8" aria-busy="true">
+      <div className="grid gap-6 p-4 md:p-8" aria-busy="true">
         <span className="sr-only">指标加载中</span>
         <Skeleton className="h-5 w-48" />
         <Skeleton className="h-12 w-80" />
@@ -69,25 +69,32 @@ export default function IndicatorPage() {
 
   const clusterName = clusterNames.get(ind.cluster_code) ?? ind.cluster_code;
   return (
-    <Page
-      breadcrumbs={
-        <Breadcrumbs items={[catalogCrumb, { label: clusterName, href: `/indicators?cluster=${ind.cluster_code}` }, { label: ind.id }]} />
-      }
-      title={ind.name}
-      lead={
-        <>
-          <span className="code">{ind.id}</span> · {clusterName} · {PHASE_LABELS[ind.phase]} · 更新频率 {ind.update_freq || "未填写"}
-        </>
-      }
-      actions={
-        <Button variant="secondary" asChild>
-          <Link to={`/observations?indicator_id=${ind.id}`}>
-            <IconTable aria-hidden="true" />
-            查看全部观测值
-          </Link>
-        </Button>
-      }
-    >
+    <div className="grid gap-6 p-4 md:p-8">
+      <div className="grid gap-3">
+        <Breadcrumbs
+          items={[
+            catalogCrumb,
+            { label: clusterName, href: `/admin/indicators?cluster=${ind.cluster_code}` },
+            { label: ind.id },
+          ]}
+        />
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div className="grid gap-2">
+            <SectionTitle level={1}>{ind.name}</SectionTitle>
+            <p className="body text-ink-muted">
+              <span className="code">{ind.id}</span> · {clusterName} · {PHASE_LABELS[ind.phase]} · 更新频率{" "}
+              {ind.update_freq || "未填写"}
+            </p>
+          </div>
+          <Button variant="secondary" asChild>
+            <Link to={`/admin/observations?indicator_id=${ind.id}`}>
+              <IconTable aria-hidden="true" />
+              查看全部观测值
+            </Link>
+          </Button>
+        </div>
+      </div>
+
       <div className="grid gap-8">
         <div className="grid grid-cols-2 gap-3 md:gap-6 lg:grid-cols-3">
           <KpiTile label="观测值" value={ind.obs_count} unit="条" delta={ind.obs_count > 0 ? "已入库" : "未入库"} />
@@ -117,6 +124,6 @@ export default function IndicatorPage() {
           </TabsContent>
         </Tabs>
       </div>
-    </Page>
+    </div>
   );
 }

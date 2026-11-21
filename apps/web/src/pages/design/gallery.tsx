@@ -52,7 +52,9 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { CLIENT_ERROR_CODES, errorMessage, rowErrorMessage, SERVER_ERROR_CODES, useHealth } from "@/lib/api";
+import { StatistaFigure } from "@/components/layout/statista-figure";
 import { baseOption, categoryAxis, LazyChart, valueAxis, type ChartTheme } from "@/lib/charts/lazy-chart";
+import { statistaHorizontalBarOption } from "@/lib/charts/theme";
 import { cn } from "@/lib/utils";
 import { CLUSTER_TREE, EXPORT_SERIES, HS_ROWS, IMPORT_SERIES, MONTHS, type HsRow } from "./demo-data";
 
@@ -648,6 +650,41 @@ export function Gallery({ theme }: { theme: "light" | "dark" }) {
             <LazyChart option={barOption} ariaLabel="2024 年 1–6 月医疗装备进出口金额柱状图" height={240} />
           </div>
         </div>
+      </Demo>
+
+      <Demo title="StatistaFigure（出版物四段式信息图）" note="结论主标题 + 量纲副标题 + 图/表切换 + 直接标数 + 来源与导出底栏">
+        <StatistaFigure
+          eyebrow="信息图组件基准"
+          title="高端影像与内镜核心组件进口集中度显著高于常规耗材"
+          subtitle="2026年前三季度 · 关键医疗装备部件进口前三大来源国占比 CR3（单位：%）"
+          badge={{ label: "CR3 最高 83.6%", tone: "warning" }}
+          ariaLabel="关键医疗装备部件进口集中度横向条形图"
+          height={216}
+          option={(t) =>
+            statistaHorizontalBarOption(t, {
+              categories: ["内窥镜光学组件", "高热容量CT球管", "3.0T超导磁共振", "一次性医用耗材"],
+              values: [83.6, 78.4, 71.2, 34.2],
+              labels: ["83.6%", "78.4%", "71.2%", "34.2%"],
+              emphasizeIndex: 0,
+              highlightTopN: 3,
+              max: 100,
+              rightPadding: 64,
+            })
+          }
+          tableColumns={[
+            { key: "name", title: "关键部件/品类" },
+            { key: "cr3", title: "进口 CR3", align: "right" },
+          ]}
+          tableRows={[
+            { name: "内窥镜光学组件", cr3: "83.6%" },
+            { name: "高热容量CT球管", cr3: "78.4%" },
+            { name: "3.0T超导磁共振", cr3: "71.2%" },
+            { name: "一次性医用耗材", cr3: "34.2%" },
+          ]}
+          exportName="design-statista-demo"
+          source="中国海关 8 位 HS 编码统计数据"
+          note="支持右上角原地切换三线数据表及一键导出矢量 SVG 配图"
+        />
       </Demo>
 
       <ApiErrors />

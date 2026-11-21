@@ -1,13 +1,22 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router";
 import { IconAdjustmentsHorizontal, IconLayoutGrid, IconTable, IconX } from "@tabler/icons-react";
 import type { Cluster, IndicatorListItem } from "@mdes/shared";
-import { DataTable, EmptyState, Field, formatNumber, pad2, Tag, TextLink, Tree, type DataTableColumn, type TreeNode } from "@/components/itei";
+import {
+  DataTable,
+  EmptyState,
+  formatNumber,
+  pad2,
+  SectionTitle,
+  Tag,
+  TextLink,
+  Tree,
+  type DataTableColumn,
+  type TreeNode,
+} from "@/components/itei";
 import { FilterSelect } from "@/components/layout/filter-select";
-import { Page } from "@/components/layout/page";
 import { QueryError } from "@/components/layout/query-error";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useClusters, useIndicators } from "@/lib/api";
 import { PHASE_LABELS, SOURCE_KIND_LABELS } from "@/lib/labels";
@@ -24,6 +33,7 @@ import {
 } from "./filter";
 
 const ALL_CLUSTERS = "__all__";
+const PAGE_SIZE = 20;
 
 export default function CatalogPage() {
   const url = useUrlState();
@@ -40,6 +50,11 @@ export default function CatalogPage() {
   const view = url.get("view") === "matrix" ? "matrix" : "table";
   const advancedActive = [filters.phase, filters.source, filters.automation, filters.data].filter(Boolean).length;
   const [showAdvanced, setShowAdvanced] = useState(advancedActive > 0);
+  const [page, setPage] = useState(0);
+
+  useEffect(() => {
+    setPage(0);
+  }, [filters.cluster, filters.phase, filters.source, filters.automation, filters.data, filters.q]);
 
   const items = useMemo(() => indicators.data ?? [], [indicators.data]);
   const clusterList = useMemo(() => clusters.data ?? [], [clusters.data]);
@@ -47,16 +62,23 @@ export default function CatalogPage() {
     () => new Map(clusterList.map((c) => [c.code, shortClusterName(c.name)])),
     [clusterList],
   );
-  // 99 项，直接在前端筛选
   const result = filterIndicators(items, filters);
+  const pagedResult = useMemo(
+    () => result.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE),
+    [result, page],
+  );
 
-  const count = (key: keyof CatalogFilters, valueOf: (i: IndicatorListItem) => string) => facetCounts(items, filters, key, valueOf);
+  const count = (key: keyof CatalogFilters, valueOf: (i: IndicatorListItem) => string) =>
+    facetCounts(items, filters, key, valueOf);
   const clusterCounts = count("cluster", (i) => i.cluster_code);
   const phaseCounts = count("phase", (i) => i.phase);
   const sourceCounts = count("source", (i) => i.source_kind);
   const automationCounts = count("automation", automationOf);
   const dataCounts = count("data", dataStatusOf);
-  const automationValues = useMemo(() => [...new Set(items.map(automationOf))].sort((a, b) => a.localeCompare(b, "zh-CN")), [items]);
+  const automationValues = useMemo(
+    () => [...new Set(items.map(automationOf))].sort((a, b) => a.localeCompare(b, "zh-CN")),
+    [items],
+  );
   const sourceValues = useMemo(() => [...new Set(items.map((i) => i.source_kind))], [items]);
 
   const anyFilter = FILTER_KEYS.some((k) => filters[k]);
@@ -75,13 +97,20 @@ export default function CatalogPage() {
   ];
 
   return (
-    <Page number="二" title="指标目录" lead="V12 指标体系 7 簇 99 项。按簇、阶段、来源与采集方式筛选，点编号进入指标档案。">
+    <div className="grid gap-6 p-4 md:p-8">
+      <div>
+        <SectionTitle level={1}>工程指标库</SectionTitle>
+        <p className="mt-2 body text-ink-muted">
+          底层 V12 数据底座 7 簇 99 项工程序列台账（支持与门户 V3.0 指标映射、采集自动化分级及实时入库状态核查）。
+        </p>
+      </div>
+
       {error ? (
         <QueryError error={error} onRetry={() => (indicators.refetch(), clusters.refetch())} />
       ) : (
-        <div className="lg:flex lg:items-start lg:gap-8">
-          <aside className="hidden shrink-0 border border-border bg-surface-sunken py-2 lg:sticky lg:top-20 lg:block lg:w-60">
-            <p className="px-4 pt-1 pb-2 caption text-ink-muted">指标簇</p>
+        <div className="lg:flex lg:items-start lg:gap-6">
+          <aside className="hidden shrink-0 border border-border bg-surface-sunken py-2 lg:sticky lg:top-20 lg:block lg:w-52">
+            <p className="px-4 pt-1 pb-2 caption text-ink-muted">底层指标簇</p>
             {loading ? (
               <div className="grid gap-2 px-4 pb-2">
                 {Array.from({ length: 8 }, (_, i) => (
@@ -100,22 +129,17 @@ export default function CatalogPage() {
 
           <div className="grid min-w-0 flex-1 gap-5">
             <div className="grid gap-4 border border-border bg-surface p-4">
-              <div className="grid gap-4 sm:grid-cols-2">
-                <Field label="搜索">
-                  <Input
-                    type="search"
-                    value={filters.q}
-                    placeholder="指标编号或名称，如 TRD-001、进口"
-                    onChange={(e) => url.set({ q: e.target.value })}
-                  />
-                </Field>
+              <div className="lg:hidden">
                 <FilterSelect
-                  className="lg:hidden"
                   label="指标簇"
                   allLabel="全部指标簇"
                   value={filters.cluster}
                   onChange={(v) => url.set({ cluster: v })}
-                  options={clusterList.map((c) => ({ value: c.code, label: c.name, count: clusterCounts.get(c.code) ?? 0 }))}
+                  options={clusterList.map((c) => ({
+                    value: c.code,
+                    label: c.name,
+                    count: clusterCounts.get(c.code) ?? 0,
+                  }))}
                 />
               </div>
               <Button
@@ -133,19 +157,31 @@ export default function CatalogPage() {
                   label="阶段"
                   value={filters.phase}
                   onChange={(v) => url.set({ phase: v })}
-                  options={(["phase1", "later"] as const).map((p) => ({ value: p, label: PHASE_LABELS[p], count: phaseCounts.get(p) ?? 0 }))}
+                  options={(["phase1", "later"] as const).map((p) => ({
+                    value: p,
+                    label: PHASE_LABELS[p],
+                    count: phaseCounts.get(p) ?? 0,
+                  }))}
                 />
                 <FilterSelect
                   label="来源类型"
                   value={filters.source}
                   onChange={(v) => url.set({ source: v })}
-                  options={sourceValues.map((s) => ({ value: s, label: SOURCE_KIND_LABELS[s] ?? s, count: sourceCounts.get(s) ?? 0 }))}
+                  options={sourceValues.map((s) => ({
+                    value: s,
+                    label: SOURCE_KIND_LABELS[s] ?? s,
+                    count: sourceCounts.get(s) ?? 0,
+                  }))}
                 />
                 <FilterSelect
                   label="采集方式"
                   value={filters.automation}
                   onChange={(v) => url.set({ automation: v })}
-                  options={automationValues.map((a) => ({ value: a, label: a, count: automationCounts.get(a) ?? 0 }))}
+                  options={automationValues.map((a) => ({
+                    value: a,
+                    label: a,
+                    count: automationCounts.get(a) ?? 0,
+                  }))}
                 />
                 <FilterSelect
                   label="数据状态"
@@ -161,7 +197,13 @@ export default function CatalogPage() {
 
             <div className="flex flex-wrap items-center justify-between gap-3">
               <p className="body text-ink" aria-live="polite">
-                {loading ? "加载中" : <>共 <b className="tabular-nums">{formatNumber(result.length)}</b> 项</>}
+                {loading ? (
+                  "加载中"
+                ) : (
+                  <>
+                    共 <b className="tabular-nums">{formatNumber(result.length)}</b> 项
+                  </>
+                )}
                 {anyFilter && !loading && (
                   <Button variant="ghost" size="sm" className="ml-2" onClick={clearAll}>
                     <IconX aria-hidden="true" />
@@ -205,10 +247,15 @@ export default function CatalogPage() {
               <DataTable
                 caption="指标目录"
                 columns={tableColumns(clusterName, Boolean(filters.cluster))}
-                data={result}
+                data={pagedResult}
                 getRowId={(i) => i.id}
                 loading={loading}
                 stickyFirstColumn
+                pagination={
+                  result.length > PAGE_SIZE
+                    ? { page, pageSize: PAGE_SIZE, total: result.length, onPageChange: setPage }
+                    : undefined
+                }
               />
             ) : (
               <Matrix clusters={clusterList} items={result} loading={loading} />
@@ -216,7 +263,7 @@ export default function CatalogPage() {
           </div>
         </div>
       )}
-    </Page>
+    </div>
   );
 }
 
@@ -224,21 +271,32 @@ function tableColumns(clusterName: Map<string, string>, hideCluster: boolean): D
   return [
     {
       key: "id",
-      title: "编号",
+      title: "工程编码",
       type: "code",
       sortable: true,
-      cell: (i) => <TextLink to={`/indicators/${i.id}`}>{i.id}</TextLink>,
+      cell: (i) => <TextLink to={`/admin/indicators/${i.id}`}>{i.id}</TextLink>,
     },
     {
       key: "name",
       title: "名称",
       primary: true,
       sortable: true,
-      cell: (i) => <TextLink to={`/indicators/${i.id}`} className="text-ink">{i.name}</TextLink>,
+      cell: (i) => (
+        <TextLink to={`/admin/indicators/${i.id}`} className="text-ink">
+          {i.name}
+        </TextLink>
+      ),
     },
     ...(hideCluster
       ? []
-      : [{ key: "cluster_code", title: "簇", value: (i: IndicatorListItem) => clusterName.get(i.cluster_code) ?? i.cluster_code, sortable: true }]),
+      : [
+          {
+            key: "cluster_code",
+            title: "所属簇",
+            value: (i: IndicatorListItem) => clusterName.get(i.cluster_code) ?? i.cluster_code,
+            sortable: true,
+          },
+        ]),
     { key: "phase", title: "阶段", value: (i) => PHASE_LABELS[i.phase], sortable: true },
     { key: "automation", title: "采集方式", value: automationOf, sortable: true },
     { key: "obs_count", title: "观测值", type: "number", sortable: true },
@@ -248,12 +306,18 @@ function tableColumns(clusterName: Map<string, string>, hideCluster: boolean): D
       title: "数据状态",
       type: "status",
       value: dataStatusOf,
-      cell: (i) => (i.obs_count > 0 ? <Tag size="sm" tone="success">已入库</Tag> : <Tag size="sm">未入库</Tag>),
+      cell: (i) =>
+        i.obs_count > 0 ? (
+          <Tag size="sm" tone="success">
+            已入库
+          </Tag>
+        ) : (
+          <Tag size="sm">未入库</Tag>
+        ),
     },
   ];
 }
 
-/** 矩阵：簇 × 阶段，每格是指标小块；圆点表示是否已入库 */
 function Matrix({ clusters, items, loading }: { clusters: Cluster[]; items: IndicatorListItem[]; loading: boolean }) {
   if (loading) return <Skeleton className="h-96 w-full" />;
   const byCell = (code: string, phase: string) => items.filter((i) => i.cluster_code === code && i.phase === phase);
@@ -272,9 +336,15 @@ function Matrix({ clusters, items, loading }: { clusters: Cluster[]; items: Indi
       </p>
       <div className="border-t-2 border-brand-sky" role="table" aria-label="指标矩阵：簇 × 阶段">
         <div role="row" className="hidden border-b border-border bg-surface-sunken md:grid md:grid-cols-5">
-          <span role="columnheader" className="px-3 py-2 label font-bold text-brand-navy">指标簇</span>
-          <span role="columnheader" className="col-span-2 px-3 py-2 label font-bold text-brand-navy">一期</span>
-          <span role="columnheader" className="col-span-2 px-3 py-2 label font-bold text-brand-navy">后期</span>
+          <span role="columnheader" className="px-3 py-2 label font-bold text-brand-navy">
+            指标簇
+          </span>
+          <span role="columnheader" className="col-span-2 px-3 py-2 label font-bold text-brand-navy">
+            一期
+          </span>
+          <span role="columnheader" className="col-span-2 px-3 py-2 label font-bold text-brand-navy">
+            后期
+          </span>
         </div>
         {rows.map((c) => (
           <div key={c.code} role="row" className="grid gap-2 border-b border-border py-3 md:grid-cols-5 md:gap-0">
@@ -294,13 +364,16 @@ function Matrix({ clusters, items, loading }: { clusters: Cluster[]; items: Indi
                       {cell.map((i) => (
                         <li key={i.id}>
                           <Link
-                            to={`/indicators/${i.id}`}
+                            to={`/admin/indicators/${i.id}`}
                             title={`${i.id} ${i.name}${i.obs_count ? `（${i.obs_count} 条观测值）` : "（未入库）"}`}
                             className="inline-flex h-8 items-center gap-1.5 rounded-sm border border-border bg-surface px-2 body-sm text-ink transition-colors duration-150 hover:border-brand-navy hover:text-brand-navy focus-ring"
                           >
                             <span
                               aria-hidden="true"
-                              className={cn("size-2 shrink-0 rounded-pill", i.obs_count ? "bg-success" : "border border-border-strong")}
+                              className={cn(
+                                "size-2 shrink-0 rounded-pill",
+                                i.obs_count ? "bg-success" : "border border-border-strong",
+                              )}
                             />
                             <span className="code">{i.id}</span>
                             <span className="sr-only">{i.obs_count ? "已入库" : "未入库"}</span>
