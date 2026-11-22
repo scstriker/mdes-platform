@@ -108,6 +108,8 @@ test.describe.serial("G4 / AC-016：38号海关原件向导 → 贸易专题 / �
     await page.goto("/admin/import?seq=38");
     await page.getByRole("button", { name: /海关月度原件与清单/ }).click();
     await expect(page.getByTestId("customs-trade-import-flow")).toBeVisible();
+    await expect(page.getByTestId("trade-year-coverage-bar")).toContainText("164 个 HS8 · 117 个 HS6 · 11 个一级类别");
+    await expect(page.getByTestId("trade-year-coverage-bar")).toContainText("15,744 格");
 
     await page.getByLabel("载入清单文件").setInputFiles(manifestPath1);
     await page

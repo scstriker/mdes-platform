@@ -16,6 +16,8 @@ export const queryKeys = {
   tradePeriods: (dictVersion = "") => ["trade", "periods", dictVersion] as const,
   tradeBatches: (params: { dictVersion?: string; month?: string; flow?: string; grouping?: string } = {}) =>
     ["trade", "batches", params] as const,
+  tradeCoverage: (params: { dictVersion?: string; year?: string; fromMonth?: string; toMonth?: string } = {}) =>
+    ["trade", "coverage", params] as const,
 };
 
 export const useHealth = () => useQuery({ queryKey: queryKeys.health, queryFn: ({ signal }) => api.health({ signal }) });
@@ -110,6 +112,16 @@ export const useTradeBatches = (
   useQuery({
     queryKey: queryKeys.tradeBatches(params),
     queryFn: ({ signal }) => api.tradeBatches(params, { signal }).then((r) => r.items),
+    enabled,
+  });
+
+export const useTradeCoverage = (
+  params: { dictVersion?: string; year?: string; fromMonth?: string; toMonth?: string } = {},
+  enabled = true,
+) =>
+  useQuery({
+    queryKey: queryKeys.tradeCoverage(params),
+    queryFn: ({ signal }) => api.tradeCoverage(params, { signal }),
     enabled,
   });
 

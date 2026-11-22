@@ -327,3 +327,52 @@ export type TradeOverviewPublished = {
 };
 
 export type TradeOverviewResponse = TradeOverviewEmpty | TradeOverviewPublished;
+
+export type TradeCoverageCellStatus = "received" | "confirmedEmpty" | "missing" | "notApplicable";
+
+export type TradeCoverageCell = {
+  month: string;
+  flow: TradeFlow;
+  grouping: TradeGrouping;
+  hs8: string;
+  status: TradeCoverageCellStatus;
+  batchId: string | null;
+  sourceSha256: string | null;
+  evidenceSha256: string | null;
+  basis: string | null;
+};
+
+export type TradeCoverageMonthSummary = {
+  month: string;
+  applicableHs8Count: number;
+  notApplicableHs8Count: number;
+  totalCells: number;
+  received: number;
+  confirmedEmpty: number;
+  missing: number;
+  notApplicable: number;
+  isPublishable: boolean;
+  isPublished: boolean;
+};
+
+export type TradeCoverageMatrixResponse = {
+  dictVersion: string;
+  dictSha256: string;
+  hs8Count: number;
+  hs6Count: number;
+  categoryCount: number;
+  fromMonth: string;
+  toMonth: string;
+  monthCount: number;
+  summary: {
+    totalCells: number;
+    received: number;
+    confirmedEmpty: number;
+    missing: number;
+    notApplicable: number;
+    publishableMonths: number;
+    publishedMonths: number;
+  };
+  months: TradeCoverageMonthSummary[];
+  cells?: TradeCoverageCell[];
+};
