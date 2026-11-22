@@ -60,7 +60,7 @@ async function readTradeMultipart(c: Context<AppEnv>): Promise<{
 export function tradeRoutes(app: Hono<AppEnv>) {
   app.post("/api/trade/import", async (c) => {
     const parsed = await readTradeMultipart(c);
-    const failHeader = c.req.header("x-test-fail-before-publish") === "1";
+    const failHeader = c.env.ENABLE_TEST_HOOKS === "1" && c.req.header("x-test-fail-before-publish") === "1";
     const result = await importTradeBatch(c.get("db"), {
       ...parsed,
       maxRows: c.get("importMaxRows"),

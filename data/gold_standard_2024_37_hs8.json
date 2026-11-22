@@ -1,0 +1,232 @@
+{
+  "sourceWorkbook": "我国海关平台-2024年度仪器仪表海关进出口年度数据统计.xlsx",
+  "sheetName": "Sheet1",
+  "workbookSha256": "dca9d4a37c0339c0cd5b49dfafa70254dfc16dee4fea525102a4eed198089a4d",
+  "dictVersion": "202601",
+  "expectedImportSumUsd": 17410795225,
+  "expectedKnownExportSumUsd": 13792423197,
+  "items": [
+    {
+      "hs8": "90111000",
+      "rowNumber": 51,
+      "importUsd": 96973770,
+      "exportUsd": 61101389
+    },
+    {
+      "hs8": "90118000",
+      "rowNumber": 52,
+      "importUsd": 131419038,
+      "exportUsd": 164064327
+    },
+    {
+      "hs8": "90119000",
+      "rowNumber": 53,
+      "importUsd": 60107087,
+      "exportUsd": 95960814
+    },
+    {
+      "hs8": "90121000",
+      "rowNumber": 54,
+      "importUsd": 1879614494,
+      "exportUsd": 34256488
+    },
+    {
+      "hs8": "90129000",
+      "rowNumber": 55,
+      "importUsd": 88580544,
+      "exportUsd": 40312280
+    },
+    {
+      "hs8": "90273000",
+      "rowNumber": 95,
+      "importUsd": 710003589,
+      "exportUsd": 187443855
+    },
+    {
+      "hs8": "90275010",
+      "rowNumber": 96,
+      "importUsd": 62658072,
+      "exportUsd": 57247910
+    },
+    {
+      "hs8": "90275090",
+      "rowNumber": 97,
+      "importUsd": 1514792508,
+      "exportUsd": 508674006
+    },
+    {
+      "hs8": "90278990",
+      "rowNumber": 102,
+      "importUsd": 1516522285,
+      "exportUsd": 1021978994
+    },
+    {
+      "hs8": "90279000",
+      "rowNumber": 103,
+      "importUsd": 1346459458,
+      "exportUsd": 771905445
+    },
+    {
+      "hs8": "90181100",
+      "rowNumber": 105,
+      "importUsd": 20375226,
+      "exportUsd": 89723246
+    },
+    {
+      "hs8": "90181210",
+      "rowNumber": 106,
+      "importUsd": 12408564,
+      "exportUsd": 95968876
+    },
+    {
+      "hs8": "90181291",
+      "rowNumber": 107,
+      "importUsd": 377673439,
+      "exportUsd": 1083946140
+    },
+    {
+      "hs8": "90181299",
+      "rowNumber": 108,
+      "importUsd": 9847944,
+      "exportUsd": 14077149
+    },
+    {
+      "hs8": "90181310",
+      "rowNumber": 109,
+      "importUsd": 263110996,
+      "exportUsd": 309257982
+    },
+    {
+      "hs8": "90181390",
+      "rowNumber": 110,
+      "importUsd": 312475459,
+      "exportUsd": 516972655
+    },
+    {
+      "hs8": "90181930",
+      "rowNumber": 111,
+      "importUsd": 149163853,
+      "exportUsd": 562012481
+    },
+    {
+      "hs8": "90181941",
+      "rowNumber": 112,
+      "importUsd": 6695269,
+      "exportUsd": 195090
+    },
+    {
+      "hs8": "90181949",
+      "rowNumber": 113,
+      "importUsd": 10350113,
+      "exportUsd": 3160535
+    },
+    {
+      "hs8": "90181990",
+      "rowNumber": 114,
+      "importUsd": 443465360,
+      "exportUsd": 102657559
+    },
+    {
+      "hs8": "90189010",
+      "rowNumber": 115,
+      "importUsd": 3085675,
+      "exportUsd": 26827619
+    },
+    {
+      "hs8": "90189020",
+      "rowNumber": 116,
+      "importUsd": 58445471,
+      "exportUsd": 646342425
+    },
+    {
+      "hs8": "90189030",
+      "rowNumber": 117,
+      "importUsd": 839906829,
+      "exportUsd": 473970231
+    },
+    {
+      "hs8": "90189099",
+      "rowNumber": 118,
+      "importUsd": 3926520015,
+      "exportUsd": 2496765379
+    },
+    {
+      "hs8": "90221200",
+      "rowNumber": 119,
+      "importUsd": 329829219,
+      "exportUsd": 668035809
+    },
+    {
+      "hs8": "90221300",
+      "rowNumber": 120,
+      "importUsd": 1950403,
+      "exportUsd": 40715867
+    },
+    {
+      "hs8": "90221400",
+      "rowNumber": 121,
+      "importUsd": 494276566,
+      "exportUsd": 546774518
+    },
+    {
+      "hs8": "90221990",
+      "rowNumber": 124,
+      "importUsd": 730637851,
+      "exportUsd": 324219717
+    },
+    {
+      "hs8": "90222110",
+      "rowNumber": 125,
+      "importUsd": 26311307,
+      "exportUsd": 1838465
+    },
+    {
+      "hs8": "90222190",
+      "rowNumber": 126,
+      "importUsd": 5215518,
+      "exportUsd": null
+    },
+    {
+      "hs8": "90222990",
+      "rowNumber": 127,
+      "importUsd": 17647431,
+      "exportUsd": 21927542
+    },
+    {
+      "hs8": "90223000",
+      "rowNumber": 128,
+      "importUsd": 834707754,
+      "exportUsd": 246697968
+    },
+    {
+      "hs8": "90229010",
+      "rowNumber": 129,
+      "importUsd": 4636564,
+      "exportUsd": 296645
+    },
+    {
+      "hs8": "90229090",
+      "rowNumber": 130,
+      "importUsd": 956467782,
+      "exportUsd": 1005229932
+    },
+    {
+      "hs8": "84231000",
+      "rowNumber": 132,
+      "importUsd": 704916,
+      "exportUsd": 964691857
+    },
+    {
+      "hs8": "90251100",
+      "rowNumber": 168,
+      "importUsd": 3053429,
+      "exportUsd": 33123694
+    },
+    {
+      "hs8": "90251990",
+      "rowNumber": 170,
+      "importUsd": 164701427,
+      "exportUsd": 574048308
+    }
+  ]
+}
