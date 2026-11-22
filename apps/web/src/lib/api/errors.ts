@@ -45,6 +45,20 @@ const MESSAGES: Record<ErrorCode, (p: ApiErrorParams) => string> = {
   DIMS_INVALID_JSON: () => "维度（dims）不是合法的 JSON，请检查引号与括号",
   DIMS_NOT_OBJECT: () => '维度（dims）必须是 JSON 对象，例如 {"trade_type":"import"}',
   UNKNOWN_INDICATOR: (p) => `指标编号 ${text(p.indicator_id, "（空）")} 不存在，请核对指标目录后重试`,
+  TRADE_MANIFEST_INVALID: (p) =>
+    `海关批次清单字段「${text(p.field, "manifest")}」无效，请核对字典版本、月份、流向、分组及 HS8 列表`,
+  TRADE_CURRENCY_INVALID: (p) =>
+    `贸易原件币种必须为美元（USD），当前收到「${text(p.currency, "非美元")}」，请在海关平台选择美元后重新导出`,
+  TRADE_EVIDENCE_INVALID: () =>
+    "海关原件或官网无记录截图（PNG）不符合规范，若官网返回会话超时网页请重新登录后导出",
+  TRADE_CSV_INVALID: (p) =>
+    Number(p.line) > 0
+      ? `海关 CSV 第 ${p.line} 行字段「${text(p.field, "明细")}」校验未通过，请复核源文件行后重试`
+      : `海关 CSV 表头或编码校验未通过（字段：${text(p.field, "表头")}），请检查导出的分组列与币种`,
+  TRADE_SCOPE_CONFLICT: (p) =>
+    `本次请求的 HS8 范围与既有批次 ${text(p.existingBatchId, "已有批次")} 部分重叠（原范围：${text(p.existingHs8, "既有集合")}），请按原覆盖集合完整重采后导入`,
+  TRADE_PERIOD_INVALID: (p) =>
+    `统计期间「${text(p.period, "输入值")}」格式无效，支持月度（2024-12）、季度（2024-Q4）、年度（2024）或年内累计（2024-YTD-09）`,
   NOT_FOUND: (p) =>
     p.id && p.resource !== "route" ? `未找到 ${p.id}，请确认编号是否正确` : "请求的内容不存在，请返回上一页重试",
   INTERNAL_ERROR: () => "服务器内部错误，请稍后重试",
