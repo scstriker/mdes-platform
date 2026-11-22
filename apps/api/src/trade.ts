@@ -13,6 +13,10 @@ import {
   type ParsedCustomsFactRow,
   type TradeBatchListItem,
   type TradeCategoryStat,
+  type TradeCoverageCell,
+  type TradeCoverageCellStatus,
+  type TradeCoverageMatrixResponse,
+  type TradeCoverageMonthSummary,
   type TradeFlow,
   type TradeGrouping,
   type TradeGroupingTotals,
@@ -1725,5 +1729,286 @@ export async function listTradeBatches(
       },
       createdAt: r.created_at,
     })),
+  };
+}
+
+function expandMonthsInclusive(fromMonth: string, toMonth: string): string[] | null {
+  const m1 = /^(\d{4})-(0[1-9]|1[0-2])$/.exec(fromMonth);
+  const m2 = /^(\d{4})-(0[1-9]|1[0-2])$/.exec(toMonth);
+  if (!m1 || !m2) return null;
+  const startTotal = Number(m1[1]) * 12 + (Number(m1[2]) - 1);
+  const endTotal = Number(m2[1]) * 12 + (Number(m2[2]) - 1);
+  if (startTotal > endTotal || endTotal - startTotal > 240) return null;
+  const out: string[] = [];
+  for (let t = startTotal; t <= endTotal; t++) {
+    const y = Math.floor(t / 12);
+    const m = (t % 12) + 1;
+    out.push(`${y}-${String(m).padStart(2, "0")}`);
+  }
+  return out;
+}
+
+export async function getTradeCoverageMatrix(
+  db: D1Database,
+  params: {
+    dictVersion?: string | null;
+    year?: string | null;
+    fromMonth?: string | null;
+    toMonth?: string | null;
+    month?: string | null;
+    hs8?: string | null;
+  },
+): Promise<TradeCoverageMatrixResponse> {
+  const dictVersion = params.dictVersion?.trim() || DEFAULT_DICT_VERSION;
+
+  const meta = await db
+    .prepare("SELECT dict_version, source_sha256, hs8_count, hs6_count, category_count FROM trade_dict_meta WHERE dict_version = ?1")
+    .bind(dictVersion)
+    .first<{
+      dict_version: string;
+      source_sha256: string;
+      hs8_count: number;
+      hs6_count: number;
+      category_count: number;
+    }>();
+
+  if (!meta) {
+    throw new AppError(400, "TRADE_MANIFEST_INVALID", { field: "dictVersion", reason: `unknown dictVersion: ${dictVersion}` });
+  }
+
+  let fromMonth = params.fromMonth?.trim() || "2024-01";
+  let toMonth = params.toMonth?.trim() || "2024-12";
+  if (params.year?.trim()) {
+    const yStr = params.year.trim();
+    if (!/^\d{4}$/.test(yStr)) {
+      throw new AppError(400, "TRADE_PERIOD_INVALID", { period: yStr });
+    }
+    fromMonth = `${yStr}-01`;
+    toMonth = `${yStr}-12`;
+  } else if (params.month?.trim() && !params.fromMonth?.trim() && !params.toMonth?.trim()) {
+    fromMonth = params.month.trim();
+    toMonth = params.month.trim();
+  }
+
+  const months = expandMonthsInclusive(fromMonth, toMonth);
+  if (!months) {
+    throw new AppError(400, "TRADE_PERIOD_INVALID", { period: `${fromMonth}..${toMonth}` });
+  }
+
+  const filterMonth = params.month?.trim() || null;
+  if (filterMonth && !/^\d{4}-(0[1-9]|1[0-2])$/.test(filterMonth)) {
+    throw new AppError(400, "TRADE_PERIOD_INVALID", { period: filterMonth });
+  }
+  const filterHs8 = params.hs8?.trim() || null;
+  if (filterHs8 && !/^\d{8}$/.test(filterHs8)) {
+    throw new AppError(400, "TRADE_MANIFEST_INVALID", { field: "hs8", reason: `invalid hs8: ${filterHs8}` });
+  }
+
+  const { results: dictItems } = await db
+    .prepare("SELECT hs8 FROM trade_hs_dict WHERE dict_version = ?1 ORDER BY category_order ASC, seq_no ASC, hs8 ASC")
+    .bind(dictVersion)
+    .all<{ hs8: string }>();
+  const allHs8 = dictItems.map((d) => d.hs8);
+
+  const minYear = Number(fromMonth.slice(0, 4));
+  const maxYear = Number(toMonth.slice(0, 4));
+
+  const { results: appRows } = await db
+    .prepare(
+      `SELECT year, hs8, applicable, basis_note
+       FROM trade_hs_year_applicability
+       WHERE dict_version = ?1 AND year >= ?2 AND year <= ?3`,
+    )
+    .bind(dictVersion, minYear, maxYear)
+    .all<{ year: number; hs8: string; applicable: number; basis_note: string }>();
+
+  const appMap = new Map<string, { applicable: number; note: string | null }>();
+  for (const r of appRows) {
+    appMap.set(`${r.year}|${r.hs8}`, { applicable: r.applicable, note: r.basis_note || null });
+  }
+
+  const { results: pubRows } = await db
+    .prepare(
+      `SELECT period
+       FROM trade_current_snapshot
+       WHERE dict_version = ?1 AND period >= ?2 AND period <= ?3`,
+    )
+    .bind(dictVersion, fromMonth, toMonth)
+    .all<{ period: string }>();
+  const publishedSet = new Set(pubRows.map((p) => p.period));
+
+  const { results: covRows } = await db
+    .prepare(
+      `SELECT
+         c.month,
+         c.flow,
+         c.grouping,
+         c.hs8,
+         c.status,
+         c.batch_id,
+         c.evidence_sha256,
+         b.source_sha256
+       FROM trade_import_batch b
+       JOIN trade_hs_coverage c
+         ON c.batch_id = b.batch_id
+       WHERE b.dict_version = ?1
+         AND b.month >= ?2
+         AND b.month <= ?3
+         AND b.superseded_by IS NULL`,
+    )
+    .bind(dictVersion, fromMonth, toMonth)
+    .all<{
+      month: string;
+      flow: TradeFlow;
+      grouping: TradeGrouping;
+      hs8: string;
+      status: "received" | "confirmed_empty" | "missing";
+      batch_id: string;
+      evidence_sha256: string | null;
+      source_sha256: string;
+    }>();
+
+  const covMap = new Map<
+    string,
+    {
+      status: "received" | "confirmedEmpty" | "missing";
+      batchId: string;
+      sourceSha256: string;
+      evidenceSha256: string | null;
+    }
+  >();
+  for (const r of covRows) {
+    covMap.set(`${r.month}|${r.flow}|${r.grouping}|${r.hs8}`, {
+      status: r.status === "confirmed_empty" ? "confirmedEmpty" : r.status,
+      batchId: r.batch_id,
+      sourceSha256: r.source_sha256,
+      evidenceSha256: r.evidence_sha256,
+    });
+  }
+
+  const includeCells = Boolean(filterHs8 || filterMonth);
+  const cells: TradeCoverageCell[] = [];
+  const monthSummaries: TradeCoverageMonthSummary[] = [];
+
+  let totalCells = 0;
+  let totalReceived = 0;
+  let totalConfirmedEmpty = 0;
+  let totalMissing = 0;
+  let totalNotApplicable = 0;
+  let publishableMonths = 0;
+  let publishedMonths = 0;
+
+  for (const month of months) {
+    const year = Number(month.slice(0, 4));
+    let mApplicableHs8 = 0;
+    let mNotApplicableHs8 = 0;
+    for (const hs8 of allHs8) {
+      const app = appMap.get(`${year}|${hs8}`);
+      if (app && app.applicable === 0) mNotApplicableHs8 += 1;
+      else mApplicableHs8 += 1;
+    }
+
+    let mReceived = 0;
+    let mConfirmedEmpty = 0;
+    let mMissing = 0;
+    let mNotApplicable = 0;
+
+    for (const flow of TRADE_FLOWS) {
+      for (const grouping of TRADE_GROUPINGS) {
+        for (const hs8 of allHs8) {
+          const app = appMap.get(`${year}|${hs8}`);
+          let status: TradeCoverageCellStatus;
+          let batchId: string | null = null;
+          let sourceSha256: string | null = null;
+          let evidenceSha256: string | null = null;
+          let basis: string | null = null;
+
+          if (app && app.applicable === 0) {
+            status = "notApplicable";
+            basis = app.note ?? "当年税则不适用";
+            mNotApplicable += 1;
+          } else {
+            const c = covMap.get(`${month}|${flow}|${grouping}|${hs8}`);
+            if (c && c.status === "received") {
+              status = "received";
+              batchId = c.batchId;
+              sourceSha256 = c.sourceSha256;
+              mReceived += 1;
+            } else if (c && c.status === "confirmedEmpty") {
+              status = "confirmedEmpty";
+              batchId = c.batchId;
+              sourceSha256 = c.sourceSha256;
+              evidenceSha256 = c.evidenceSha256 ?? c.sourceSha256;
+              mConfirmedEmpty += 1;
+            } else {
+              status = "missing";
+              mMissing += 1;
+            }
+          }
+
+          if (includeCells && (!filterMonth || filterMonth === month) && (!filterHs8 || filterHs8 === hs8)) {
+            cells.push({
+              month,
+              flow,
+              grouping,
+              hs8,
+              status,
+              batchId,
+              sourceSha256,
+              evidenceSha256,
+              basis,
+            });
+          }
+        }
+      }
+    }
+
+    const mTotal = allHs8.length * TRADE_FLOWS.length * TRADE_GROUPINGS.length;
+    const isPublishable = mApplicableHs8 > 0 && mMissing === 0;
+    const isPublished = publishedSet.has(month);
+
+    if (isPublishable) publishableMonths += 1;
+    if (isPublished) publishedMonths += 1;
+
+    totalCells += mTotal;
+    totalReceived += mReceived;
+    totalConfirmedEmpty += mConfirmedEmpty;
+    totalMissing += mMissing;
+    totalNotApplicable += mNotApplicable;
+
+    monthSummaries.push({
+      month,
+      applicableHs8Count: mApplicableHs8,
+      notApplicableHs8Count: mNotApplicableHs8,
+      totalCells: mTotal,
+      received: mReceived,
+      confirmedEmpty: mConfirmedEmpty,
+      missing: mMissing,
+      notApplicable: mNotApplicable,
+      isPublishable,
+      isPublished,
+    });
+  }
+
+  return {
+    dictVersion: meta.dict_version,
+    dictSha256: meta.source_sha256,
+    hs8Count: meta.hs8_count,
+    hs6Count: meta.hs6_count,
+    categoryCount: meta.category_count,
+    fromMonth,
+    toMonth,
+    monthCount: months.length,
+    summary: {
+      totalCells,
+      received: totalReceived,
+      confirmedEmpty: totalConfirmedEmpty,
+      missing: totalMissing,
+      notApplicable: totalNotApplicable,
+      publishableMonths,
+      publishedMonths,
+    },
+    months: monthSummaries,
+    ...(includeCells ? { cells } : {}),
   };
 }

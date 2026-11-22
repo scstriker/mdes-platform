@@ -12,6 +12,7 @@ import type {
   Phase,
   Stats,
   TradeBatchListItem,
+  TradeCoverageMatrixResponse,
   TradeImportManifest,
   TradeImportResponse,
   TradeOverviewResponse,
@@ -51,6 +52,10 @@ export const api = {
     params: { dictVersion?: string; month?: string; flow?: string; grouping?: string } = {},
     o?: Opts,
   ) => request<{ items: TradeBatchListItem[] }>("/api/trade/batches", { ...o, query: params }),
+  tradeCoverage: (
+    params: { dictVersion?: string; year?: string; fromMonth?: string; toMonth?: string; month?: string; hs8?: string } = {},
+    o?: Opts,
+  ) => request<TradeCoverageMatrixResponse>("/api/trade/coverage", { ...o, query: params }),
   importTrade: (
     payload: {
       manifest: TradeImportManifest | string;

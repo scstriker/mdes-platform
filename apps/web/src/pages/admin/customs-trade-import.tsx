@@ -13,7 +13,7 @@ import {
 import { Dropzone, Field, formatNumber, Notice, SectionTitle, Tag } from "@/components/itei";
 import { QueryError } from "@/components/layout/query-error";
 import { Button } from "@/components/ui/button";
-import { describeError, errorMessage, useImportTrade } from "@/lib/api";
+import { describeError, errorMessage, useImportTrade, useTradeCoverage } from "@/lib/api";
 import type { IndicatorMapper } from "@/lib/import-mappers";
 
 const MAX_FILE_BYTES = 10 * 1024 * 1024;
@@ -50,6 +50,8 @@ export function CustomsTradeImportFlow({
   const [manifestError, setManifestError] = useState<string>();
 
   const importTrade = useImportTrade();
+  const activeYear = /^\d{4}/.exec(month.trim())?.[0] ?? "2024";
+  const yearCoverage = useTradeCoverage({ dictVersion: dictVersion.trim() || "202601", year: activeYear });
 
   const manifest: TradeImportManifest = useMemo(
     () => ({
@@ -146,6 +148,26 @@ export function CustomsTradeImportFlow({
       <Notice tone="info" title={`指标 ${mapper.seq} · 中国海关月度美元原件与查询清单契约`}>
         保留原始文件字节（自动识别 UTF-8 与 GBK，计算原字节 SHA-256），按月份、流向、分组和请求 HS8 集合暂存候选批次；双流向四分组核齐并对账通过后原子切换已发布快照。
       </Notice>
+
+      {yearCoverage.data && (
+        <div
+          data-testid="trade-year-coverage-bar"
+          className="flex flex-wrap items-center justify-between gap-2 border border-border bg-surface-sunken px-4 py-2.5 caption text-ink"
+        >
+          <span>
+            正式字典 <strong className="code">{yearCoverage.data.dictVersion}</strong>：{yearCoverage.data.hs8Count} 个 HS8 ·{" "}
+            {yearCoverage.data.hs6Count} 个 HS6 · {yearCoverage.data.categoryCount} 个一级类别
+          </span>
+          <span>
+            {activeYear} 年核对格（{formatNumber(yearCoverage.data.summary.totalCells)} 格）：已取得{" "}
+            <strong>{formatNumber(yearCoverage.data.summary.received)}</strong> · 官网明确无记录{" "}
+            <strong>{formatNumber(yearCoverage.data.summary.confirmedEmpty)}</strong> · 待补采{" "}
+            <strong>{formatNumber(yearCoverage.data.summary.missing)}</strong> · 当年不适用{" "}
+            <strong>{formatNumber(yearCoverage.data.summary.notApplicable)}</strong>（已发布{" "}
+            {yearCoverage.data.summary.publishedMonths}/12 月）
+          </span>
+        </div>
+      )}
 
       {importTrade.isSuccess && importTrade.data ? (
         <TradeImportReceiptView

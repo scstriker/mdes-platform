@@ -1,7 +1,14 @@
 import type { Context, Hono } from "hono";
 import type { AppEnv } from "../env";
 import { AppError, textParam } from "../errors";
-import { getTradeOverview, getTradePeriodsMeta, importTradeBatch, listTradeBatches, type TradeFileInput } from "../trade";
+import {
+  getTradeCoverageMatrix,
+  getTradeOverview,
+  getTradePeriodsMeta,
+  importTradeBatch,
+  listTradeBatches,
+  type TradeFileInput,
+} from "../trade";
 
 function isFileLike(v: unknown): v is File {
   return Boolean(v && typeof v === "object" && "arrayBuffer" in v && typeof (v as File).arrayBuffer === "function");
@@ -82,5 +89,23 @@ export function tradeRoutes(app: Hono<AppEnv>) {
     const grouping = textParam(c.req.query("grouping"));
     const list = await listTradeBatches(c.get("db"), { dictVersion, month, flow, grouping });
     return c.json(list);
+  });
+
+  app.get("/api/trade/coverage", async (c) => {
+    const dictVersion = textParam(c.req.query("dictVersion"));
+    const year = textParam(c.req.query("year"));
+    const fromMonth = textParam(c.req.query("fromMonth"));
+    const toMonth = textParam(c.req.query("toMonth"));
+    const month = textParam(c.req.query("month"));
+    const hs8 = textParam(c.req.query("hs8"));
+    const matrix = await getTradeCoverageMatrix(c.get("db"), {
+      dictVersion,
+      year,
+      fromMonth,
+      toMonth,
+      month,
+      hs8,
+    });
+    return c.json(matrix);
   });
 }

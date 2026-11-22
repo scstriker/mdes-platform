@@ -265,6 +265,30 @@ async function handle(method: string, url: URL, body: BodyInit | null | undefine
     return json({ items: [] });
   }
 
+  if (method === "GET" && path === "/api/trade/coverage") {
+    const year = url.searchParams.get("year") ?? "2024";
+    return json({
+      dictVersion: url.searchParams.get("dictVersion") ?? "202601",
+      dictSha256: "ab8e97496fbc9500877f02adc61ab214788f79234b9cb1f565a98f77a683a59b",
+      hs8Count: 164,
+      hs6Count: 117,
+      categoryCount: 11,
+      fromMonth: `${year}-01`,
+      toMonth: `${year}-12`,
+      monthCount: 12,
+      summary: {
+        totalCells: 15_744,
+        received: 0,
+        confirmedEmpty: 0,
+        missing: 15_744,
+        notApplicable: 0,
+        publishableMonths: 0,
+        publishedMonths: 0,
+      },
+      months: [],
+    });
+  }
+
   if (method === "GET" && path === "/api/stats") {
     const withData = new Set(observations.map((o) => o.indicator_id));
     const phase1 = indicators.filter((i) => i.phase === "phase1");
