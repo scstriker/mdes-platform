@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 /**
  * ITEI token 流水线（Style Dictionary）。
  *

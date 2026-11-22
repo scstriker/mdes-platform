@@ -31,7 +31,7 @@ export function RelatedTab({ indicator, clusterNames }: { indicator: Indicator; 
       key: "id",
       title: "编号",
       type: "code",
-      cell: (r) => (r.indicator ? <TextLink to={`/indicators/${r.id}`}>{r.id}</TextLink> : r.id),
+      cell: (r) => (r.indicator ? <TextLink to={`/admin/indicators/${r.id}`}>{r.id}</TextLink> : r.id),
     },
     {
       key: "name",

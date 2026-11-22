@@ -27,6 +27,10 @@
       "warning-bg": "#fff3e0",
       "danger-bg": "#fbe9ea",
       "info-bg": "#e6f1f9",
+      "banner-bg": "#044470",
+      "on-banner": "#ffffff",
+      "on-banner-muted": "#cfe3f2",
+      "banner-border": "#24638f",
       "chart-1": "#044470",
       "chart-2": "#0080cc",
       "chart-3": "#b81c27",
@@ -60,6 +64,10 @@
       "warning-bg": "#2b1f08",
       "danger-bg": "#301216",
       "info-bg": "#0d2338",
+      "banner-bg": "#12283f",
+      "on-banner": "#e8eef4",
+      "on-banner-muted": "#9fb3c6",
+      "banner-border": "#2a4055",
       "chart-1": "#5cb3ea",
       "chart-2": "#4fa3dc",
       "chart-3": "#ff6b74",
@@ -159,6 +167,13 @@
     "numeral": {
       "fontSize": "28px",
       "lineHeight": "32px",
+      "fontWeight": 700,
+      "letterSpacing": "-0.01em",
+      "family": "sans"
+    },
+    "numeral-lg": {
+      "fontSize": "36px",
+      "lineHeight": "40px",
       "fontWeight": 700,
       "letterSpacing": "-0.01em",
       "family": "sans"

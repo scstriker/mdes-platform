@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type {
   ApiErrorBody,
+  GlobalSearchResult,
   ImportBatch,
   ImportResult,
   Indicator,
@@ -278,6 +279,45 @@ describe("GET /api/observations", () => {
     const bad = await json<ObservationPage>("/api/observations?batch_id=not-a-uuid");
     expect(bad.status).toBe(200);
     expect(bad.body.total).toBe(0);
+  });
+
+  it("q 参数服务端全库多词项过滤：跨分页命中且支持地域/维度中文别名", async () => {
+    const bulkRows = [
+      "indicator_id,period,geo,value_num,value_text,unit,dims",
+      'TRD-005,2018-01,440000,9.6,跨页靶标光子球管,亿美元,"{""partner"":""DE"",""trade_type"":""import""}"',
+      ...Array.from(
+        { length: 60 },
+        (_, i) => `TRD-001,2025-${String((i % 12) + 1).padStart(2, "0")},CN,${i + 1},,亿美元,`,
+      ),
+    ].join("\n");
+    await json<ImportResult>("/api/import/csv", csvUpload(bulkRows, "bulk_61.csv"));
+
+    // 未带 q 时第一页（limit=50）按 period desc 排序，2018-01 记录排在第 61 条（第二页）
+    const page1Unfiltered = (await json<ObservationPage>("/api/observations?limit=50&offset=0")).body;
+    expect(page1Unfiltered.total).toBe(61);
+    expect(page1Unfiltered.items.some((r) => r.period === "2018-01")).toBe(false);
+
+    // 带 q 服务端过滤后，第一页即精确命中第 61 条，且 total === 1
+    const hitByAlias = (
+      await json<ObservationPage>(
+        `/api/observations?limit=50&offset=0&q=${encodeURIComponent("广东 德国 光子球管")}`,
+      )
+    ).body;
+    expect(hitByAlias.total).toBe(1);
+    expect(hitByAlias.items).toHaveLength(1);
+    expect(hitByAlias.items[0]).toMatchObject({
+      indicator_id: "TRD-005",
+      period: "2018-01",
+      geo: "440000",
+      value_text: "跨页靶标光子球管",
+    });
+
+    // GET /api/search 与 GET /api/observations?q=... 的观测值计数严格一致
+    const globalHit = (
+      await json<GlobalSearchResult>(`/api/search?q=${encodeURIComponent("广东 德国 光子球管")}`)
+    ).body;
+    expect(globalHit.observations.total).toBe(hitByAlias.total);
+    expect(globalHit.observations.items[0]?.indicator_name).toBeTruthy();
   });
 });
 

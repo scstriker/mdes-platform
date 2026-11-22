@@ -1,6 +1,6 @@
 # MDES Platform Demo
 
-Cloudflare 优先的医疗器械产业数据底座 demo：指标目录、CSV 导入、观测值查询。数据库为 **Cloudflare D1**（本地用 wrangler 自带的本地 D1，不需要 Docker）。
+Cloudflare 优先的医疗器械产业数据底座 demo：**前台**为产业运行监测发布物（态势总览 / 指标体系），**数据后台**承担导入与批次管理。数据库为 **Cloudflare D1**（本地用 wrangler 自带的本地 D1，不需要 Docker）。
 
 ## 本地启动
 
@@ -21,7 +21,7 @@ npm run dev:web
 
 本地 D1 的数据在 `apps/api/.wrangler/state`，删掉这个目录再执行 `npm run db:migrate` 和 `npm run seed` 即可重置。
 
-演示时如需更丰富的数据（多省份、多贸易伙伴、混合单位等，**虚构数据**，仅用于展示），可生成后在「数据导入」页上传：
+演示时如需更丰富的数据（多省份、多贸易伙伴、混合单位等，**虚构数据**，仅用于展示），可生成后在「数据后台 → 新建导入」上传：
 
 ```bash
 node scripts/make-demo-csv.mjs > /tmp/trd_demo.csv
@@ -37,10 +37,11 @@ npm run build:demo -w @mdes/web   # 输出 apps/web/dist-demo/mdes-demo.html，�
 
 ## 验收样例
 
-1. 打开「指标目录」，阶段选「一期」，应约 30 项
-2. 「数据导入」上传 `data/samples/trd_sample.csv`
-3. 「观测值」查询 `TRD-001` 应有多行
+1. 打开「指标目录」（`/indicators`），阶段选「一期」，应约 30 项
+2. 「数据后台 → 新建导入」选表格类指标（如 38），上传 `data/samples/trd_sample.csv` 并写入
+3. 「观测值」（`/observations`）查询 `TRD-001` 应有多行
 4. `/api/health` 中 `db: "ok"`
+5. 前台「态势总览」「指标体系」「/system/01」为发布物版式示意
 
 ```bash
 npm test

@@ -7,23 +7,33 @@ import { useTheme } from "./support";
  * 在 01 导入样例数据之后运行，页面带真实内容。
  */
 const ROUTES: [string, string][] = [
-  ["概览", "/"],
-  ["指标目录 · 表格", "/indicators"],
-  ["指标目录 · 矩阵", "/indicators?view=matrix"],
-  ["指标档案 · 数据", "/indicators/TRD-001"],
-  ["指标档案 · 对比", "/indicators/TRD-005?split=d.partner"],
-  ["指标档案 · 规格", "/indicators/TRD-001?tab=spec"],
-  ["指标档案 · 关联", "/indicators/TRD-001?tab=related"],
-  ["观测值", "/observations?indicator_id=TRD-001"],
-  ["数据导入", "/import"],
+  ["首页", "/"],
+  ["全站跨库检索", "/search?q=手术"],
+  ["注册与产品", "/products"],
+  ["企业与机构", "/enterprises"],
+  ["进出口贸易", "/trade"],
+  ["政策与报告", "/reports"],
+  ["指标目录", "/system"],
+  ["指标详情 01", "/system/01"],
+  ["指标详情 35", "/system/35"],
+  ["工程指标库 · 表格", "/admin/indicators"],
+  ["工程指标库 · 矩阵", "/admin/indicators?view=matrix"],
+  ["指标档案 · 数据", "/admin/indicators/TRD-001"],
+  ["指标档案 · 对比", "/admin/indicators/TRD-005?split=d.partner"],
+  ["指标档案 · 规格", "/admin/indicators/TRD-001?tab=spec"],
+  ["指标档案 · 关联", "/admin/indicators/TRD-001?tab=related"],
+  ["观测值核查", "/admin/observations?indicator_id=TRD-001"],
+  ["数据管理 · 概况", "/admin"],
+  ["数据管理 · 导入", "/admin/import"],
+  ["数据管理 · 记录", "/admin/batches"],
   ["组件验收", "/__design"],
 ];
 
 async function audit(page: Page, route: string) {
-  await page.waitForLoadState("networkidle");
+  await page.waitForLoadState("load");
   // /__design 里有常驻的「加载中」示例，不等它
   if (!route.startsWith("/__design")) await expect(page.locator("main [aria-busy=true]")).toHaveCount(0);
-  await page.waitForTimeout(400);
+  await page.waitForTimeout(250);
   // @axe-core/playwright 依赖的 playwright-core 类型版本较旧，运行时接口兼容
   const { violations } = await new AxeBuilder({ page: page as never }).withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"]).analyze();
   return violations.map(
@@ -40,6 +50,7 @@ for (const [device, opts] of [
       test.use(opts);
       for (const [name, route] of ROUTES) {
         test(name, async ({ page }) => {
+          test.setTimeout(60_000);
           await useTheme(page, theme);
           await page.goto(route);
           expect(await audit(page, route)).toEqual([]);

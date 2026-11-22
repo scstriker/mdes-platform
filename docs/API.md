@@ -66,6 +66,7 @@ Returns 一条 `Indicator`：列表字段加 `spec_json`（V12 长文本字段�
 | `period_to` | 截止期间（含）；以它为前缀的子期间也算在内：`2024` 含 `2024-12` |
 | `geo` | 地域，精确匹配（如 `CN`、`110000`） |
 | `batch_id` | 导入批次号，用于「查看本批次数据」 |
+| `q` | 多词项关键词检索（按空白分词，全部命中；匹配指标编码/名称、期间、地域编码及中文省市名、维度键值及中文标签、数值文本、单位与批次号） |
 | `limit` | 每页条数，默认 100，最大 500 |
 | `offset` | 偏移，默认 0 |
 
@@ -77,6 +78,27 @@ Returns：
 
 - `total` 是符合筛选条件的总条数，不受 `limit` / `offset` 影响。
 - `items` 按 `period desc, id desc` 排序；`id` 为字符串（库里是自增整数）。
+
+## GET /search
+
+全站动态数据库统一检索接口。
+
+| Query | 说明 |
+|---|---|
+| `q` | 多词项关键词检索（空白分隔，全部命中）；为空时返回空结果集 |
+| `limit` | 每组最多返回条数，默认 12，最大 50 |
+
+Returns：
+
+```json
+{
+  "query": "广东 进口",
+  "observations": { "items": [ObservationSearchHit], "total": 3 },
+  "indicators": { "items": [IndicatorListItem], "total": 1 }
+}
+```
+
+- `observations.total` 与 `GET /api/observations?q=...` 的 `total` 完全同源一致。
 
 ## POST /import/csv
 
