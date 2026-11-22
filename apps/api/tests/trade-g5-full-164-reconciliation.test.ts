@@ -8,6 +8,7 @@ import { startHarness, type Harness } from "./helpers/harness";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const DICT_CSV_PATH = path.resolve(here, "../../../data/hs_dict_202601.csv");
+const GOLD_JSON_PATH = path.resolve(here, "../../../data/gold_standard_2024_37_hs8.json");
 const GOLD_XLSX_PATH = path.resolve(here, "../../../../docs/我国海关平台-2024年度仪器仪表海关进出口年度数据统计.xlsx");
 
 const MINIMAL_PNG = new Uint8Array([
@@ -39,6 +40,10 @@ function unescapeXml(s: string): string {
 }
 
 function loadGoldStandardSheet1(dictHs8Set: Set<string>): GoldItem[] {
+  const snapshot = JSON.parse(fs.readFileSync(GOLD_JSON_PATH, "utf8")) as { items: GoldItem[] };
+  if (!fs.existsSync(GOLD_XLSX_PATH)) {
+    return snapshot.items.filter((it) => dictHs8Set.has(it.hs8));
+  }
   const buf = fs.readFileSync(GOLD_XLSX_PATH);
   let eocd = -1;
   for (let i = buf.length - 22; i >= Math.max(0, buf.length - 65557); i--) {
@@ -105,6 +110,7 @@ function loadGoldStandardSheet1(dictHs8Set: Set<string>): GoldItem[] {
       });
     }
   }
+  expect(out).toEqual(snapshot.items);
   return out;
 }
 

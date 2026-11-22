@@ -66,7 +66,7 @@ export async function startHarness({ maxRows = 5000, withDb = true, migrate = tr
     compatibilityDate: "2026-07-01",
     compatibilityFlags: ["nodejs_compat"],
     d1Databases: withDb ? { DB: `mdes-test-${process.pid}-${++seq}` } : undefined,
-    bindings: { IMPORT_MAX_ROWS: String(maxRows) },
+    bindings: { IMPORT_MAX_ROWS: String(maxRows), ENABLE_TEST_HOOKS: "1" },
   });
   await mf.ready;
 
