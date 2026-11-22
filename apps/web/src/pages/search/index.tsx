@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router";
 import { IconArrowRight, IconChevronDown, IconChevronUp } from "@tabler/icons-react";
 import { EmptyState, formatNumber, Tag, TextLink } from "@/components/itei";
-import { useGlobalSearch } from "@/lib/api";
+import { useGlobalSearch, useTradeOverview } from "@/lib/api";
 import {
   buildPublicSearchUrl,
   mapObservationHitToSuggestion,
@@ -50,9 +50,10 @@ export default function GlobalSearchPage() {
   const activeScope = parseScopeParam(params.get("scope"));
   const focusedItemId = params.get("item") ?? "";
 
+  const liveTrade = useTradeOverview(undefined, undefined, true);
   const { total: benchmarkTotal, allGroups, groups } = useMemo(
-    () => queryAllPublicGrouped(q),
-    [q],
+    () => queryAllPublicGrouped(q, liveTrade.data),
+    [q, liveTrade.data],
   );
   const liveSearch = useGlobalSearch(q, 30, q.length > 0);
   const liveObsTotal = q ? (liveSearch.data?.observations.total ?? 0) : 0;

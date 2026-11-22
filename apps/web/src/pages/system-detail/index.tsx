@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import { Link, useParams } from "react-router";
-import { DataTable, formatNumber, Tag, TextLink, type DataTableColumn } from "@/components/itei";
+import { Link, useParams, useSearchParams } from "react-router";
+import { DataTable, formatNumber, Notice, Tag, TextLink, type DataTableColumn } from "@/components/itei";
 import { StatistaFigure } from "@/components/layout/statista-figure";
 import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCaption, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -12,10 +12,11 @@ import {
   type IndicatorPhase,
   type SystemIndicator,
 } from "@/content/system-v3";
-import { useAllObservations } from "@/lib/api";
+import { ApiError, useAllObservations, useTradeOverview, useTradePeriods } from "@/lib/api";
 import { statistaHorizontalBarOption, statistaTrendWithPartialOption } from "@/lib/charts/theme";
 import { showDemoChrome } from "@/lib/demo-chrome";
 import { buildSlice, dimensionsOf, resolveSelection } from "@/lib/observations/slice";
+import { formatBalanceYi, formatSharePct, formatUsdToYi, usdToYiNumber } from "@/lib/trade-format";
 import { cn } from "@/lib/utils";
 import { TRACK_DISTRIBUTION } from "@/pages/products/data";
 import { PROVINCIAL_CONCENTRATION } from "@/pages/enterprises/data";
@@ -521,10 +522,148 @@ function Preview01() {
  * 1. 若关联底层序列在实时 D1 库已导入观测值，自动渲染真实观测切片趋势图；
  * 2. 否则按所属一级业务领域呈现对应的权威领域结构信息图，彻底淘汰原三段“不涉及……”套话。
  */
+function Trade38SnapshotPreview({ meta }: { meta: SystemIndicator }) {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const requestedPeriod = searchParams.get("period")?.trim() ?? "";
+  const tradeOverview = useTradeOverview(requestedPeriod || undefined, undefined, meta.seq === "38");
+  const tradePeriods = useTradePeriods(undefined, meta.seq === "38" && Boolean(requestedPeriod));
+
+  if (
+    Boolean(requestedPeriod) &&
+    tradeOverview.isError &&
+    tradeOverview.error instanceof ApiError &&
+    tradeOverview.error.status === 404
+  ) {
+    const avail = tradePeriods.data?.availablePeriods ?? [];
+    return (
+      <div className="grid gap-3" data-testid="system-38-unpublished">
+        <Notice tone="warning" title={`38 号指标统计期间「${requestedPeriod}」尚未齐备发布`}>
+          当前已发布可用期间：{avail.join("、") || "暂无已发布期间"}。
+        </Notice>
+        {avail.length > 0 && (
+          <div className="flex flex-wrap gap-2">
+            {avail.map((p) => (
+              <Button
+                key={p}
+                size="sm"
+                variant="secondary"
+                onClick={() => {
+                  const next = new URLSearchParams(searchParams);
+                  next.set("period", p);
+                  setSearchParams(next);
+                }}
+              >
+                切换至 {p}
+              </Button>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  if (tradeOverview.data?.status !== "published") {
+    return null;
+  }
+
+  const snap = tradeOverview.data;
+  const pts = snap.trend.length > 0 ? snap.trend : [
+    {
+      period: snap.period,
+      importUsd: snap.totals.importUsd,
+      exportUsd: snap.totals.exportUsd,
+      balanceUsd: snap.totals.balanceUsd,
+      importYoyPct: snap.totals.importYoyPct,
+      exportYoyPct: snap.totals.exportYoyPct,
+      isPartial: false,
+    },
+  ];
+
+  return (
+    <div className="grid gap-4" data-testid="system-38-live-snapshot">
+      <div className="flex flex-wrap items-center justify-between gap-3 border border-border bg-info-bg px-4 py-3 body-sm text-ink">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+          <span>
+            统计期间：<strong className="code text-brand-navy">{snap.period}</strong>
+          </span>
+          <span>
+            字典版本：<strong className="code">{snap.dictVersion}</strong>
+          </span>
+          <span>
+            发布版本 <span className="code text-brand-navy">{snap.releaseId}</span>
+          </span>
+          <span>
+            进口 <strong>{formatUsdToYi(snap.totals.importUsd, 4)}</strong> 亿美元（{snap.totals.importUsd.toLocaleString("zh-CN")} 美元）
+          </span>
+          <span>
+            出口 <strong>{formatUsdToYi(snap.totals.exportUsd, 4)}</strong> 亿美元（{snap.totals.exportUsd.toLocaleString("zh-CN")} 美元）
+          </span>
+          <span>
+            差额 <strong>{formatBalanceYi(snap.totals.balanceUsd, 4)}</strong> 亿美元 · 进口 CR3{" "}
+            <strong>{formatSharePct(snap.concentration.import.cr3)}</strong>
+          </span>
+        </div>
+        <div className="flex flex-wrap items-center gap-3">
+          <TextLink to={`/trade?period=${encodeURIComponent(snap.period)}`}>贸易专题同版 →</TextLink>
+          <TextLink to={`/admin/observations?indicator_id=TRD-001&period=${encodeURIComponent(snap.period)}`}>
+            后台观测值核查 →
+          </TextLink>
+        </div>
+      </div>
+
+      <StatistaFigure
+        eyebrow={`指标 38 · 已发布海关快照（${snap.period}）`}
+        title={`${snap.period} 医疗器械进出口规模与差额（字典 ${snap.dictVersion}）`}
+        subtitle={`发布版本 ${snap.releaseId} · 覆盖 ${snap.coverage.coveredMonths} 个自然月 · 单位：亿美元`}
+        badge={{ label: `release ${snap.releaseId.slice(0, 8)}`, tone: "success" }}
+        ariaLabel={`指标38 ${snap.period}进出口规模趋势图`}
+        height={252}
+        option={(t) =>
+          statistaTrendWithPartialOption(t, {
+            periods: pts.map((p) => p.period),
+            lastIsPartial: false,
+            series: [
+              { name: "出口额(亿美元)", values: pts.map((p) => usdToYiNumber(p.exportUsd, 4)), colorIndex: 0, showLabels: pts.length <= 6 },
+              { name: "进口额(亿美元)", values: pts.map((p) => usdToYiNumber(p.importUsd, 4)), colorIndex: 1, showLabels: false },
+              { name: "差额(亿美元)", values: pts.map((p) => usdToYiNumber(p.balanceUsd, 4)), colorIndex: 2, showLabels: pts.length <= 6 },
+            ],
+          })
+        }
+        tableColumns={[
+          { key: "period", title: "统计期间" },
+          { key: "exportYi", title: "出口额(亿美元)", align: "right" },
+          { key: "importYi", title: "进口额(亿美元)", align: "right" },
+          { key: "balanceYi", title: "差额(亿美元)", align: "right" },
+          { key: "importRawUsd", title: "进口原额(美元)", align: "right" },
+          { key: "exportRawUsd", title: "出口原额(美元)", align: "right" },
+        ]}
+        tableRows={pts.map((p) => ({
+          period: p.period,
+          exportYi: formatUsdToYi(p.exportUsd, 4),
+          importYi: formatUsdToYi(p.importUsd, 4),
+          balanceYi: formatBalanceYi(p.balanceUsd, 4),
+          importRawUsd: p.importUsd,
+          exportRawUsd: p.exportUsd,
+        }))}
+        exportName={`indicator-38-${snap.period}`}
+        source={`中国海关月度美元统计 · 字典 ${snap.dictVersion} · releaseId ${snap.releaseId}`}
+        note={`覆盖月份：${snap.coverage.months.join(", ")}`}
+      />
+    </div>
+  );
+}
+
 function DomainStatistaPreview({ meta }: { meta: SystemIndicator }) {
+  const [searchParams] = useSearchParams();
+  const hasExplicitPeriod = Boolean(searchParams.get("period")?.trim());
+  const tradeOverview = useTradeOverview(undefined, undefined, meta.seq === "38");
   const primaryV12 = meta.v12Codes[0] ?? "";
   const liveObs = useAllObservations(primaryV12 ? { indicator_id: primaryV12 } : { indicator_id: "__none__" });
   const liveRows = useMemo(() => (primaryV12 ? (liveObs.data?.items ?? []) : []), [primaryV12, liveObs.data]);
+
+  if (meta.seq === "38" && (hasExplicitPeriod || tradeOverview.data?.status === "published")) {
+    return <Trade38SnapshotPreview meta={meta} />;
+  }
 
   const liveSlice = useMemo(() => {
     if (liveRows.length === 0) return null;
