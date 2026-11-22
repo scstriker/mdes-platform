@@ -143,3 +143,42 @@ Returns：
 - `phase1_with_data`：至少有一条观测值的一期指标数。
 - `latest_period`：全部观测值的最大期间（数据截止期间），没有数据时为 `null`。
 - `clusters` 按 `code` 排序，覆盖全部 7 个簇；`latest_batch` 没有导入记录时为 `null`。
+
+## 贸易一期接口（待开发）
+
+以下路径已包含 `/api` 前缀。贸易接口沿用现有中文错误体，响应契约由 `@mdes/shared` 提供。金额字段以美元计，份额与 CR 以百分数计，HHI 采用 0–10,000 刻度。
+
+### POST /api/trade/import
+
+本地管理端以 `multipart/form-data` 提交两个字段。字段 `file` 是海关原始 CSV，字段 `manifest` 是查询清单的 UTF-8 JSON。管理端在本机保留原件，Worker 根据接收字节计算 SHA-256。示例清单对应隔离验收库里的单码单月进口。
+
+```json
+{
+  "dictVersion": "202601",
+  "month": "2024-01",
+  "flow": "import",
+  "currency": "USD",
+  "grouping": "product",
+  "hs8": ["90181100"],
+  "emptyHs8": []
+}
+```
+
+`flow` 取 `import` 或 `export`。`grouping` 取 `product`（商品全国合计）、`partner`、`regime` 或 `region`。`hs8` 是实际请求集合。`emptyHs8` 是其中由海关明确返回无记录的税号，清单与官网结果一同归档。缺行本身不构成无记录证明。
+
+有效请求返回 HTTP 200，包含 `batchId`、`sourceSha256`、`rowCount`、`coverage`（已取得、已确认无记录和待补采的税号）及 `status`。批次已接收而全月尚未齐备时为 `staged`，整月成功发布后为 `published`。同范围、同内容重试返回原批次。已发布范围收到修订时，按该覆盖集合整体替换，随新版本一起生效。通用观测值 CSV 沿用原入口。
+
+清单、编码或单位不符合约定时返回 HTTP 400，标出字段或 CSV 行号；修订与既有批次范围部分重叠时返回 HTTP 409 并指出冲突覆盖范围。校验失败时保留当前已发布结果。本期仅在本地管理环境启用写入。
+
+### GET /api/trade/overview
+
+`period` 支持月（`2024-12`）、季度（`2024-Q4`）、年度（`2024`）和截至指定月的年内累计（`2024-YTD-09`）。省略时返回最新已发布月份；空库返回 HTTP 200、`status: "empty"`、`period: null` 和空数据。显式请求未发布期间返回 HTTP 404；期间格式错误返回 HTTP 400。
+
+| 已发布响应 | 含义 |
+| --- | --- |
+| `status`、`period`、`source`、`dictVersion`、`releaseId` | 状态为 `published`，来源为 `china_customs`。同一期间的图表、详情与导出引用同一发布版本。 |
+| `coverage`、`sourceBatches` | 实际覆盖月份和税号数。列出来源批次标识及原件摘要，可在本地档案定位原件。 |
+| `totals`、`trend`、`categories` | 返回期间、进口美元金额、出口美元金额、差额和同期变化率。分类按 HS8 所属一级类别汇总。金额值先保持原始精度，页面最后换算为亿美元。 |
+| `partners`、`concentration`、`regimes`、`regions`、`hsItems` | 按海关原码和来源名称提供伙伴、方式及注册地分布；税号、品类及全篮子集中度区分流向。不可计算的同比或集中度为 `null`。 |
+
+查询只读取已发布快照，聚合及替换时点见[数据模型](DATA_MODEL.md)。验收使用 AC-013 至 AC-016。
