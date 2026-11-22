@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseCustomsCsvBytes } from "../src/trade";
+import { computeConcentration, computeYoyPct, parseCustomsCsvBytes, USD_SCALE } from "../src/trade";
 
 describe("parseCustomsCsvBytes（海关原件字节解析与定点数美元）", () => {
   it("识别 UTF-8 BOM、千位分隔符美元、双数量双单位，并排除合计行与世界行", () => {
@@ -62,5 +62,55 @@ describe("parseCustomsCsvBytes（海关原件字节解析与定点数美元）",
     expect(res.ok).toBe(false);
     if (res.ok) return;
     expect(res.error.params.line).toBe(3);
+  });
+});
+
+describe("computeConcentration 与 computeYoyPct（AC-015 六伙伴与跨期统计）", () => {
+  it("验证单月六伙伴 CR1=40, CR3=80, CR5=96, HHI=2602 与双月合并后 CR1=32.5, HHI=2489.5", () => {
+    const m1 = [40n, 25n, 15n, 10n, 6n, 4n].map((v, idx) => ({
+      partnerCode: `P${idx}`,
+      usdScaled: v * USD_SCALE,
+    }));
+    expect(computeConcentration(m1, 100n * USD_SCALE)).toEqual({
+      cr1: 40,
+      cr3: 80,
+      cr5: 96,
+      hhi: 2602,
+      partnerCount: 6,
+    });
+
+    const m12 = [65n, 65n, 30n, 20n, 12n, 8n].map((v, idx) => ({
+      partnerCode: `P${idx}`,
+      usdScaled: v * USD_SCALE,
+    }));
+    expect(computeConcentration(m12, 200n * USD_SCALE)).toEqual({
+      cr1: 32.5,
+      cr3: 80,
+      cr5: 96,
+      hhi: 2489.5,
+      partnerCount: 6,
+    });
+
+    // 伙伴数少于 k 时取已有伙伴；分母为 0 返回 null
+    expect(computeConcentration([{ partnerCode: "P0", usdScaled: 60n * USD_SCALE }, { partnerCode: "P1", usdScaled: 40n * USD_SCALE }], 100n * USD_SCALE)).toEqual({
+      cr1: 60,
+      cr3: 100,
+      cr5: 100,
+      hhi: 5200,
+      partnerCount: 2,
+    });
+    expect(computeConcentration([], 0n)).toEqual({
+      cr1: null,
+      cr3: null,
+      cr5: null,
+      hhi: null,
+      partnerCount: 0,
+    });
+  });
+
+  it("验证同比计算：(100 - 80) / 80 = 25%，缺基期或基期为 0 返回 null", () => {
+    expect(computeYoyPct(100n * USD_SCALE, 80n * USD_SCALE)).toBe(25);
+    expect(computeYoyPct(100n * USD_SCALE, null)).toBeNull();
+    expect(computeYoyPct(100n * USD_SCALE, 0n)).toBeNull();
   });
 });
