@@ -114,6 +114,7 @@ export async function startHarness({ maxRows = 5000, withDb = true, migrate = tr
         "delete from trade_release",
         "delete from trade_reconciliation_log",
         "delete from trade_active_scope",
+        "delete from trade_batch_evidence",
         "delete from trade_hs_coverage",
         "delete from trade_fact",
         "delete from trade_import_batch",

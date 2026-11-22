@@ -11,9 +11,11 @@ import {
   validateTradeManifest,
   type NormalizedTradeManifest,
   type ParsedCustomsFactRow,
+  type TradeBatchListItem,
   type TradeCategoryStat,
   type TradeFlow,
   type TradeGrouping,
+  type TradeGroupingTotals,
   type TradeHsItemStat,
   type TradeImportCoverage,
   type TradeImportResponse,
@@ -26,11 +28,19 @@ import {
   type TradeRegionStat,
   type TradeSourceBatchRef,
   type TradeTrendPoint,
+  type TradeUnitsMeta,
 } from "@mdes/shared";
 import { AppError } from "./errors";
 
 const CHUNK_SIZE = 500;
 const DEFAULT_DICT_VERSION = "202601";
+const TRADE_UNITS: TradeUnitsMeta = {
+  amount: "USD",
+  displayAmount: "100M_USD",
+  share: "PCT",
+  cr: "PCT",
+  hhi: "0_10000",
+};
 
 export type TradeFileInput = {
   filename: string;
@@ -234,6 +244,7 @@ export async function importTradeBatch(
   let filename = "";
   let rows: ParsedCustomsFactRow[] = [];
   let coverage: TradeImportCoverage;
+  const evidenceCoverageList: Array<{ filename: string; sha256: string; byteLength: number; coveredHs8: string[] }> = [];
 
   if (!options.file) {
     // 仅上传 emptyEvidence：emptyHs8 必须与 hs8 完全一致
@@ -247,6 +258,14 @@ export async function importTradeBatch(
       confirmedEmpty: [...manifest.hs8],
       missing: [],
     };
+    options.emptyEvidences.forEach((ev, idx) => {
+      evidenceCoverageList.push({
+        filename: ev.filename || `empty_evidence_${idx + 1}.png`,
+        sha256: evidenceSha256s[idx],
+        byteLength: ev.bytes.byteLength,
+        coveredHs8: idx === 0 ? [...manifest.hs8] : [],
+      });
+    });
   } else {
     sourceSha256 = await sha256Hex(options.file.bytes);
     filename = options.file.filename || "customs.csv";
@@ -263,9 +282,45 @@ export async function importTradeBatch(
     rows = csvParsed.rows;
 
     const receivedSet = new Set(rows.map((r) => r.hs8));
-    // 尚无证明的税号从 emptyHs8 去除，列为待补采（missing）
-    const provenEmptySet =
-      options.emptyEvidences.length > 0 ? new Set(manifest.emptyHs8) : new Set<string>();
+    const provenEmptySet = new Set<string>();
+    const candidateEmptyList = manifest.emptyHs8.filter((c) => !receivedSet.has(c));
+
+    if (allowHeaderOnlyEmpty && rows.length === 0) {
+      for (const c of candidateEmptyList) provenEmptySet.add(c);
+      options.emptyEvidences.forEach((ev, idx) => {
+        evidenceCoverageList.push({
+          filename: ev.filename || `empty_evidence_${idx + 1}.png`,
+          sha256: evidenceSha256s[idx],
+          byteLength: ev.bytes.byteLength,
+          coveredHs8: idx === 0 ? [...candidateEmptyList] : [],
+        });
+      });
+    } else if (options.emptyEvidences.length > 0 && candidateEmptyList.length > 0) {
+      const candidateSet = new Set(candidateEmptyList);
+      let nextUnassignedIdx = 0;
+      options.emptyEvidences.forEach((ev, idx) => {
+        const namedMatches = (ev.filename.match(/\d{8}/g) ?? []).filter((c) => candidateSet.has(c));
+        let covered: string[] = [];
+        if (namedMatches.length > 0) {
+          covered = [...new Set(namedMatches)];
+        } else {
+          while (nextUnassignedIdx < candidateEmptyList.length && provenEmptySet.has(candidateEmptyList[nextUnassignedIdx])) {
+            nextUnassignedIdx += 1;
+          }
+          if (nextUnassignedIdx < candidateEmptyList.length) {
+            covered = [candidateEmptyList[nextUnassignedIdx]];
+            nextUnassignedIdx += 1;
+          }
+        }
+        for (const c of covered) provenEmptySet.add(c);
+        evidenceCoverageList.push({
+          filename: ev.filename || `empty_evidence_${idx + 1}.png`,
+          sha256: evidenceSha256s[idx],
+          byteLength: ev.bytes.byteLength,
+          coveredHs8: covered,
+        });
+      });
+    }
 
     coverage = {
       received: manifest.hs8.filter((c) => receivedSet.has(c)),
@@ -406,6 +461,25 @@ export async function importTradeBatch(
       db
         .prepare("UPDATE trade_import_batch SET superseded_by = ?1 WHERE batch_id = ?2")
         .bind(batchId, prevSameScopeBatchId),
+    );
+  }
+
+  for (const evItem of evidenceCoverageList) {
+    stagingStmts.push(
+      db
+        .prepare(
+          `INSERT INTO trade_batch_evidence (id, batch_id, filename, sha256, byte_length, covered_hs8_json, created_at)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)`,
+        )
+        .bind(
+          crypto.randomUUID(),
+          batchId,
+          evItem.filename,
+          evItem.sha256,
+          evItem.byteLength,
+          JSON.stringify(evItem.coveredHs8),
+          createdAt,
+        ),
     );
   }
 
@@ -1049,6 +1123,8 @@ function buildPeriodSnapshot(ctx: {
   let priorCompExpScaled: bigint | null = null;
   const priorCatImp = new Map<string, bigint>();
   const priorCatExp = new Map<string, bigint>();
+  const priorHsImp = new Map<string, bigint>();
+  const priorHsExp = new Map<string, bigint>();
 
   if (hasFullPrior && comparableHs8Set.size > 0) {
     priorCompImpScaled = 0n;
@@ -1062,12 +1138,33 @@ function buildPeriodSnapshot(ctx: {
         if (f.flow === "import") {
           priorCompImpScaled += val;
           priorCatImp.set(meta.category_id, (priorCatImp.get(meta.category_id) ?? 0n) + val);
+          priorHsImp.set(f.hs8, (priorHsImp.get(f.hs8) ?? 0n) + val);
         } else {
           priorCompExpScaled += val;
           priorCatExp.set(meta.category_id, (priorCatExp.get(meta.category_id) ?? 0n) + val);
+          priorHsExp.set(f.hs8, (priorHsExp.get(f.hs8) ?? 0n) + val);
         }
       }
     }
+  }
+
+  let partnerImpTotalScaled = 0n;
+  let partnerExpTotalScaled = 0n;
+  for (const v of partnerMap.values()) {
+    partnerImpTotalScaled += v.imp;
+    partnerExpTotalScaled += v.exp;
+  }
+  let regimeImpTotalScaled = 0n;
+  let regimeExpTotalScaled = 0n;
+  for (const v of regimeMap.values()) {
+    regimeImpTotalScaled += v.imp;
+    regimeExpTotalScaled += v.exp;
+  }
+  let regionImpTotalScaled = 0n;
+  let regionExpTotalScaled = 0n;
+  for (const v of regionMap.values()) {
+    regionImpTotalScaled += v.imp;
+    regionExpTotalScaled += v.exp;
   }
 
   const basketImpPartners = [...partnerMap.entries()].map(([partnerCode, v]) => ({
@@ -1215,6 +1312,7 @@ function buildPeriodSnapshot(ctx: {
     const q = hsQty.get(item.hs8)!;
     const hImpMap = hsPartnerImp.get(item.hs8);
     const hExpMap = hsPartnerExp.get(item.hs8);
+    const isComparable = hasFullPrior && comparableHs8Set.has(item.hs8);
     return {
       hs8: item.hs8,
       hs6: item.hs6,
@@ -1223,6 +1321,8 @@ function buildPeriodSnapshot(ctx: {
       importUsd: scaledToUsdNumber(imp),
       exportUsd: scaledToUsdNumber(exp),
       balanceUsd: scaledToUsdNumber(exp - imp),
+      importYoyPct: isComparable ? computeYoyPct(imp, priorHsImp.get(item.hs8) ?? 0n) : null,
+      exportYoyPct: isComparable ? computeYoyPct(exp, priorHsExp.get(item.hs8) ?? 0n) : null,
       importQty1: finalizeQty(q.imp1),
       importQty2: finalizeQty(q.imp2),
       exportQty1: finalizeQty(q.exp1),
@@ -1288,12 +1388,35 @@ function buildPeriodSnapshot(ctx: {
     };
   });
 
+  const groupingTotals: TradeGroupingTotals = {
+    product: {
+      importUsd: scaledToUsdNumber(totalImpScaled),
+      exportUsd: scaledToUsdNumber(totalExpScaled),
+    },
+    partner: {
+      importUsd: scaledToUsdNumber(partnerImpTotalScaled),
+      exportUsd: scaledToUsdNumber(partnerExpTotalScaled),
+      count: partners.length,
+    },
+    regime: {
+      importUsd: scaledToUsdNumber(regimeImpTotalScaled),
+      exportUsd: scaledToUsdNumber(regimeExpTotalScaled),
+      count: regimes.length,
+    },
+    region: {
+      importUsd: scaledToUsdNumber(regionImpTotalScaled),
+      exportUsd: scaledToUsdNumber(regionExpTotalScaled),
+      count: regions.length,
+    },
+  };
+
   return {
     status: "published",
     period: ctx.period,
     source: "china_customs",
     dictVersion: ctx.dictVersion,
     releaseId: ctx.releaseId,
+    units: TRADE_UNITS,
     availablePeriods: ctx.availablePeriods,
     coverage: {
       months: parsed.months,
@@ -1311,6 +1434,7 @@ function buildPeriodSnapshot(ctx: {
       importYoyPct: hasFullPrior ? computeYoyPct(compCurrImpScaled, priorCompImpScaled) : null,
       exportYoyPct: hasFullPrior ? computeYoyPct(compCurrExpScaled, priorCompExpScaled) : null,
     },
+    groupingTotals,
     concentration,
     trend,
     categories,
@@ -1491,10 +1615,12 @@ export async function getTradeOverview(
       source: "china_customs",
       dictVersion,
       releaseId: null,
+      units: TRADE_UNITS,
       availablePeriods: [],
       coverage: null,
       sourceBatches: [],
       totals: null,
+      groupingTotals: null,
       concentration: null,
       trend: [],
       categories: [],
@@ -1542,5 +1668,62 @@ export async function getTradePeriodsMeta(db: D1Database, rawDictVersion?: strin
     releaseId: latestRelease.release_id,
     publishedMonths: JSON.parse(latestRelease.published_months_json) as string[],
     availablePeriods: JSON.parse(latestRelease.available_periods_json) as string[],
+  };
+}
+
+export async function listTradeBatches(
+  db: D1Database,
+  filters: { dictVersion?: string | null; month?: string | null; flow?: string | null; grouping?: string | null },
+): Promise<{ items: TradeBatchListItem[] }> {
+  const dictVersion = filters.dictVersion?.trim() || DEFAULT_DICT_VERSION;
+  const clauses = ["dict_version = ?1"];
+  const params: unknown[] = [dictVersion];
+
+  if (filters.month?.trim()) {
+    params.push(filters.month.trim());
+    clauses.push(`month = ?${params.length}`);
+  }
+  if (filters.flow?.trim()) {
+    params.push(filters.flow.trim());
+    clauses.push(`flow = ?${params.length}`);
+  }
+  if (filters.grouping?.trim()) {
+    params.push(filters.grouping.trim());
+    clauses.push(`grouping = ?${params.length}`);
+  }
+
+  const sql = `
+    SELECT *
+    FROM trade_import_batch
+    WHERE ${clauses.join(" AND ")}
+    ORDER BY created_at DESC, rowid DESC
+    LIMIT 100
+  `;
+  const { results } = await db
+    .prepare(sql)
+    .bind(...params)
+    .all<BatchMetaRow & { created_at: string }>();
+
+  return {
+    items: results.map((r) => ({
+      batchId: r.batch_id,
+      dictVersion: r.dict_version,
+      month: r.month,
+      flow: r.flow,
+      currency: r.currency,
+      grouping: r.grouping,
+      filename: r.filename,
+      sourceSha256: r.source_sha256,
+      evidenceSha256s: JSON.parse(r.evidence_sha256s_json) as string[],
+      rowCount: r.row_count,
+      publishState: r.publish_state,
+      supersededBy: r.superseded_by,
+      coverage: {
+        received: JSON.parse(r.received_hs8_json) as string[],
+        confirmedEmpty: JSON.parse(r.confirmed_empty_hs8_json) as string[],
+        missing: JSON.parse(r.missing_hs8_json) as string[],
+      },
+      createdAt: r.created_at,
+    })),
   };
 }

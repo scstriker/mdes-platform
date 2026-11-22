@@ -1,7 +1,7 @@
 import type { Context, Hono } from "hono";
 import type { AppEnv } from "../env";
 import { AppError, textParam } from "../errors";
-import { getTradeOverview, getTradePeriodsMeta, importTradeBatch, type TradeFileInput } from "../trade";
+import { getTradeOverview, getTradePeriodsMeta, importTradeBatch, listTradeBatches, type TradeFileInput } from "../trade";
 
 function isFileLike(v: unknown): v is File {
   return Boolean(v && typeof v === "object" && "arrayBuffer" in v && typeof (v as File).arrayBuffer === "function");
@@ -73,5 +73,14 @@ export function tradeRoutes(app: Hono<AppEnv>) {
     const dictVersion = textParam(c.req.query("dictVersion"));
     const meta = await getTradePeriodsMeta(c.get("db"), dictVersion);
     return c.json(meta);
+  });
+
+  app.get("/api/trade/batches", async (c) => {
+    const dictVersion = textParam(c.req.query("dictVersion"));
+    const month = textParam(c.req.query("month"));
+    const flow = textParam(c.req.query("flow"));
+    const grouping = textParam(c.req.query("grouping"));
+    const list = await listTradeBatches(c.get("db"), { dictVersion, month, flow, grouping });
+    return c.json(list);
   });
 }

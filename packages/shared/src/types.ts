@@ -230,6 +230,8 @@ export type TradeHsItemStat = {
   importUsd: number;
   exportUsd: number;
   balanceUsd: number;
+  importYoyPct: number | null;
+  exportYoyPct: number | null;
   importQty1: TradeQuantityStat;
   importQty2: TradeQuantityStat;
   exportQty1: TradeQuantityStat;
@@ -240,16 +242,50 @@ export type TradeHsItemStat = {
   topExportPartners: string[];
 };
 
+export type TradeUnitsMeta = {
+  amount: "USD";
+  displayAmount: "100M_USD";
+  share: "PCT";
+  cr: "PCT";
+  hhi: "0_10000";
+};
+
+export type TradeGroupingTotals = {
+  product: { importUsd: number; exportUsd: number };
+  partner: { importUsd: number; exportUsd: number; count: number };
+  regime: { importUsd: number; exportUsd: number; count: number };
+  region: { importUsd: number; exportUsd: number; count: number };
+};
+
+export type TradeBatchListItem = {
+  batchId: string;
+  dictVersion: string;
+  month: string;
+  flow: TradeFlow;
+  currency: string;
+  grouping: TradeGrouping;
+  filename: string;
+  sourceSha256: string;
+  evidenceSha256s: string[];
+  rowCount: number;
+  publishState: TradePublishStatus;
+  supersededBy: string | null;
+  coverage: TradeImportCoverage;
+  createdAt: string;
+};
+
 export type TradeOverviewEmpty = {
   status: "empty";
   period: null;
   source: "china_customs";
   dictVersion: string;
   releaseId: null;
+  units: TradeUnitsMeta;
   availablePeriods: string[];
   coverage: null;
   sourceBatches: [];
   totals: null;
+  groupingTotals: null;
   concentration: null;
   trend: [];
   categories: [];
@@ -265,6 +301,7 @@ export type TradeOverviewPublished = {
   source: "china_customs";
   dictVersion: string;
   releaseId: string;
+  units: TradeUnitsMeta;
   availablePeriods: string[];
   coverage: {
     months: string[];
@@ -276,6 +313,7 @@ export type TradeOverviewPublished = {
   };
   sourceBatches: TradeSourceBatchRef[];
   totals: TradeTotals;
+  groupingTotals: TradeGroupingTotals;
   concentration: {
     import: ConcentrationMetrics;
     export: ConcentrationMetrics;
