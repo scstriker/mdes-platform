@@ -150,7 +150,7 @@ Returns：
 
 ### POST /api/trade/import
 
-本地管理端以 `multipart/form-data` 提交两个字段。字段 `file` 是海关原始 CSV，字段 `manifest` 是查询清单的 UTF-8 JSON。管理端在本机保留原件，Worker 根据接收字节计算 SHA-256。示例清单对应隔离验收库里的单码单月进口。
+本地管理端以 `multipart/form-data` 提交 UTF-8 JSON 字段 `manifest` 和原始证据。通常使用 `file` 上传海关原始 CSV。如果整个查询范围在官网明确显示无记录且无法下载 CSV，则使用 `emptyEvidence` 上传含查询条件与空结果的 PNG 截图。管理端在本机保留原件，Worker 根据接收字节计算 SHA-256。示例清单对应隔离验收库里的单码单月进口。
 
 ```json
 {
@@ -166,7 +166,9 @@ Returns：
 
 `flow` 取 `import` 或 `export`。`grouping` 取 `product`（商品全国合计）、`partner`、`regime` 或 `region`。`hs8` 是实际请求集合。`emptyHs8` 是其中由海关明确返回无记录的税号，清单与官网结果一同归档。缺行本身不构成无记录证明。
 
-有效请求返回 HTTP 200，包含 `batchId`、`sourceSha256`、`rowCount`、`coverage`（已取得、已确认无记录和待补采的税号）及 `status`。批次已接收而全月尚未齐备时为 `staged`，整月成功发布后为 `published`。同范围、同内容重试返回原批次。已发布范围收到修订时，按该覆盖集合整体替换，随新版本一起生效。通用观测值 CSV 沿用原入口。
+仅上传 `emptyEvidence` 时，`emptyHs8` 必须与请求的 `hs8` 集合一致；提交一张覆盖本次查询范围的截图，回执以截图字节计算 `sourceSha256`，`rowCount` 为 0。若官网另有表头空 CSV，以 `file` 随截图交付。带明细的 CSV 同时声明其他税号无记录时，可多次提交同名 `emptyEvidence` 文件字段，分别对应补查截图。数据员核对截图上的查询条件与编码，服务端保存证据及摘要。尚无证明的税号从 `emptyHs8` 去除，列为待补采；HTML 错误页与下载失败也计入待补采。
+
+有效请求返回 HTTP 200，包含 `batchId`、`sourceSha256`、`rowCount`、`coverage` 和 `status`。有 CSV 时 `sourceSha256` 为 CSV 原件摘要，附加证据摘要随批次保存。`coverage` 使用三个 HS8 数组：`received`、`confirmedEmpty`、`missing`。批次已接收而全月尚未齐备时为 `staged`，整月成功发布后为 `published`。相同范围、内容与覆盖声明的重传返回原批次；重传历史批次保留当前已发布版本。已发布范围收到修订时，按该覆盖集合整体替换。通用观测值 CSV 沿用原入口。
 
 清单、编码或单位不符合约定时返回 HTTP 400，标出字段或 CSV 行号；修订与既有批次范围部分重叠时返回 HTTP 409 并指出冲突覆盖范围。校验失败时保留当前已发布结果。本期仅在本地管理环境启用写入。
 
@@ -181,4 +183,21 @@ Returns：
 | `totals`、`trend`、`categories` | 返回期间、进口美元金额、出口美元金额、差额和同期变化率。分类按 HS8 所属一级类别汇总。金额值先保持原始精度，页面最后换算为亿美元。 |
 | `partners`、`concentration`、`regimes`、`regions`、`hsItems` | 按海关原码和来源名称提供伙伴、方式及注册地分布；税号、品类及全篮子集中度区分流向。不可计算的同比或集中度为 `null`。 |
 
-查询只读取已发布快照，聚合及替换时点见[数据模型](DATA_MODEL.md)。验收使用 AC-013 至 AC-016。
+例如，以下是 AC-013 单码隔离库的**目标响应节选**。其中的金额来自验收金标准。同比百分数约定 `25` 表示 25%，基期未知时用 `null`。
+
+```json
+{
+  "period": "2024",
+  "dictVersion": "202601",
+  "source": "china_customs",
+  "totals": {
+    "importUsd": 20375226,
+    "exportUsd": 89723246,
+    "balanceUsd": 69348020,
+    "importYoyPct": null,
+    "exportYoyPct": null
+  }
+}
+```
+
+查询只读取已发布快照。收件样例与归档方式见[海关原件采集规程](海关原件采集规程.md)，发布前后各接口的可见结果见[后端功能设计](贸易后端功能设计.md)。验收使用 AC-013 至 AC-017。
