@@ -1,9 +1,9 @@
-import { mkdirSync, readFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 import { Miniflare } from "miniflare";
-import { seedStatements } from "../../src/seed";
+import { seedStatements, seedTradeDictStatements } from "../../src/seed";
 
 /**
  * 在 Miniflare（workerd + 本地 D1，与线上同一套 SQLite 行为）里跑真实的 Worker。
@@ -19,7 +19,7 @@ function bundle() {
     // 打包结果放在项目目录里（.wrangler/ 已忽略）：workerd 不允许模块路径用 .. 跳出启动目录
     const dir = path.join(API_ROOT, ".wrangler/test");
     mkdirSync(dir, { recursive: true });
-    const outfile = path.join(dir, `harness-${process.pid}.mjs`);
+    const outfile = path.join(dir, `harness-${process.pid}-${Date.now()}.mjs`);
     await build({
       entryPoints: [path.join(here, "harness-worker.ts")],
       bundle: true,
@@ -35,16 +35,25 @@ function bundle() {
   return bundlePromise;
 }
 
-/** 迁移文件按语句拆开（去掉注释行；本项目的迁移里分号只出现在语句末尾） */
+/** 按文件名顺序读取全部迁移文件并拆分为 SQL 语句 */
 export function migrationStatements(): string[] {
-  const text = readFileSync(path.join(API_ROOT, "migrations/0001_init.sql"), "utf8");
-  return text
-    .split("\n")
-    .filter((l) => !l.trim().startsWith("--"))
-    .join("\n")
-    .split(/;\s*\n/)
-    .map((s) => s.trim().replace(/;$/, ""))
-    .filter(Boolean);
+  const migDir = path.join(API_ROOT, "migrations");
+  const files = readdirSync(migDir)
+    .filter((f) => f.endsWith(".sql"))
+    .sort((a, b) => a.localeCompare(b));
+  const out: string[] = [];
+  for (const file of files) {
+    const text = readFileSync(path.join(migDir, file), "utf8");
+    const stmts = text
+      .split(/\r?\n/)
+      .filter((l) => !l.trim().startsWith("--"))
+      .join("\n")
+      .split(/;\s*\n/)
+      .map((s) => s.trim().replace(/;$/, ""))
+      .filter(Boolean);
+    out.push(...stmts);
+  }
+  return out;
 }
 
 let seq = 0;
@@ -81,7 +90,13 @@ export async function startHarness({ maxRows = 5000, withDb = true, migrate = tr
     const res = await post("/__test/sql", { statements });
     if (!res.ok) throw new Error(`SQL 执行失败：${await res.text()}`);
   };
-  const query = async <T = Record<string, unknown>>(q: string) => (await (await post("/__test/query", { sql: q })).json()) as T[];
+  const query = async <T = Record<string, unknown>>(q: string) =>
+    (await (await post("/__test/query", { sql: q })).json()) as T[];
+  const queryWithMeta = async <T = Record<string, unknown>>(q: string, params: unknown[] = []) =>
+    (await (await post("/__test/query-meta", { sql: q, params })).json()) as {
+      results: T[];
+      meta: { rows_read?: number; rows_written?: number; duration?: number };
+    };
 
   if (withDb && migrate) await sql(migrationStatements());
   if (withDb && seed) await sql(seedStatements());
@@ -91,7 +106,27 @@ export async function startHarness({ maxRows = 5000, withDb = true, migrate = tr
     post,
     sql,
     query,
-    reset: () => sql(["delete from observation", "delete from import_batch", "delete from document_chunk", "delete from document"]),
+    queryWithMeta,
+    reset: async () => {
+      await sql([
+        "delete from trade_current_snapshot",
+        "delete from trade_period_snapshot",
+        "delete from trade_release",
+        "delete from trade_reconciliation_log",
+        "delete from trade_active_scope",
+        "delete from trade_hs_coverage",
+        "delete from trade_fact",
+        "delete from trade_import_batch",
+        "delete from observation",
+        "delete from import_batch",
+        "delete from document_chunk",
+        "delete from document",
+        "delete from trade_hs_year_applicability",
+      ]);
+      if (seed) {
+        await sql(seedTradeDictStatements());
+      }
+    },
     dispose: () => mf.dispose(),
   };
 }

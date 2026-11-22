@@ -1,5 +1,5 @@
 /**
- * API 错误码（ADR-002「错误码与中文文案」及阶段 2 补充约定）。
+ * API 错误码（ADR-002「错误码与中文文案」、阶段 2 补充约定及贸易一期契约）。
  *
  * - 接口错误统一返回 { error: { code, message, params } }；message 是给开发者看的英文说明，
  *   界面文案由前端按 code 生成（apps/web/src/lib/api/errors.ts）。
@@ -19,10 +19,27 @@ export const ROW_ERROR_CODES = [
   "UNKNOWN_INDICATOR",
 ] as const;
 
-export const ERROR_CODES = [...FILE_ERROR_CODES, ...ROW_ERROR_CODES, "NOT_FOUND", "INTERNAL_ERROR"] as const;
+/** 贸易一期专属错误码 */
+export const TRADE_ERROR_CODES = [
+  "TRADE_MANIFEST_INVALID",
+  "TRADE_CURRENCY_INVALID",
+  "TRADE_EVIDENCE_INVALID",
+  "TRADE_CSV_INVALID",
+  "TRADE_SCOPE_CONFLICT",
+  "TRADE_PERIOD_INVALID",
+] as const;
+
+export const ERROR_CODES = [
+  ...FILE_ERROR_CODES,
+  ...ROW_ERROR_CODES,
+  ...TRADE_ERROR_CODES,
+  "NOT_FOUND",
+  "INTERNAL_ERROR",
+] as const;
 
 export type FileErrorCode = (typeof FILE_ERROR_CODES)[number];
 export type RowErrorCode = (typeof ROW_ERROR_CODES)[number];
+export type TradeErrorCode = (typeof TRADE_ERROR_CODES)[number];
 export type ErrorCode = (typeof ERROR_CODES)[number];
 
 /** 各错误码携带的参数 */
@@ -37,6 +54,12 @@ export type ErrorParamsMap = {
   DIMS_INVALID_JSON: Record<string, never>;
   DIMS_NOT_OBJECT: Record<string, never>;
   UNKNOWN_INDICATOR: { indicator_id: string };
+  TRADE_MANIFEST_INVALID: { field: string; reason?: string };
+  TRADE_CURRENCY_INVALID: { currency: string };
+  TRADE_EVIDENCE_INVALID: { reason: string };
+  TRADE_CSV_INVALID: { line: number; field: string; reason?: string };
+  TRADE_SCOPE_CONFLICT: { existingBatchId: string; existingHs8: string; requestedHs8: string };
+  TRADE_PERIOD_INVALID: { period: string };
   NOT_FOUND: { resource: string; id: string };
   INTERNAL_ERROR: Record<string, never>;
 };
@@ -58,7 +81,7 @@ export type FileError<C extends FileErrorCode = FileErrorCode> = {
   params: ErrorParamsMap[C];
 };
 
-/** 给开发者看的英文说明（API 响应的 message 字段） */
+/** 给开发者看的英文说明（API 响应的 message 字段，保持纯 ASCII） */
 export function developerMessage(code: ErrorCode, params: ErrorParams = {}): string {
   switch (code) {
     case "FILE_REQUIRED":
@@ -81,6 +104,18 @@ export function developerMessage(code: ErrorCode, params: ErrorParams = {}): str
       return "dims must be a JSON object";
     case "UNKNOWN_INDICATOR":
       return `unknown indicator_id: ${params.indicator_id}`;
+    case "TRADE_MANIFEST_INVALID":
+      return `invalid trade manifest field '${params.field ?? "manifest"}'${params.reason ? `: ${params.reason}` : ""}`;
+    case "TRADE_CURRENCY_INVALID":
+      return `trade currency must be USD, got '${params.currency ?? "unknown"}'`;
+    case "TRADE_EVIDENCE_INVALID":
+      return `invalid trade file or empty evidence: ${params.reason ?? "missing"}`;
+    case "TRADE_CSV_INVALID":
+      return `invalid trade csv at line ${params.line ?? 0} (${params.field ?? "row"})${params.reason ? `: ${params.reason}` : ""}`;
+    case "TRADE_SCOPE_CONFLICT":
+      return `partial hs8 scope overlap with batch ${params.existingBatchId ?? "existing"}`;
+    case "TRADE_PERIOD_INVALID":
+      return `invalid trade period format: ${params.period ?? ""}`;
     case "NOT_FOUND":
       return `${params.resource ?? "resource"} not found: ${params.id ?? ""}`.trim();
     case "INTERNAL_ERROR":

@@ -1,6 +1,6 @@
 /**
  * 集成测试用的 Worker：包住真实的 API（src/worker.ts），另加几个只在测试里存在的入口，
- * 用来建表、灌数据、直接查库和模拟导入中途失败。由 tests/helpers/harness.ts 用 esbuild 打包，
+ * 用来建表、灌数据、直接查库（含 D1 meta.rows_read）和模拟导入中途失败。由 tests/helpers/harness.ts 用 esbuild 打包，
  * 在 Miniflare（workerd + 本地 D1）里运行；不会进生产包。
  */
 import { buildImportStatements, importObservations } from "../../src/import";
@@ -19,6 +19,12 @@ export default {
     if (url.pathname === "/__test/query") {
       const { sql } = await req.json<{ sql: string }>();
       return Response.json((await env.DB.prepare(sql).all()).results);
+    }
+    if (url.pathname === "/__test/query-meta") {
+      const { sql, params = [] } = await req.json<{ sql: string; params?: unknown[] }>();
+      const stmt = params.length > 0 ? env.DB.prepare(sql).bind(...params) : env.DB.prepare(sql);
+      const res = await stmt.all();
+      return Response.json({ results: res.results, meta: res.meta });
     }
     if (url.pathname === "/__test/chunks") {
       const { rows, chunkSize } = await req.json<{ rows: number; chunkSize: number }>();

@@ -1,0 +1,1546 @@
+import {
+  computeConcentration,
+  computeYoyPct,
+  isPngBytes,
+  parseCustomsCsvBytes,
+  parseTradePeriod,
+  roundMetric,
+  scaledToUsdNumber,
+  TRADE_FLOWS,
+  TRADE_GROUPINGS,
+  validateTradeManifest,
+  type NormalizedTradeManifest,
+  type ParsedCustomsFactRow,
+  type TradeCategoryStat,
+  type TradeFlow,
+  type TradeGrouping,
+  type TradeHsItemStat,
+  type TradeImportCoverage,
+  type TradeImportResponse,
+  type TradeOverviewEmpty,
+  type TradeOverviewPublished,
+  type TradeOverviewResponse,
+  type TradePartnerStat,
+  type TradeQuantityStat,
+  type TradeRegimeStat,
+  type TradeRegionStat,
+  type TradeSourceBatchRef,
+  type TradeTrendPoint,
+} from "@mdes/shared";
+import { AppError } from "./errors";
+
+const CHUNK_SIZE = 500;
+const DEFAULT_DICT_VERSION = "202601";
+
+export type TradeFileInput = {
+  filename: string;
+  bytes: Uint8Array;
+};
+
+export type ImportTradeBatchOptions = {
+  rawManifest: string | null;
+  file: TradeFileInput | null;
+  emptyEvidences: TradeFileInput[];
+  maxRows: number;
+  /** 测试钩子：在候选数据写入成功后、正式发布事务提交前抛出异常（验证 AC-014 发布中断与重试） */
+  failBeforePublishCommit?: boolean;
+};
+
+type DictItemRow = {
+  hs8: string;
+  hs6: string;
+  item_name: string;
+  category_id: string;
+  category_name: string;
+  category_order: number;
+  seq_no: number;
+  applicable: number;
+};
+
+type BatchMetaRow = {
+  batch_id: string;
+  dict_version: string;
+  month: string;
+  flow: TradeFlow;
+  currency: string;
+  grouping: TradeGrouping;
+  scope_key: string;
+  hs8_json: string;
+  empty_hs8_json: string;
+  received_hs8_json: string;
+  confirmed_empty_hs8_json: string;
+  missing_hs8_json: string;
+  filename: string;
+  source_sha256: string;
+  evidence_sha256s_json: string;
+  row_count: number;
+  publish_state: "staged" | "published";
+  superseded_by: string | null;
+};
+
+type FactDbRow = {
+  batch_id: string;
+  month: string;
+  flow: TradeFlow;
+  grouping: TradeGrouping;
+  hs8: string;
+  item_name: string;
+  group_code: string;
+  group_name: string;
+  usd_scaled_str: string;
+  qty1: number | null;
+  unit1: string | null;
+  qty2: number | null;
+  unit2: string | null;
+};
+
+async function sha256Hex(bytes: Uint8Array): Promise<string> {
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  const digest = await crypto.subtle.digest("SHA-256", copy);
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+const INSERT_COVERAGE_CHUNK = `
+  INSERT INTO trade_hs_coverage (batch_id, dict_version, month, flow, grouping, hs8, status, evidence_sha256)
+  SELECT
+    ?1,
+    ?2,
+    ?3,
+    ?4,
+    ?5,
+    json_extract(value, '$.hs8'),
+    json_extract(value, '$.status'),
+    json_extract(value, '$.evidenceSha256')
+  FROM json_each(?6)
+`;
+
+const INSERT_FACT_CHUNK = `
+  INSERT INTO trade_fact (batch_id, dict_version, month, flow, grouping, hs8, item_name, group_code, group_name, usd_scaled, usd_raw, qty1, unit1, qty2, unit2)
+  SELECT
+    ?1,
+    ?2,
+    ?3,
+    ?4,
+    ?5,
+    json_extract(value, '$.hs8'),
+    json_extract(value, '$.itemName'),
+    json_extract(value, '$.groupCode'),
+    json_extract(value, '$.groupName'),
+    CAST(json_extract(value, '$.usdScaled') AS INTEGER),
+    json_extract(value, '$.usdRaw'),
+    json_extract(value, '$.qty1'),
+    json_extract(value, '$.unit1'),
+    json_extract(value, '$.qty2'),
+    json_extract(value, '$.unit2')
+  FROM json_each(?6)
+`;
+
+const INSERT_DERIVED_OBS_CHUNK = `
+  INSERT INTO observation (indicator_id, period, geo, dims, value_num, value_text, unit, batch_id, object_ref, created_at)
+  SELECT
+    json_extract(value, '$.indicator_id'),
+    json_extract(value, '$.period'),
+    json_extract(value, '$.geo'),
+    json_extract(value, '$.dims'),
+    json_extract(value, '$.value_num'),
+    json_extract(value, '$.value_text'),
+    json_extract(value, '$.unit'),
+    ?1,
+    json_extract(value, '$.object_ref'),
+    ?2
+  FROM json_each(?3)
+`;
+
+async function loadDictForYear(db: D1Database, dictVersion: string, year: number): Promise<DictItemRow[]> {
+  const { results } = await db
+    .prepare(
+      `SELECT
+         d.hs8,
+         d.hs6,
+         d.item_name,
+         d.category_id,
+         d.category_name,
+         d.category_order,
+         d.seq_no,
+         COALESCE(a.applicable, 1) AS applicable
+       FROM trade_hs_dict d
+       LEFT JOIN trade_hs_year_applicability a
+         ON a.dict_version = d.dict_version AND a.year = ?2 AND a.hs8 = d.hs8
+       WHERE d.dict_version = ?1
+       ORDER BY d.category_order ASC, d.seq_no ASC, d.hs8 ASC`,
+    )
+    .bind(dictVersion, year)
+    .all<DictItemRow>();
+  return results;
+}
+
+export async function importTradeBatch(
+  db: D1Database,
+  options: ImportTradeBatchOptions,
+): Promise<TradeImportResponse> {
+  if (!options.rawManifest || !options.rawManifest.trim()) {
+    throw new AppError(400, "TRADE_MANIFEST_INVALID", { field: "manifest", reason: "missing manifest" });
+  }
+  let parsedJson: unknown;
+  try {
+    parsedJson = JSON.parse(options.rawManifest);
+  } catch {
+    throw new AppError(400, "TRADE_MANIFEST_INVALID", { field: "manifest", reason: "invalid JSON" });
+  }
+
+  const rawDictVer =
+    parsedJson && typeof parsedJson === "object" && !Array.isArray(parsedJson)
+      ? String((parsedJson as Record<string, unknown>).dictVersion ?? "").trim()
+      : "";
+  const rawMonth =
+    parsedJson && typeof parsedJson === "object" && !Array.isArray(parsedJson)
+      ? String((parsedJson as Record<string, unknown>).month ?? "").trim()
+      : "";
+  const prelimYear = /^(\d{4})-/.exec(rawMonth) ? Number(rawMonth.slice(0, 4)) : 2024;
+
+  const { results: dictVersions } = await db
+    .prepare("SELECT dict_version FROM trade_dict_meta")
+    .all<{ dict_version: string }>();
+  const knownDictVersions = new Set(dictVersions.map((d) => d.dict_version));
+
+  const dictRows = rawDictVer ? await loadDictForYear(db, rawDictVer, prelimYear) : [];
+  const applicableHs8 = new Set(dictRows.filter((r) => r.applicable === 1).map((r) => r.hs8));
+
+  const manifestCheck = validateTradeManifest(parsedJson, {
+    knownDictVersions,
+    applicableHs8: knownDictVersions.has(rawDictVer) ? applicableHs8 : undefined,
+  });
+  if (!manifestCheck.ok) {
+    throw new AppError(manifestCheck.error.status, manifestCheck.error.code, manifestCheck.error.params);
+  }
+  const manifest: NormalizedTradeManifest = manifestCheck.value;
+
+  // 校验官网无记录截图 PNG
+  for (const ev of options.emptyEvidences) {
+    if (!isPngBytes(ev.bytes)) {
+      throw new AppError(400, "TRADE_EVIDENCE_INVALID", { reason: "emptyEvidence_must_be_png" });
+    }
+  }
+  const evidenceSha256s = await Promise.all(options.emptyEvidences.map((ev) => sha256Hex(ev.bytes)));
+
+  if (!options.file && options.emptyEvidences.length === 0) {
+    throw new AppError(400, "TRADE_EVIDENCE_INVALID", { reason: "file_or_emptyEvidence_required" });
+  }
+
+  let sourceSha256 = "";
+  let filename = "";
+  let rows: ParsedCustomsFactRow[] = [];
+  let coverage: TradeImportCoverage;
+
+  if (!options.file) {
+    // 仅上传 emptyEvidence：emptyHs8 必须与 hs8 完全一致
+    if (manifest.emptyHs8.length !== manifest.hs8.length) {
+      throw new AppError(400, "TRADE_EVIDENCE_INVALID", { reason: "empty_evidence_only_requires_full_emptyHs8" });
+    }
+    sourceSha256 = evidenceSha256s[0];
+    filename = options.emptyEvidences[0].filename || "empty_evidence.png";
+    coverage = {
+      received: [],
+      confirmedEmpty: [...manifest.hs8],
+      missing: [],
+    };
+  } else {
+    sourceSha256 = await sha256Hex(options.file.bytes);
+    filename = options.file.filename || "customs.csv";
+    const allowHeaderOnlyEmpty =
+      options.emptyEvidences.length > 0 && manifest.emptyHs8.length === manifest.hs8.length;
+
+    const csvParsed = parseCustomsCsvBytes(options.file.bytes, manifest, {
+      maxRows: options.maxRows,
+      allowHeaderOnlyEmpty,
+    });
+    if (!csvParsed.ok) {
+      throw new AppError(csvParsed.error.status, csvParsed.error.code, csvParsed.error.params);
+    }
+    rows = csvParsed.rows;
+
+    const receivedSet = new Set(rows.map((r) => r.hs8));
+    // 尚无证明的税号从 emptyHs8 去除，列为待补采（missing）
+    const provenEmptySet =
+      options.emptyEvidences.length > 0 ? new Set(manifest.emptyHs8) : new Set<string>();
+
+    coverage = {
+      received: manifest.hs8.filter((c) => receivedSet.has(c)),
+      confirmedEmpty: manifest.hs8.filter((c) => !receivedSet.has(c) && provenEmptySet.has(c)),
+      missing: manifest.hs8.filter((c) => !receivedSet.has(c) && !provenEmptySet.has(c)),
+    };
+  }
+
+  const emptyHs8Json = JSON.stringify(manifest.emptyHs8);
+  const evidenceJson = JSON.stringify(evidenceSha256s);
+
+  // 1. 检查相同范围、相同原件、相同覆盖与证据的幂等重放（含历史已替代批次重放）
+  const existingReplay = await db
+    .prepare(
+      `SELECT * FROM trade_import_batch
+       WHERE scope_key = ?1
+         AND source_sha256 = ?2
+         AND empty_hs8_json = ?3
+         AND evidence_sha256s_json = ?4
+       ORDER BY created_at DESC
+       LIMIT 1`,
+    )
+    .bind(manifest.scopeKey, sourceSha256, emptyHs8Json, evidenceJson)
+    .first<BatchMetaRow>();
+
+  if (existingReplay) {
+    // 若该批次已被后续新修订替代（superseded_by 非空），或已成功发布：直接返回原批次，不覆盖当前正式发布版本
+    if (existingReplay.superseded_by !== null || existingReplay.publish_state === "published") {
+      const currentSnap = await db
+        .prepare("SELECT release_id FROM trade_current_snapshot WHERE dict_version = ?1 AND period = ?2")
+        .bind(manifest.dictVersion, manifest.month)
+        .first<{ release_id: string }>();
+      return {
+        batchId: existingReplay.batch_id,
+        sourceSha256: existingReplay.source_sha256,
+        evidenceSha256s: JSON.parse(existingReplay.evidence_sha256s_json) as string[],
+        rowCount: existingReplay.row_count,
+        coverage: {
+          received: JSON.parse(existingReplay.received_hs8_json) as string[],
+          confirmedEmpty: JSON.parse(existingReplay.confirmed_empty_hs8_json) as string[],
+          missing: JSON.parse(existingReplay.missing_hs8_json) as string[],
+        },
+        status: existingReplay.publish_state,
+        releaseId: currentSnap?.release_id ?? null,
+        replayed: true,
+      };
+    }
+
+    // 该批次是当前最新候选（superseded_by IS NULL 且 publish_state = 'staged'），如上次发布前中断后重试：继续尝试发布
+    const pub = await evaluateAndPublishMonth(db, manifest.dictVersion, manifest.month, {
+      failBeforePublishCommit: options.failBeforePublishCommit,
+    });
+    return {
+      batchId: existingReplay.batch_id,
+      sourceSha256: existingReplay.source_sha256,
+      evidenceSha256s: JSON.parse(existingReplay.evidence_sha256s_json) as string[],
+      rowCount: existingReplay.row_count,
+      coverage: {
+        received: JSON.parse(existingReplay.received_hs8_json) as string[],
+        confirmedEmpty: JSON.parse(existingReplay.confirmed_empty_hs8_json) as string[],
+        missing: JSON.parse(existingReplay.missing_hs8_json) as string[],
+      },
+      status: pub.published ? "published" : "staged",
+      releaseId: pub.releaseId,
+      replayed: true,
+      reconciliationNote: pub.reconciliationNote,
+    };
+  }
+
+  // 2. 检查与同月、同流向、同分组既有候选或活跃批次的部分范围重叠（HTTP 409）
+  const { results: siblingBatches } = await db
+    .prepare(
+      `SELECT batch_id, scope_key, hs8_json
+       FROM trade_import_batch
+       WHERE dict_version = ?1 AND month = ?2 AND flow = ?3 AND grouping = ?4 AND superseded_by IS NULL`,
+    )
+    .bind(manifest.dictVersion, manifest.month, manifest.flow, manifest.grouping)
+    .all<{ batch_id: string; scope_key: string; hs8_json: string }>();
+
+  let prevSameScopeBatchId: string | null = null;
+  for (const sib of siblingBatches) {
+    if (sib.scope_key === manifest.scopeKey) {
+      prevSameScopeBatchId = sib.batch_id;
+      continue;
+    }
+    const sibHs8 = JSON.parse(sib.hs8_json) as string[];
+    const sibSet = new Set(sibHs8);
+    if (manifest.hs8.some((code) => sibSet.has(code))) {
+      throw new AppError(409, "TRADE_SCOPE_CONFLICT", {
+        existingBatchId: sib.batch_id,
+        existingHs8: sibHs8.join(","),
+        requestedHs8: manifest.hs8.join(","),
+      });
+    }
+  }
+
+  // 3. 单事务分块写入候选批次、税号覆盖记录及月度事实（暂不动已发布指针）
+  const batchId = crypto.randomUUID();
+  const createdAt = new Date().toISOString();
+  const stagingStmts: D1PreparedStatement[] = [
+    db
+      .prepare(
+        `INSERT INTO import_batch (id, filename, status, row_ok, row_err, errors_json, created_at)
+         VALUES (?1, ?2, 'completed', ?3, 0, '[]', ?4)`,
+      )
+      .bind(batchId, filename, rows.length, createdAt),
+    db
+      .prepare(
+        `INSERT INTO trade_import_batch (
+           batch_id, dict_version, month, flow, currency, grouping, scope_key,
+           hs8_json, empty_hs8_json, received_hs8_json, confirmed_empty_hs8_json, missing_hs8_json,
+           filename, source_sha256, evidence_sha256s_json, row_count, publish_state, superseded_by, created_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, 'staged', NULL, ?17)`,
+      )
+      .bind(
+        batchId,
+        manifest.dictVersion,
+        manifest.month,
+        manifest.flow,
+        manifest.currency,
+        manifest.grouping,
+        manifest.scopeKey,
+        JSON.stringify(manifest.hs8),
+        emptyHs8Json,
+        JSON.stringify(coverage.received),
+        JSON.stringify(coverage.confirmedEmpty),
+        JSON.stringify(coverage.missing),
+        filename,
+        sourceSha256,
+        evidenceJson,
+        rows.length,
+        createdAt,
+      ),
+  ];
+
+  if (prevSameScopeBatchId) {
+    stagingStmts.push(
+      db
+        .prepare("UPDATE trade_import_batch SET superseded_by = ?1 WHERE batch_id = ?2")
+        .bind(batchId, prevSameScopeBatchId),
+    );
+  }
+
+  const coverageRecords = [
+    ...coverage.received.map((hs8) => ({ hs8, status: "received", evidenceSha256: sourceSha256 })),
+    ...coverage.confirmedEmpty.map((hs8) => ({
+      hs8,
+      status: "confirmed_empty",
+      evidenceSha256: evidenceSha256s[0] ?? sourceSha256,
+    })),
+    ...coverage.missing.map((hs8) => ({ hs8, status: "missing", evidenceSha256: null })),
+  ];
+
+  for (let i = 0; i < coverageRecords.length; i += CHUNK_SIZE) {
+    const chunk = coverageRecords.slice(i, i + CHUNK_SIZE);
+    stagingStmts.push(
+      db
+        .prepare(INSERT_COVERAGE_CHUNK)
+        .bind(batchId, manifest.dictVersion, manifest.month, manifest.flow, manifest.grouping, JSON.stringify(chunk)),
+    );
+  }
+
+  for (let i = 0; i < rows.length; i += CHUNK_SIZE) {
+    const chunk = rows.slice(i, i + CHUNK_SIZE).map((r) => ({
+      hs8: r.hs8,
+      itemName: r.itemName,
+      groupCode: r.groupCode,
+      groupName: r.groupName,
+      usdScaled: r.usdScaled.toString(),
+      usdRaw: r.usdRaw,
+      qty1: r.qty1,
+      unit1: r.unit1,
+      qty2: r.qty2,
+      unit2: r.unit2,
+    }));
+    stagingStmts.push(
+      db
+        .prepare(INSERT_FACT_CHUNK)
+        .bind(batchId, manifest.dictVersion, manifest.month, manifest.flow, manifest.grouping, JSON.stringify(chunk)),
+    );
+  }
+
+  await db.batch(stagingStmts);
+
+  // 4. 评估当月 2×4 覆盖与全国/分组对账，就绪则生成快照并原子切换版本
+  const pub = await evaluateAndPublishMonth(db, manifest.dictVersion, manifest.month, {
+    failBeforePublishCommit: options.failBeforePublishCommit,
+  });
+
+  return {
+    batchId,
+    sourceSha256,
+    evidenceSha256s,
+    rowCount: rows.length,
+    coverage,
+    status: pub.published ? "published" : "staged",
+    releaseId: pub.releaseId,
+    replayed: false,
+    reconciliationNote: pub.reconciliationNote,
+  };
+}
+
+async function evaluateAndPublishMonth(
+  db: D1Database,
+  dictVersion: string,
+  month: string,
+  opts?: { failBeforePublishCommit?: boolean },
+): Promise<{ published: boolean; releaseId: string | null; reconciliationNote: string | null }> {
+  const year = Number(month.slice(0, 4));
+  const dictItems = await loadDictForYear(db, dictVersion, year);
+  const applicableSet = new Set(dictItems.filter((d) => d.applicable === 1).map((d) => d.hs8));
+
+  const currentMonthSnap = await db
+    .prepare("SELECT release_id FROM trade_current_snapshot WHERE dict_version = ?1 AND period = ?2")
+    .bind(dictVersion, month)
+    .first<{ release_id: string }>();
+
+  if (applicableSet.size === 0) {
+    return { published: false, releaseId: currentMonthSnap?.release_id ?? null, reconciliationNote: null };
+  }
+
+  const { results: candidateBatches } = await db
+    .prepare(
+      `SELECT * FROM trade_import_batch
+       WHERE dict_version = ?1 AND month = ?2 AND superseded_by IS NULL
+       ORDER BY flow ASC, grouping ASC, scope_key ASC`,
+    )
+    .bind(dictVersion, month)
+    .all<BatchMetaRow>();
+
+  // 核查 2 个流向 × 4 个分组均无缺采且完整覆盖全部适用 HS8
+  for (const flow of TRADE_FLOWS) {
+    for (const grouping of TRADE_GROUPINGS) {
+      const covered = new Set<string>();
+      const matching = candidateBatches.filter((b) => b.flow === flow && b.grouping === grouping);
+      for (const b of matching) {
+        const missing = JSON.parse(b.missing_hs8_json) as string[];
+        if (missing.length > 0) {
+          return { published: false, releaseId: currentMonthSnap?.release_id ?? null, reconciliationNote: null };
+        }
+        for (const c of JSON.parse(b.received_hs8_json) as string[]) covered.add(c);
+        for (const c of JSON.parse(b.confirmed_empty_hs8_json) as string[]) covered.add(c);
+      }
+      for (const reqHs8 of applicableSet) {
+        if (!covered.has(reqHs8)) {
+          return { published: false, releaseId: currentMonthSnap?.release_id ?? null, reconciliationNote: null };
+        }
+      }
+    }
+  }
+
+  // 读取当月候选批次的全部事实，逐码对账 product 与 partner / regime / region
+  const candidateIds = candidateBatches.map((b) => b.batch_id);
+  const placeholders = candidateIds.map((_, i) => `?${i + 1}`).join(",");
+  const { results: monthFacts } = await db
+    .prepare(
+      `SELECT batch_id, month, flow, grouping, hs8, item_name, group_code, group_name,
+              CAST(usd_scaled AS TEXT) AS usd_scaled_str, qty1, unit1, qty2, unit2
+       FROM trade_fact
+       WHERE batch_id IN (${placeholders})`,
+    )
+    .bind(...candidateIds)
+    .all<FactDbRow>();
+
+  const sumByCombo = new Map<string, bigint>();
+  for (const f of monthFacts) {
+    const key = `${f.flow}|${f.grouping}|${f.hs8}`;
+    sumByCombo.set(key, (sumByCombo.get(key) ?? 0n) + BigInt(f.usd_scaled_str));
+  }
+
+  const now = new Date().toISOString();
+  const reconStmts: D1PreparedStatement[] = [];
+  const discrepancies: string[] = [];
+
+  for (const flow of TRADE_FLOWS) {
+    for (const hs8 of applicableSet) {
+      const prodVal = sumByCombo.get(`${flow}|product|${hs8}`) ?? 0n;
+      for (const g of ["partner", "regime", "region"] as const) {
+        const grpVal = sumByCombo.get(`${flow}|${g}|${hs8}`) ?? 0n;
+        const diff = grpVal - prodVal;
+        const status = diff === 0n ? "matched" : "pending_review";
+        if (diff !== 0n) {
+          discrepancies.push(`${flow}/${g}/${hs8}: diff=${scaledToUsdNumber(diff)}`);
+        }
+        reconStmts.push(
+          db
+            .prepare(
+              `INSERT INTO trade_reconciliation_log (
+                 dict_version, month, flow, hs8, grouping, product_usd_scaled, group_usd_scaled, diff_usd_scaled, status, checked_at
+               ) VALUES (?1, ?2, ?3, ?4, ?5, CAST(?6 AS INTEGER), CAST(?7 AS INTEGER), CAST(?8 AS INTEGER), ?9, ?10)
+               ON CONFLICT(dict_version, month, flow, hs8, grouping) DO UPDATE SET
+                 product_usd_scaled = excluded.product_usd_scaled,
+                 group_usd_scaled = excluded.group_usd_scaled,
+                 diff_usd_scaled = excluded.diff_usd_scaled,
+                 status = excluded.status,
+                 checked_at = excluded.checked_at`,
+            )
+            .bind(dictVersion, month, flow, hs8, g, prodVal.toString(), grpVal.toString(), diff.toString(), status, now),
+        );
+      }
+    }
+  }
+
+  if (discrepancies.length > 0) {
+    await db.batch(reconStmts);
+    return {
+      published: false,
+      releaseId: currentMonthSnap?.release_id ?? null,
+      reconciliationNote: discrepancies.join("; "),
+    };
+  }
+
+  if (opts?.failBeforePublishCommit) {
+    throw new Error("simulated failure before trade publication commit");
+  }
+
+  // 汇总所有已发布月份 + 当前就绪月份，计算受影响期间与次年同期基期期间
+  const prevRelease = await db
+    .prepare("SELECT release_id FROM trade_release WHERE dict_version = ?1 ORDER BY created_at DESC LIMIT 1")
+    .bind(dictVersion)
+    .first<{ release_id: string }>();
+
+  const { results: activeScopeRows } = await db
+    .prepare("SELECT * FROM trade_active_scope WHERE dict_version = ?1")
+    .bind(dictVersion)
+    .all<{ scope_key: string; month: string; flow: TradeFlow; grouping: TradeGrouping; batch_id: string }>();
+
+  const activeBatchesByMonth = new Map<string, string[]>();
+  for (const r of activeScopeRows) {
+    if (r.month === month) continue;
+    const arr = activeBatchesByMonth.get(r.month) ?? [];
+    arr.push(r.batch_id);
+    activeBatchesByMonth.set(r.month, arr);
+  }
+  activeBatchesByMonth.set(month, candidateIds);
+
+  const publishedMonths = [...activeBatchesByMonth.keys()].sort();
+  const publishedMonthSet = new Set(publishedMonths);
+  const availablePeriods = computeAllAvailablePeriods(publishedMonthSet);
+  const latestMonth = publishedMonths[publishedMonths.length - 1];
+
+  const targetPeriods = computeAffectedPeriods(month, publishedMonthSet);
+  const releaseId = crypto.randomUUID();
+  const triggerBatchId = candidateBatches[candidateBatches.length - 1]?.batch_id ?? candidateIds[0];
+
+  // 收集计算全部受影响期间（及各自上年同期基期与年内趋势月份）所需的月份集合
+  const neededMonths = new Set<string>();
+  for (const tp of targetPeriods) {
+    const parsed = parseTradePeriod(tp)!;
+    for (const m of parsed.months) neededMonths.add(m);
+    const prior = parseTradePeriod(parsed.priorPeriod)!;
+    if (prior.months.every((m) => publishedMonthSet.has(m))) {
+      for (const m of prior.months) neededMonths.add(m);
+    }
+    // 同年各月用于趋势序列及其上年同期月度同比
+    for (let mm = 1; mm <= 12; mm++) {
+      const mStr = `${parsed.year}-${String(mm).padStart(2, "0")}`;
+      if (publishedMonthSet.has(mStr)) {
+        neededMonths.add(mStr);
+        const priorMStr = `${parsed.year - 1}-${String(mm).padStart(2, "0")}`;
+        if (publishedMonthSet.has(priorMStr)) neededMonths.add(priorMStr);
+      }
+    }
+  }
+
+  const neededBatchIds: string[] = [];
+  for (const m of neededMonths) {
+    for (const bid of activeBatchesByMonth.get(m) ?? []) {
+      neededBatchIds.push(bid);
+    }
+  }
+
+  const batchMetaMap = new Map<string, BatchMetaRow>();
+  for (let i = 0; i < neededBatchIds.length; i += 80) {
+    const slice = neededBatchIds.slice(i, i + 80);
+    const ph = slice.map((_, idx) => `?${idx + 1}`).join(",");
+    const { results } = await db
+      .prepare(`SELECT * FROM trade_import_batch WHERE batch_id IN (${ph})`)
+      .bind(...slice)
+      .all<BatchMetaRow>();
+    for (const r of results) batchMetaMap.set(r.batch_id, r);
+  }
+
+  const factsByMonth = new Map<string, FactDbRow[]>();
+  for (let i = 0; i < neededBatchIds.length; i += 80) {
+    const slice = neededBatchIds.slice(i, i + 80);
+    const ph = slice.map((_, idx) => `?${idx + 1}`).join(",");
+    const { results } = await db
+      .prepare(
+        `SELECT batch_id, month, flow, grouping, hs8, item_name, group_code, group_name,
+                CAST(usd_scaled AS TEXT) AS usd_scaled_str, qty1, unit1, qty2, unit2
+         FROM trade_fact
+         WHERE batch_id IN (${ph})`,
+      )
+      .bind(...slice)
+      .all<FactDbRow>();
+    for (const f of results) {
+      const list = factsByMonth.get(f.month) ?? [];
+      list.push(f);
+      factsByMonth.set(f.month, list);
+    }
+  }
+
+  const dictCache = new Map<number, DictItemRow[]>();
+  const getDict = async (y: number) => {
+    if (!dictCache.has(y)) {
+      dictCache.set(y, await loadDictForYear(db, dictVersion, y));
+    }
+    return dictCache.get(y)!;
+  };
+
+  const snapshotsToWrite: Array<{ period: string; payload: TradeOverviewPublished }> = [];
+  const derivedObsRows: Array<{
+    indicator_id: string;
+    period: string;
+    geo: string;
+    dims: string;
+    value_num: number | null;
+    value_text: string | null;
+    unit: string;
+    object_ref: string;
+  }> = [];
+
+  for (const tp of targetPeriods) {
+    const parsed = parseTradePeriod(tp)!;
+    const yDict = await getDict(parsed.year);
+    const prevYDict = await getDict(parsed.year - 1);
+    const payload = buildPeriodSnapshot({
+      dictVersion,
+      period: tp,
+      releaseId,
+      availablePeriods,
+      publishedMonthSet,
+      activeBatchesByMonth,
+      batchMetaMap,
+      factsByMonth,
+      yearDict: yDict,
+      priorYearDict: prevYDict,
+    });
+    snapshotsToWrite.push({ period: tp, payload });
+    derivedObsRows.push(...buildDerivedObservations(payload));
+  }
+
+  // 组装一次短 D1 原子发布事务
+  const publishStmts: D1PreparedStatement[] = [
+    ...reconStmts,
+    db
+      .prepare(
+        `INSERT INTO trade_release (release_id, dict_version, prev_release_id, published_months_json, available_periods_json, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)`,
+      )
+      .bind(
+        releaseId,
+        dictVersion,
+        prevRelease?.release_id ?? null,
+        JSON.stringify(publishedMonths),
+        JSON.stringify(availablePeriods),
+        now,
+      ),
+    db
+      .prepare("DELETE FROM trade_active_scope WHERE dict_version = ?1 AND month = ?2")
+      .bind(dictVersion, month),
+  ];
+
+  for (const b of candidateBatches) {
+    publishStmts.push(
+      db
+        .prepare(
+          `INSERT INTO trade_active_scope (scope_key, dict_version, month, flow, grouping, batch_id, release_id, updated_at)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)`,
+        )
+        .bind(b.scope_key, dictVersion, month, b.flow, b.grouping, b.batch_id, releaseId, now),
+      db
+        .prepare("UPDATE trade_import_batch SET publish_state = 'published' WHERE batch_id = ?1")
+        .bind(b.batch_id),
+    );
+  }
+
+  for (const { period, payload } of snapshotsToWrite) {
+    const payloadStr = JSON.stringify(payload);
+    const batchesStr = JSON.stringify(payload.sourceBatches);
+    publishStmts.push(
+      db
+        .prepare(
+          `INSERT INTO trade_period_snapshot (snapshot_id, dict_version, period, release_id, source_batches_json, payload_json, created_at)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)`,
+        )
+        .bind(crypto.randomUUID(), dictVersion, period, releaseId, batchesStr, payloadStr, now),
+      db
+        .prepare(
+          `INSERT INTO trade_current_snapshot (dict_version, period, is_latest_month, release_id, available_periods_json, payload_json, updated_at)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+           ON CONFLICT(dict_version, period) DO UPDATE SET
+             is_latest_month = excluded.is_latest_month,
+             release_id = excluded.release_id,
+             available_periods_json = excluded.available_periods_json,
+             payload_json = excluded.payload_json,
+             updated_at = excluded.updated_at`,
+        )
+        .bind(
+          dictVersion,
+          period,
+          period === latestMonth ? 1 : 0,
+          releaseId,
+          JSON.stringify(availablePeriods),
+          payloadStr,
+          now,
+        ),
+      db
+        .prepare("DELETE FROM observation WHERE object_ref = ?1")
+        .bind(`trade_snapshot:${dictVersion}:${period}`),
+    );
+  }
+
+  // 同步同一字典下其余已发布期间的 latest_month 标记与可用期间索引
+  publishStmts.push(
+    db
+      .prepare(
+        `UPDATE trade_current_snapshot
+         SET is_latest_month = CASE WHEN period = ?2 THEN 1 ELSE 0 END,
+             available_periods_json = ?3
+         WHERE dict_version = ?1`,
+      )
+      .bind(dictVersion, latestMonth, JSON.stringify(availablePeriods)),
+  );
+
+  for (let i = 0; i < derivedObsRows.length; i += CHUNK_SIZE) {
+    const chunk = derivedObsRows.slice(i, i + CHUNK_SIZE);
+    publishStmts.push(db.prepare(INSERT_DERIVED_OBS_CHUNK).bind(triggerBatchId, now, JSON.stringify(chunk)));
+  }
+
+  await db.batch(publishStmts);
+
+  return { published: true, releaseId, reconciliationNote: null };
+}
+
+function computeAllAvailablePeriods(publishedMonthSet: ReadonlySet<string>): string[] {
+  const years = new Set<number>();
+  for (const m of publishedMonthSet) years.add(Number(m.slice(0, 4)));
+  const out: string[] = [];
+  for (const y of [...years].sort((a, b) => a - b)) {
+    for (let mm = 1; mm <= 12; mm++) {
+      const mStr = `${y}-${String(mm).padStart(2, "0")}`;
+      if (publishedMonthSet.has(mStr)) out.push(mStr);
+    }
+    for (let q = 1; q <= 4; q++) {
+      const qStr = `${y}-Q${q}`;
+      if (parseTradePeriod(qStr)!.months.every((m) => publishedMonthSet.has(m))) out.push(qStr);
+    }
+    for (let mm = 1; mm <= 12; mm++) {
+      const ytdStr = `${y}-YTD-${String(mm).padStart(2, "0")}`;
+      if (parseTradePeriod(ytdStr)!.months.every((m) => publishedMonthSet.has(m))) out.push(ytdStr);
+    }
+    if (parseTradePeriod(String(y))!.months.every((m) => publishedMonthSet.has(m))) {
+      out.push(String(y));
+    }
+  }
+  return out;
+}
+
+function computeAffectedPeriods(changedMonth: string, publishedMonthSet: ReadonlySet<string>): string[] {
+  const year = Number(changedMonth.slice(0, 4));
+  const mNum = Number(changedMonth.slice(5, 7));
+  const qNum = Math.ceil(mNum / 3);
+  const candidates = new Set<string>([changedMonth]);
+
+  const qStr = `${year}-Q${qNum}`;
+  if (parseTradePeriod(qStr)!.months.every((m) => publishedMonthSet.has(m))) {
+    candidates.add(qStr);
+  }
+  const yStr = String(year);
+  if (parseTradePeriod(yStr)!.months.every((m) => publishedMonthSet.has(m))) {
+    candidates.add(yStr);
+  }
+  for (let endM = mNum; endM <= 12; endM++) {
+    const ytdStr = `${year}-YTD-${String(endM).padStart(2, "0")}`;
+    if (parseTradePeriod(ytdStr)!.months.every((m) => publishedMonthSet.has(m))) {
+      candidates.add(ytdStr);
+    }
+  }
+
+  // 若次年同期期间已发布，作为同比基期变动需要一并重算次年对应快照
+  const nextYear = year + 1;
+  const downstreamChecks = [
+    `${nextYear}-${String(mNum).padStart(2, "0")}`,
+    `${nextYear}-Q${qNum}`,
+    String(nextYear),
+    ...Array.from({ length: 12 - mNum + 1 }, (_, idx) => `${nextYear}-YTD-${String(mNum + idx).padStart(2, "0")}`),
+  ];
+  for (const dp of downstreamChecks) {
+    const parsed = parseTradePeriod(dp);
+    if (parsed && parsed.months.every((m) => publishedMonthSet.has(m))) {
+      candidates.add(dp);
+    }
+  }
+
+  return [...candidates].sort();
+}
+
+type QtyAccumulator = {
+  hasValue: boolean;
+  mixed: boolean;
+  unit: string | null;
+  sum: number;
+};
+
+function createQtyAcc(): QtyAccumulator {
+  return { hasValue: false, mixed: false, unit: null, sum: 0 };
+}
+
+function addQty(acc: QtyAccumulator, val: number | null, unit: string | null) {
+  if (val === null) return;
+  const normUnit = unit ?? "";
+  if (!acc.hasValue) {
+    acc.hasValue = true;
+    acc.unit = normUnit || null;
+    acc.sum = val;
+    return;
+  }
+  if ((acc.unit ?? "") !== normUnit) {
+    acc.mixed = true;
+    return;
+  }
+  acc.sum += val;
+}
+
+function finalizeQty(acc: QtyAccumulator): TradeQuantityStat {
+  if (!acc.hasValue) return { value: null, unit: null };
+  if (acc.mixed) return { value: null, unit: "MIXED" };
+  return { value: roundMetric(acc.sum, 4), unit: acc.unit };
+}
+
+function buildPeriodSnapshot(ctx: {
+  dictVersion: string;
+  period: string;
+  releaseId: string;
+  availablePeriods: string[];
+  publishedMonthSet: ReadonlySet<string>;
+  activeBatchesByMonth: ReadonlyMap<string, string[]>;
+  batchMetaMap: ReadonlyMap<string, BatchMetaRow>;
+  factsByMonth: ReadonlyMap<string, FactDbRow[]>;
+  yearDict: DictItemRow[];
+  priorYearDict: DictItemRow[];
+}): TradeOverviewPublished {
+  const parsed = parseTradePeriod(ctx.period)!;
+  const applicableItems = ctx.yearDict.filter((d) => d.applicable === 1);
+  const notApplicableCount = ctx.yearDict.filter((d) => d.applicable !== 1).length;
+  const hsMetaMap = new Map(applicableItems.map((d) => [d.hs8, d]));
+
+  const priorApplicableSet = new Set(ctx.priorYearDict.filter((d) => d.applicable === 1).map((d) => d.hs8));
+  const comparableHs8Set = new Set(applicableItems.map((d) => d.hs8).filter((c) => priorApplicableSet.has(c)));
+
+  const sourceBatches: TradeSourceBatchRef[] = [];
+  for (const m of parsed.months) {
+    const bids = ctx.activeBatchesByMonth.get(m) ?? [];
+    for (const bid of bids) {
+      const b = ctx.batchMetaMap.get(bid);
+      if (!b) continue;
+      sourceBatches.push({
+        batchId: b.batch_id,
+        month: b.month,
+        flow: b.flow,
+        grouping: b.grouping,
+        filename: b.filename,
+        sourceSha256: b.source_sha256,
+        evidenceSha256s: JSON.parse(b.evidence_sha256s_json) as string[],
+        rowCount: b.row_count,
+      });
+    }
+  }
+  sourceBatches.sort((a, b) =>
+    `${a.month}|${a.flow}|${a.grouping}|${a.batchId}`.localeCompare(`${b.month}|${b.flow}|${b.grouping}|${b.batchId}`),
+  );
+
+  // 按 HS8 聚合全国金额、双数量及伙伴分布
+  const hsProductImp = new Map<string, bigint>();
+  const hsProductExp = new Map<string, bigint>();
+  const hsQty = new Map<string, { imp1: QtyAccumulator; imp2: QtyAccumulator; exp1: QtyAccumulator; exp2: QtyAccumulator }>();
+  for (const item of applicableItems) {
+    hsQty.set(item.hs8, {
+      imp1: createQtyAcc(),
+      imp2: createQtyAcc(),
+      exp1: createQtyAcc(),
+      exp2: createQtyAcc(),
+    });
+  }
+
+  const partnerMap = new Map<
+    string,
+    { name: string; imp: bigint; exp: bigint; byCat: Map<string, bigint> }
+  >();
+  const hsPartnerImp = new Map<string, Map<string, { name: string; usd: bigint }>>();
+  const hsPartnerExp = new Map<string, Map<string, { name: string; usd: bigint }>>();
+  const catPartnerImp = new Map<string, Map<string, { name: string; usd: bigint }>>();
+  const catPartnerExp = new Map<string, Map<string, { name: string; usd: bigint }>>();
+
+  const regimeMap = new Map<string, { name: string; imp: bigint; exp: bigint }>();
+  const regionMap = new Map<string, { name: string; imp: bigint; exp: bigint }>();
+
+  for (const m of parsed.months) {
+    for (const f of ctx.factsByMonth.get(m) ?? []) {
+      const meta = hsMetaMap.get(f.hs8);
+      if (!meta) continue;
+      const val = BigInt(f.usd_scaled_str);
+
+      if (f.grouping === "product") {
+        const q = hsQty.get(f.hs8)!;
+        if (f.flow === "import") {
+          hsProductImp.set(f.hs8, (hsProductImp.get(f.hs8) ?? 0n) + val);
+          addQty(q.imp1, f.qty1, f.unit1);
+          addQty(q.imp2, f.qty2, f.unit2);
+        } else {
+          hsProductExp.set(f.hs8, (hsProductExp.get(f.hs8) ?? 0n) + val);
+          addQty(q.exp1, f.qty1, f.unit1);
+          addQty(q.exp2, f.qty2, f.unit2);
+        }
+      } else if (f.grouping === "partner") {
+        let pEntry = partnerMap.get(f.group_code);
+        if (!pEntry) {
+          pEntry = { name: f.group_name, imp: 0n, exp: 0n, byCat: new Map() };
+          partnerMap.set(f.group_code, pEntry);
+        }
+        pEntry.name = f.group_name || pEntry.name;
+        if (f.flow === "import") pEntry.imp += val;
+        else pEntry.exp += val;
+        pEntry.byCat.set(meta.category_name, (pEntry.byCat.get(meta.category_name) ?? 0n) + val);
+
+        const hsTarget = f.flow === "import" ? hsPartnerImp : hsPartnerExp;
+        let hp = hsTarget.get(f.hs8);
+        if (!hp) {
+          hp = new Map();
+          hsTarget.set(f.hs8, hp);
+        }
+        const prevHp = hp.get(f.group_code);
+        hp.set(f.group_code, { name: f.group_name, usd: (prevHp?.usd ?? 0n) + val });
+
+        const catTarget = f.flow === "import" ? catPartnerImp : catPartnerExp;
+        let cp = catTarget.get(meta.category_id);
+        if (!cp) {
+          cp = new Map();
+          catTarget.set(meta.category_id, cp);
+        }
+        const prevCp = cp.get(f.group_code);
+        cp.set(f.group_code, { name: f.group_name, usd: (prevCp?.usd ?? 0n) + val });
+      } else if (f.grouping === "regime") {
+        const prev = regimeMap.get(f.group_code) ?? { name: f.group_name, imp: 0n, exp: 0n };
+        prev.name = f.group_name || prev.name;
+        if (f.flow === "import") prev.imp += val;
+        else prev.exp += val;
+        regimeMap.set(f.group_code, prev);
+      } else if (f.grouping === "region") {
+        const prev = regionMap.get(f.group_code) ?? { name: f.group_name, imp: 0n, exp: 0n };
+        prev.name = f.group_name || prev.name;
+        if (f.flow === "import") prev.imp += val;
+        else prev.exp += val;
+        regionMap.set(f.group_code, prev);
+      }
+    }
+  }
+
+  let totalImpScaled = 0n;
+  let totalExpScaled = 0n;
+  let compCurrImpScaled = 0n;
+  let compCurrExpScaled = 0n;
+  for (const item of applicableItems) {
+    const imp = hsProductImp.get(item.hs8) ?? 0n;
+    const exp = hsProductExp.get(item.hs8) ?? 0n;
+    totalImpScaled += imp;
+    totalExpScaled += exp;
+    if (comparableHs8Set.has(item.hs8)) {
+      compCurrImpScaled += imp;
+      compCurrExpScaled += exp;
+    }
+  }
+  const totalBalanceScaled = totalExpScaled - totalImpScaled;
+
+  // 计算上年同口径同期基期
+  const priorParsed = parseTradePeriod(parsed.priorPeriod)!;
+  const hasFullPrior = priorParsed.months.every((m) => ctx.publishedMonthSet.has(m));
+  let priorCompImpScaled: bigint | null = null;
+  let priorCompExpScaled: bigint | null = null;
+  const priorCatImp = new Map<string, bigint>();
+  const priorCatExp = new Map<string, bigint>();
+
+  if (hasFullPrior && comparableHs8Set.size > 0) {
+    priorCompImpScaled = 0n;
+    priorCompExpScaled = 0n;
+    for (const pm of priorParsed.months) {
+      for (const f of ctx.factsByMonth.get(pm) ?? []) {
+        if (f.grouping !== "product" || !comparableHs8Set.has(f.hs8)) continue;
+        const meta = hsMetaMap.get(f.hs8);
+        if (!meta) continue;
+        const val = BigInt(f.usd_scaled_str);
+        if (f.flow === "import") {
+          priorCompImpScaled += val;
+          priorCatImp.set(meta.category_id, (priorCatImp.get(meta.category_id) ?? 0n) + val);
+        } else {
+          priorCompExpScaled += val;
+          priorCatExp.set(meta.category_id, (priorCatExp.get(meta.category_id) ?? 0n) + val);
+        }
+      }
+    }
+  }
+
+  const basketImpPartners = [...partnerMap.entries()].map(([partnerCode, v]) => ({
+    partnerCode,
+    usdScaled: v.imp,
+  }));
+  const basketExpPartners = [...partnerMap.entries()].map(([partnerCode, v]) => ({
+    partnerCode,
+    usdScaled: v.exp,
+  }));
+
+  const concentration = {
+    import: computeConcentration(basketImpPartners, totalImpScaled),
+    export: computeConcentration(basketExpPartners, totalExpScaled),
+  };
+
+  const topPartnerNames = (m: Map<string, { name: string; usd: bigint }> | undefined): string[] => {
+    if (!m) return [];
+    return [...m.entries()]
+      .filter(([, v]) => v.usd > 0n)
+      .sort((a, b) => (b[1].usd !== a[1].usd ? (b[1].usd > a[1].usd ? 1 : -1) : a[0].localeCompare(b[0])))
+      .slice(0, 3)
+      .map(([, v]) => v.name);
+  };
+
+  // 汇总 11 个一级类别（或隔离库当前适用类别）
+  const catGroups = new Map<string, DictItemRow[]>();
+  for (const item of applicableItems) {
+    const arr = catGroups.get(item.category_id) ?? [];
+    arr.push(item);
+    catGroups.set(item.category_id, arr);
+  }
+
+  const categories: TradeCategoryStat[] = [];
+  for (const [categoryId, items] of catGroups.entries()) {
+    const first = items[0];
+    let cImp = 0n;
+    let cExp = 0n;
+    let cCompImp = 0n;
+    let cCompExp = 0n;
+    for (const it of items) {
+      const imp = hsProductImp.get(it.hs8) ?? 0n;
+      const exp = hsProductExp.get(it.hs8) ?? 0n;
+      cImp += imp;
+      cExp += exp;
+      if (comparableHs8Set.has(it.hs8)) {
+        cCompImp += imp;
+        cCompExp += exp;
+      }
+    }
+    const hsPrefixes = [...new Set(items.map((i) => i.hs6.slice(0, 4)))].sort();
+    const hsRange = items.length === 1 ? items[0].hs8 : hsPrefixes.join(" / ");
+
+    const cImpMap = catPartnerImp.get(categoryId);
+    const cExpMap = catPartnerExp.get(categoryId);
+
+    categories.push({
+      categoryId,
+      category: first.category_name,
+      order: first.category_order,
+      hs8Count: items.length,
+      hsRange,
+      importUsd: scaledToUsdNumber(cImp),
+      exportUsd: scaledToUsdNumber(cExp),
+      balanceUsd: scaledToUsdNumber(cExp - cImp),
+      importYoyPct: hasFullPrior ? computeYoyPct(cCompImp, priorCatImp.get(categoryId) ?? 0n) : null,
+      exportYoyPct: hasFullPrior ? computeYoyPct(cCompExp, priorCatExp.get(categoryId) ?? 0n) : null,
+      importConcentration: computeConcentration(
+        cImpMap ? [...cImpMap.entries()].map(([partnerCode, v]) => ({ partnerCode, usdScaled: v.usd })) : [],
+        cImp,
+      ),
+      exportConcentration: computeConcentration(
+        cExpMap ? [...cExpMap.entries()].map(([partnerCode, v]) => ({ partnerCode, usdScaled: v.usd })) : [],
+        cExp,
+      ),
+      topImportPartners: topPartnerNames(cImpMap),
+      topExportPartners: topPartnerNames(cExpMap),
+    });
+  }
+
+  const partners: TradePartnerStat[] = [...partnerMap.entries()]
+    .filter(([, v]) => v.imp > 0n || v.exp > 0n)
+    .sort((a, b) => {
+      const sumA = a[1].imp + a[1].exp;
+      const sumB = b[1].imp + b[1].exp;
+      if (sumB !== sumA) return sumB > sumA ? 1 : -1;
+      return a[0].localeCompare(b[0]);
+    })
+    .map(([partnerCode, v]) => {
+      let topCategory = applicableItems[0]?.category_name ?? "";
+      let bestCatVal = -1n;
+      for (const [catName, catVal] of v.byCat.entries()) {
+        if (catVal > bestCatVal) {
+          bestCatVal = catVal;
+          topCategory = catName;
+        }
+      }
+      return {
+        partnerCode,
+        partnerName: v.name,
+        importUsd: scaledToUsdNumber(v.imp),
+        exportUsd: scaledToUsdNumber(v.exp),
+        balanceUsd: scaledToUsdNumber(v.exp - v.imp),
+        importSharePct: totalImpScaled > 0n ? roundMetric((Number(v.imp) / Number(totalImpScaled)) * 100, 4) : null,
+        exportSharePct: totalExpScaled > 0n ? roundMetric((Number(v.exp) / Number(totalExpScaled)) * 100, 4) : null,
+        topCategory,
+      };
+    });
+
+  const regimes: TradeRegimeStat[] = [...regimeMap.entries()]
+    .filter(([, v]) => v.imp > 0n || v.exp > 0n)
+    .sort((a, b) => {
+      const sumA = a[1].imp + a[1].exp;
+      const sumB = b[1].imp + b[1].exp;
+      return sumB !== sumA ? (sumB > sumA ? 1 : -1) : a[0].localeCompare(b[0]);
+    })
+    .map(([regimeCode, v]) => ({
+      regimeCode,
+      regimeName: v.name,
+      importUsd: scaledToUsdNumber(v.imp),
+      exportUsd: scaledToUsdNumber(v.exp),
+      importSharePct: totalImpScaled > 0n ? roundMetric((Number(v.imp) / Number(totalImpScaled)) * 100, 4) : null,
+      exportSharePct: totalExpScaled > 0n ? roundMetric((Number(v.exp) / Number(totalExpScaled)) * 100, 4) : null,
+    }));
+
+  const regions: TradeRegionStat[] = [...regionMap.entries()]
+    .filter(([, v]) => v.imp > 0n || v.exp > 0n)
+    .sort((a, b) => {
+      const sumA = a[1].imp + a[1].exp;
+      const sumB = b[1].imp + b[1].exp;
+      return sumB !== sumA ? (sumB > sumA ? 1 : -1) : a[0].localeCompare(b[0]);
+    })
+    .map(([regionCode, v]) => ({
+      regionCode,
+      regionName: v.name,
+      importUsd: scaledToUsdNumber(v.imp),
+      exportUsd: scaledToUsdNumber(v.exp),
+      importSharePct: totalImpScaled > 0n ? roundMetric((Number(v.imp) / Number(totalImpScaled)) * 100, 4) : null,
+      exportSharePct: totalExpScaled > 0n ? roundMetric((Number(v.exp) / Number(totalExpScaled)) * 100, 4) : null,
+    }));
+
+  const hsItems: TradeHsItemStat[] = applicableItems.map((item) => {
+    const imp = hsProductImp.get(item.hs8) ?? 0n;
+    const exp = hsProductExp.get(item.hs8) ?? 0n;
+    const q = hsQty.get(item.hs8)!;
+    const hImpMap = hsPartnerImp.get(item.hs8);
+    const hExpMap = hsPartnerExp.get(item.hs8);
+    return {
+      hs8: item.hs8,
+      hs6: item.hs6,
+      itemName: item.item_name,
+      category: item.category_name,
+      importUsd: scaledToUsdNumber(imp),
+      exportUsd: scaledToUsdNumber(exp),
+      balanceUsd: scaledToUsdNumber(exp - imp),
+      importQty1: finalizeQty(q.imp1),
+      importQty2: finalizeQty(q.imp2),
+      exportQty1: finalizeQty(q.exp1),
+      exportQty2: finalizeQty(q.exp2),
+      importConcentration: computeConcentration(
+        hImpMap ? [...hImpMap.entries()].map(([partnerCode, v]) => ({ partnerCode, usdScaled: v.usd })) : [],
+        imp,
+      ),
+      exportConcentration: computeConcentration(
+        hExpMap ? [...hExpMap.entries()].map(([partnerCode, v]) => ({ partnerCode, usdScaled: v.usd })) : [],
+        exp,
+      ),
+      topImportPartners: topPartnerNames(hImpMap),
+      topExportPartners: topPartnerNames(hExpMap),
+    };
+  });
+
+  // 生成趋势序列（月度走势）
+  const trendMonths =
+    parsed.kind === "month"
+      ? Array.from({ length: Number(parsed.period.slice(5, 7)) }, (_, i) =>
+          `${parsed.year}-${String(i + 1).padStart(2, "0")}`,
+        ).filter((m) => ctx.publishedMonthSet.has(m))
+      : parsed.months;
+
+  const trend: TradeTrendPoint[] = trendMonths.map((tm) => {
+    let mImp = 0n;
+    let mExp = 0n;
+    let mCompImp = 0n;
+    let mCompExp = 0n;
+    for (const f of ctx.factsByMonth.get(tm) ?? []) {
+      if (f.grouping !== "product" || !hsMetaMap.has(f.hs8)) continue;
+      const val = BigInt(f.usd_scaled_str);
+      if (f.flow === "import") {
+        mImp += val;
+        if (comparableHs8Set.has(f.hs8)) mCompImp += val;
+      } else {
+        mExp += val;
+        if (comparableHs8Set.has(f.hs8)) mCompExp += val;
+      }
+    }
+    const priorMonth = `${Number(tm.slice(0, 4)) - 1}-${tm.slice(5, 7)}`;
+    let pImp: bigint | null = null;
+    let pExp: bigint | null = null;
+    if (ctx.publishedMonthSet.has(priorMonth) && comparableHs8Set.size > 0) {
+      pImp = 0n;
+      pExp = 0n;
+      for (const pf of ctx.factsByMonth.get(priorMonth) ?? []) {
+        if (pf.grouping !== "product" || !comparableHs8Set.has(pf.hs8)) continue;
+        const val = BigInt(pf.usd_scaled_str);
+        if (pf.flow === "import") pImp += val;
+        else pExp += val;
+      }
+    }
+    return {
+      period: tm,
+      importUsd: scaledToUsdNumber(mImp),
+      exportUsd: scaledToUsdNumber(mExp),
+      balanceUsd: scaledToUsdNumber(mExp - mImp),
+      importYoyPct: computeYoyPct(mCompImp, pImp),
+      exportYoyPct: computeYoyPct(mCompExp, pExp),
+      isPartial: false,
+    };
+  });
+
+  return {
+    status: "published",
+    period: ctx.period,
+    source: "china_customs",
+    dictVersion: ctx.dictVersion,
+    releaseId: ctx.releaseId,
+    availablePeriods: ctx.availablePeriods,
+    coverage: {
+      months: parsed.months,
+      expectedMonths: parsed.months.length,
+      coveredMonths: parsed.months.length,
+      applicableHs8Count: applicableItems.length,
+      coveredHs8Count: applicableItems.length,
+      notApplicableHs8Count: notApplicableCount,
+    },
+    sourceBatches,
+    totals: {
+      importUsd: scaledToUsdNumber(totalImpScaled),
+      exportUsd: scaledToUsdNumber(totalExpScaled),
+      balanceUsd: scaledToUsdNumber(totalBalanceScaled),
+      importYoyPct: hasFullPrior ? computeYoyPct(compCurrImpScaled, priorCompImpScaled) : null,
+      exportYoyPct: hasFullPrior ? computeYoyPct(compCurrExpScaled, priorCompExpScaled) : null,
+    },
+    concentration,
+    trend,
+    categories,
+    partners,
+    regimes,
+    regions,
+    hsItems,
+  };
+}
+
+function buildDerivedObservations(snap: TradeOverviewPublished) {
+  const objectRef = `trade_snapshot:${snap.dictVersion}:${snap.period}`;
+  const toYiUsd = (usd: number) => roundMetric(usd / 100_000_000, 6);
+  const baseDims = {
+    source: snap.source,
+    dictVersion: snap.dictVersion,
+    releaseId: snap.releaseId,
+  };
+
+  const out: Array<{
+    indicator_id: string;
+    period: string;
+    geo: string;
+    dims: string;
+    value_num: number | null;
+    value_text: string | null;
+    unit: string;
+    object_ref: string;
+  }> = [
+    {
+      indicator_id: "TRD-001",
+      period: snap.period,
+      geo: "CN",
+      dims: JSON.stringify({ ...baseDims, trade_type: "import", raw_usd: snap.totals.importUsd }),
+      value_num: toYiUsd(snap.totals.importUsd),
+      value_text: null,
+      unit: "亿美元",
+      object_ref: objectRef,
+    },
+    {
+      indicator_id: "TRD-002",
+      period: snap.period,
+      geo: "CN",
+      dims: JSON.stringify({
+        ...baseDims,
+        trade_type: "export",
+        raw_usd: snap.totals.exportUsd,
+        balance_usd: snap.totals.balanceUsd,
+      }),
+      value_num: toYiUsd(snap.totals.exportUsd),
+      value_text: null,
+      unit: "亿美元",
+      object_ref: objectRef,
+    },
+    {
+      indicator_id: "TRD-006",
+      period: snap.period,
+      geo: "CN",
+      dims: JSON.stringify({
+        ...baseDims,
+        trade_type: "import",
+        metric: "CR3",
+        cr1: snap.concentration.import.cr1,
+        cr3: snap.concentration.import.cr3,
+        cr5: snap.concentration.import.cr5,
+        hhi: snap.concentration.import.hhi,
+      }),
+      value_num: snap.concentration.import.cr3,
+      value_text: snap.concentration.import.cr3 === null ? "暂无数据" : null,
+      unit: "%",
+      object_ref: objectRef,
+    },
+    {
+      indicator_id: "TRD-007",
+      period: snap.period,
+      geo: "CN",
+      dims: JSON.stringify({
+        ...baseDims,
+        trade_type: "export",
+        metric: "CR3",
+        cr1: snap.concentration.export.cr1,
+        cr3: snap.concentration.export.cr3,
+        cr5: snap.concentration.export.cr5,
+        hhi: snap.concentration.export.hhi,
+      }),
+      value_num: snap.concentration.export.cr3,
+      value_text: snap.concentration.export.cr3 === null ? "暂无数据" : null,
+      unit: "%",
+      object_ref: objectRef,
+    },
+  ];
+
+  for (const p of snap.partners.slice(0, 12)) {
+    if (p.importUsd > 0) {
+      out.push({
+        indicator_id: "TRD-005",
+        period: snap.period,
+        geo: "CN",
+        dims: JSON.stringify({
+          ...baseDims,
+          trade_type: "import",
+          partner: p.partnerCode,
+          partner_name: p.partnerName,
+          share_pct: p.importSharePct,
+          raw_usd: p.importUsd,
+        }),
+        value_num: toYiUsd(p.importUsd),
+        value_text: p.partnerName,
+        unit: "亿美元",
+        object_ref: objectRef,
+      });
+    }
+    if (p.exportUsd > 0) {
+      out.push({
+        indicator_id: "TRD-005",
+        period: snap.period,
+        geo: "CN",
+        dims: JSON.stringify({
+          ...baseDims,
+          trade_type: "export",
+          partner: p.partnerCode,
+          partner_name: p.partnerName,
+          share_pct: p.exportSharePct,
+          raw_usd: p.exportUsd,
+        }),
+        value_num: toYiUsd(p.exportUsd),
+        value_text: p.partnerName,
+        unit: "亿美元",
+        object_ref: objectRef,
+      });
+    }
+  }
+
+  return out;
+}
+
+export async function getTradeOverview(
+  db: D1Database,
+  params: { period?: string | null; dictVersion?: string | null },
+): Promise<TradeOverviewResponse> {
+  const dictVersion = params.dictVersion?.trim() || DEFAULT_DICT_VERSION;
+
+  if (params.period != null && params.period.trim() !== "") {
+    const parsed = parseTradePeriod(params.period);
+    if (!parsed) {
+      throw new AppError(400, "TRADE_PERIOD_INVALID", { period: params.period });
+    }
+    const row = await db
+      .prepare(
+        "SELECT payload_json, available_periods_json FROM trade_current_snapshot WHERE dict_version = ?1 AND period = ?2",
+      )
+      .bind(dictVersion, parsed.period)
+      .first<{ payload_json: string; available_periods_json: string }>();
+
+    if (!row) {
+      throw new AppError(404, "NOT_FOUND", { resource: "trade_period", id: parsed.period });
+    }
+    const payload = JSON.parse(row.payload_json) as TradeOverviewPublished;
+    payload.availablePeriods = JSON.parse(row.available_periods_json) as string[];
+    return payload;
+  }
+
+  // 未指定期间：通过部分唯一索引定位最新已发布月份快照
+  const latestRow = await db
+    .prepare(
+      `SELECT payload_json, available_periods_json
+       FROM trade_current_snapshot
+       WHERE dict_version = ?1 AND is_latest_month = 1
+       LIMIT 1`,
+    )
+    .bind(dictVersion)
+    .first<{ payload_json: string; available_periods_json: string }>();
+
+  if (!latestRow) {
+    const empty: TradeOverviewEmpty = {
+      status: "empty",
+      period: null,
+      source: "china_customs",
+      dictVersion,
+      releaseId: null,
+      availablePeriods: [],
+      coverage: null,
+      sourceBatches: [],
+      totals: null,
+      concentration: null,
+      trend: [],
+      categories: [],
+      partners: [],
+      regimes: [],
+      regions: [],
+      hsItems: [],
+    };
+    return empty;
+  }
+
+  const payload = JSON.parse(latestRow.payload_json) as TradeOverviewPublished;
+  payload.availablePeriods = JSON.parse(latestRow.available_periods_json) as string[];
+  return payload;
+}
+
+export async function getTradePeriodsMeta(db: D1Database, rawDictVersion?: string | null) {
+  const dictVersion = rawDictVersion?.trim() || DEFAULT_DICT_VERSION;
+  const latestRelease = await db
+    .prepare(
+      `SELECT release_id, published_months_json, available_periods_json, created_at
+       FROM trade_release
+       WHERE dict_version = ?1
+       ORDER BY created_at DESC
+       LIMIT 1`,
+    )
+    .bind(dictVersion)
+    .first<{
+      release_id: string;
+      published_months_json: string;
+      available_periods_json: string;
+      created_at: string;
+    }>();
+
+  if (!latestRelease) {
+    return {
+      dictVersion,
+      releaseId: null,
+      publishedMonths: [] as string[],
+      availablePeriods: [] as string[],
+    };
+  }
+  return {
+    dictVersion,
+    releaseId: latestRelease.release_id,
+    publishedMonths: JSON.parse(latestRelease.published_months_json) as string[],
+    availablePeriods: JSON.parse(latestRelease.available_periods_json) as string[],
+  };
+}

@@ -121,3 +121,171 @@ export type Stats = {
   clusters: ClusterStats[];
   latest_batch: ImportBatchSummary | null;
 };
+
+import type { ConcentrationMetrics, TradeFlow, TradeGrouping, TradePublishStatus } from "./trade";
+
+export type TradeImportCoverage = {
+  received: string[];
+  confirmedEmpty: string[];
+  missing: string[];
+};
+
+export type TradeImportResponse = {
+  batchId: string;
+  sourceSha256: string;
+  evidenceSha256s: string[];
+  rowCount: number;
+  coverage: TradeImportCoverage;
+  status: TradePublishStatus;
+  releaseId: string | null;
+  replayed: boolean;
+  reconciliationNote?: string | null;
+};
+
+export type TradeSourceBatchRef = {
+  batchId: string;
+  month: string;
+  flow: TradeFlow;
+  grouping: TradeGrouping;
+  filename: string;
+  sourceSha256: string;
+  evidenceSha256s: string[];
+  rowCount: number;
+};
+
+export type TradeQuantityStat = {
+  value: number | null;
+  unit: string | null;
+};
+
+export type TradeTotals = {
+  importUsd: number;
+  exportUsd: number;
+  balanceUsd: number;
+  importYoyPct: number | null;
+  exportYoyPct: number | null;
+};
+
+export type TradeTrendPoint = {
+  period: string;
+  importUsd: number;
+  exportUsd: number;
+  balanceUsd: number;
+  importYoyPct: number | null;
+  exportYoyPct: number | null;
+  isPartial: boolean;
+};
+
+export type TradeCategoryStat = {
+  categoryId: string;
+  category: string;
+  order: number;
+  hs8Count: number;
+  hsRange: string;
+  importUsd: number;
+  exportUsd: number;
+  balanceUsd: number;
+  importYoyPct: number | null;
+  exportYoyPct: number | null;
+  importConcentration: ConcentrationMetrics;
+  exportConcentration: ConcentrationMetrics;
+  topImportPartners: string[];
+  topExportPartners: string[];
+};
+
+export type TradePartnerStat = {
+  partnerCode: string;
+  partnerName: string;
+  importUsd: number;
+  exportUsd: number;
+  balanceUsd: number;
+  importSharePct: number | null;
+  exportSharePct: number | null;
+  topCategory: string;
+};
+
+export type TradeRegimeStat = {
+  regimeCode: string;
+  regimeName: string;
+  importUsd: number;
+  exportUsd: number;
+  importSharePct: number | null;
+  exportSharePct: number | null;
+};
+
+export type TradeRegionStat = {
+  regionCode: string;
+  regionName: string;
+  importUsd: number;
+  exportUsd: number;
+  importSharePct: number | null;
+  exportSharePct: number | null;
+};
+
+export type TradeHsItemStat = {
+  hs8: string;
+  hs6: string;
+  itemName: string;
+  category: string;
+  importUsd: number;
+  exportUsd: number;
+  balanceUsd: number;
+  importQty1: TradeQuantityStat;
+  importQty2: TradeQuantityStat;
+  exportQty1: TradeQuantityStat;
+  exportQty2: TradeQuantityStat;
+  importConcentration: ConcentrationMetrics;
+  exportConcentration: ConcentrationMetrics;
+  topImportPartners: string[];
+  topExportPartners: string[];
+};
+
+export type TradeOverviewEmpty = {
+  status: "empty";
+  period: null;
+  source: "china_customs";
+  dictVersion: string;
+  releaseId: null;
+  availablePeriods: string[];
+  coverage: null;
+  sourceBatches: [];
+  totals: null;
+  concentration: null;
+  trend: [];
+  categories: [];
+  partners: [];
+  regimes: [];
+  regions: [];
+  hsItems: [];
+};
+
+export type TradeOverviewPublished = {
+  status: "published";
+  period: string;
+  source: "china_customs";
+  dictVersion: string;
+  releaseId: string;
+  availablePeriods: string[];
+  coverage: {
+    months: string[];
+    expectedMonths: number;
+    coveredMonths: number;
+    applicableHs8Count: number;
+    coveredHs8Count: number;
+    notApplicableHs8Count: number;
+  };
+  sourceBatches: TradeSourceBatchRef[];
+  totals: TradeTotals;
+  concentration: {
+    import: ConcentrationMetrics;
+    export: ConcentrationMetrics;
+  };
+  trend: TradeTrendPoint[];
+  categories: TradeCategoryStat[];
+  partners: TradePartnerStat[];
+  regimes: TradeRegimeStat[];
+  regions: TradeRegionStat[];
+  hsItems: TradeHsItemStat[];
+};
+
+export type TradeOverviewResponse = TradeOverviewEmpty | TradeOverviewPublished;
