@@ -40,6 +40,7 @@ const GEO_OPTIONS: readonly { value: string; label: string }[] = [
 export default function ObservationsPage() {
   const url = useUrlState();
   const applied: Filters = Object.fromEntries(FIELDS.map((k) => [k, url.get(k)])) as Filters;
+  const exactPeriod = url.get("period").trim();
   const keywordQ = url.get("q").trim();
   const appliedKey = JSON.stringify(applied);
   const page = Math.max(0, Number.parseInt(url.get("page") || "1", 10) - 1 || 0);
@@ -50,9 +51,10 @@ export default function ObservationsPage() {
     const f = JSON.parse(appliedKey) as Filters;
     const q: ObservationQuery = { limit: PAGE_SIZE, offset: page * PAGE_SIZE };
     for (const k of FIELDS) if (f[k]) q[k] = f[k];
+    if (exactPeriod) q.period = exactPeriod;
     if (keywordQ) q.q = keywordQ;
     return q;
-  }, [appliedKey, keywordQ, page]);
+  }, [appliedKey, exactPeriod, keywordQ, page]);
 
   const result = useObservations(query);
   const indicators = useIndicators();
@@ -62,16 +64,16 @@ export default function ObservationsPage() {
   const [showMore, setShowMore] = useState(moreActive > 0);
 
   const names = useMemo(() => new Map((indicators.data ?? []).map((i) => [i.id, i.name])), [indicators.data]);
-  const anyFilter = FIELDS.some((k) => applied[k]) || Boolean(keywordQ);
+  const anyFilter = FIELDS.some((k) => applied[k]) || Boolean(exactPeriod) || Boolean(keywordQ);
   const items = result.data?.items ?? [];
   const total = result.data?.total ?? 0;
 
   function submit(e: FormEvent) {
     e.preventDefault();
-    url.set({ ...Object.fromEntries(FIELDS.map((k) => [k, draft[k].trim() || null])), page: null }, { push: true });
+    url.set({ ...Object.fromEntries(FIELDS.map((k) => [k, draft[k].trim() || null])), period: null, page: null }, { push: true });
   }
   function clear() {
-    url.set({ ...Object.fromEntries(FIELDS.map((k) => [k, null])), q: null, page: null }, { push: true });
+    url.set({ ...Object.fromEntries(FIELDS.map((k) => [k, null])), period: null, q: null, page: null }, { push: true });
   }
 
   async function exportCsv() {

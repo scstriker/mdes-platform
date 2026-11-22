@@ -1,11 +1,14 @@
 import { useCallback, useMemo, useState } from "react";
-import { useSearchParams } from "react-router";
+import { Link, useSearchParams } from "react-router";
 import { IconArrowRight } from "@tabler/icons-react";
 import { matchesQuery } from "@mdes/shared";
 import bannerTrade from "@/assets/visuals/banner-trade.webp";
-import { DataTable, formatNumber, Tag, TextLink, type DataTableColumn } from "@/components/itei";
+import { DataTable, formatNumber, Notice, Tag, TextLink, type DataTableColumn } from "@/components/itei";
 import { PageVisualBanner } from "@/components/layout/page-visual-banner";
+import { QueryError } from "@/components/layout/query-error";
 import { StatistaFigure, type StatistaTableColumn } from "@/components/layout/statista-figure";
+import { Button } from "@/components/ui/button";
+import { ApiError, useTradeOverview, useTradePeriods } from "@/lib/api";
 import type { ChartOption } from "@/lib/charts/echarts";
 import {
   baseOption,
@@ -27,6 +30,7 @@ import {
   type TradeCategoryRow,
   type TradePartnerRow,
 } from "./data";
+import { LiveTradeView } from "./live-trade-view";
 
 type LeftFigureView = "trend" | "partners";
 type TradeTableTab = "categories" | "hs" | "partners";
@@ -88,6 +92,92 @@ function parseTradeTab(raw: string | null): TradeTableTab {
 }
 
 export default function TradePage() {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const requestedPeriod = searchParams.get("period")?.trim() ?? "";
+  const tradeOverview = useTradeOverview(requestedPeriod || undefined);
+  const tradePeriods = useTradePeriods(undefined, Boolean(requestedPeriod));
+
+  if (tradeOverview.isError) {
+    const err = tradeOverview.error;
+    const isUnpublishedPeriod =
+      Boolean(requestedPeriod) && err instanceof ApiError && err.status === 404;
+
+    if (isUnpublishedPeriod) {
+      const avail = tradePeriods.data?.availablePeriods ?? [];
+      return (
+        <section className="bg-surface">
+          <div className="mx-auto grid w-full max-w-content gap-6 px-4 py-8 md:px-8 md:py-10">
+            <PageVisualBanner
+              title="医疗器械进出口贸易与供应链集中度"
+              summary="按统计期间读取中国海关月度美元已发布快照，未齐备的年度或季度不提前混算发布。"
+              image={bannerTrade}
+              actions={
+                <TextLink to="/system/38" className="inline-flex items-center gap-1 body">
+                  查看海关贸易统计口径 →
+                </TextLink>
+              }
+            />
+            <div data-testid="trade-unpublished-period" className="grid gap-4">
+              <Notice
+                tone="warning"
+                title={`所选统计期间「${requestedPeriod}」尚未齐备发布`}
+              >
+                该期间所需的自然月或双流向四分组原件尚未全部对账发布。请选择下方已发布的实际可用期间，或前往 38 号导入向导补齐缺失月份。
+              </Notice>
+              {avail.length > 0 ? (
+                <div className="grid gap-2 border border-border bg-surface-sunken p-4">
+                  <p className="label text-ink">当前实际可用已发布期间（共 {avail.length} 项）</p>
+                  <div className="flex flex-wrap gap-2">
+                    {avail.map((p) => (
+                      <Button
+                        key={p}
+                        size="sm"
+                        variant="secondary"
+                        onClick={() => {
+                          const next = new URLSearchParams(searchParams);
+                          next.set("period", p);
+                          setSearchParams(next);
+                        }}
+                      >
+                        查看 {p}
+                      </Button>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <p className="body-sm text-ink-muted">
+                  当前库中尚无任何已发布期间，请先前往{" "}
+                  <TextLink to="/admin/import?seq=38">38 号导入向导</TextLink> 导入海关月度原件。
+                </p>
+              )}
+            </div>
+          </div>
+        </section>
+      );
+    }
+
+    return (
+      <section className="bg-surface">
+        <div className="mx-auto grid w-full max-w-content gap-6 px-4 py-8 md:px-8 md:py-10">
+          <PageVisualBanner
+            title="医疗器械进出口贸易与供应链集中度"
+            summary="基于中国海关 8 位 HS 商品编码统计，跟踪医疗器械进出口演变与关键装备原产国集中度。"
+            image={bannerTrade}
+          />
+          <QueryError error={err} onRetry={() => tradeOverview.refetch()} />
+        </div>
+      </section>
+    );
+  }
+
+  if (tradeOverview.data?.status === "published") {
+    return <LiveTradeView snap={tradeOverview.data} />;
+  }
+
+  return <BenchmarkTradeFallback showEmptyBanner={tradeOverview.data?.status === "empty"} />;
+}
+
+function BenchmarkTradeFallback({ showEmptyBanner }: { showEmptyBanner?: boolean }) {
   const [searchParams, setSearchParams] = useSearchParams();
   const queryText = searchParams.get("q") ?? "";
   const normalizedQ = queryText.trim().toLowerCase();
@@ -260,6 +350,22 @@ export default function TradePage() {
               </TextLink>
             }
           />
+
+          {showEmptyBanner && (
+            <div data-testid="trade-empty-status">
+              <Notice
+                tone="info"
+                title="当前尚无已发布的海关月度统计快照（status: empty）"
+                action={
+                  <Button size="sm" variant="secondary" asChild>
+                    <Link to="/admin/import?seq=38">前往 38 号导入向导</Link>
+                  </Button>
+                }
+              >
+                下方展示行业历史基准参考视图；在 38 号向导完成任一自然月双流向四分组原件对账发布后，本页将自动切换至正式发布快照。
+              </Notice>
+            </div>
+          )}
 
           <div
             aria-label="进出口贸易核心指标"

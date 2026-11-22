@@ -11,9 +11,20 @@ import type {
   ObservationQuery,
   Phase,
   Stats,
+  TradeBatchListItem,
+  TradeImportManifest,
+  TradeImportResponse,
+  TradeOverviewResponse,
 } from "./types";
 
 type Opts = { signal?: AbortSignal };
+
+export type TradePeriodsMeta = {
+  dictVersion: string;
+  releaseId: string | null;
+  publishedMonths: string[];
+  availablePeriods: string[];
+};
 
 export const api = {
   health: (o?: Opts) => request<Health>("/api/health", o),
@@ -31,5 +42,34 @@ export const api = {
     const fd = new FormData();
     fd.append("file", file);
     return request<ImportResult>("/api/import/csv", { ...o, method: "POST", body: fd });
+  },
+  tradeOverview: (params: { period?: string; dictVersion?: string } = {}, o?: Opts) =>
+    request<TradeOverviewResponse>("/api/trade/overview", { ...o, query: params }),
+  tradePeriods: (params: { dictVersion?: string } = {}, o?: Opts) =>
+    request<TradePeriodsMeta>("/api/trade/periods", { ...o, query: params }),
+  tradeBatches: (
+    params: { dictVersion?: string; month?: string; flow?: string; grouping?: string } = {},
+    o?: Opts,
+  ) => request<{ items: TradeBatchListItem[] }>("/api/trade/batches", { ...o, query: params }),
+  importTrade: (
+    payload: {
+      manifest: TradeImportManifest | string;
+      file?: File | null;
+      emptyEvidences?: File[];
+    },
+    o?: Opts,
+  ) => {
+    const fd = new FormData();
+    fd.append(
+      "manifest",
+      typeof payload.manifest === "string" ? payload.manifest : JSON.stringify(payload.manifest),
+    );
+    if (payload.file) {
+      fd.append("file", payload.file);
+    }
+    for (const ev of payload.emptyEvidences ?? []) {
+      fd.append("emptyEvidence", ev);
+    }
+    return request<TradeImportResponse>("/api/trade/import", { ...o, method: "POST", body: fd });
   },
 };

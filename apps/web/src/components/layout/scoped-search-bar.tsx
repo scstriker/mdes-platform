@@ -4,7 +4,7 @@ import { IconArrowRight, IconChevronDown, IconSearch, IconSparkles, IconX } from
 import { Tag } from "@/components/itei";
 import { Button } from "@/components/ui/button";
 import { floatingMotionClass, floatingPanelClass } from "@/components/ui/overlay";
-import { useBatches, useGlobalSearch, useIndicators } from "@/lib/api";
+import { useBatches, useGlobalSearch, useIndicators, useTradeOverview } from "@/lib/api";
 import {
   ADMIN_SCOPES,
   buildPublicSearchUrl,
@@ -90,6 +90,7 @@ export function ScopedSearchBar({ mode = "public", className }: ScopedSearchBarP
   const adminIndicators = useIndicators({}, adminQueryEnabled);
   const adminBatches = useBatches(adminQueryEnabled);
   const livePublicSearch = useGlobalSearch(trimmed, 6, mode === "public" && open && trimmed.length > 0);
+  const liveTrade = useTradeOverview(undefined, undefined, mode === "public" && open && trimmed.length > 0);
 
   useEffect(() => {
     setScope(defaultScope);
@@ -145,7 +146,7 @@ export function ScopedSearchBar({ mode = "public", className }: ScopedSearchBarP
     }
 
     if (mode === "public") {
-      const pub = indexMod.queryPublicSuggestions(trimmed, scope as PublicSearchScope);
+      const pub = indexMod.queryPublicSuggestions(trimmed, scope as PublicSearchScope, liveTrade.data);
       const liveObsTotal = livePublicSearch.data?.observations.total ?? 0;
       const liveMatches = (livePublicSearch.data?.observations.items ?? [])
         .slice(0, 3)
@@ -178,6 +179,7 @@ export function ScopedSearchBar({ mode = "public", className }: ScopedSearchBarP
     mode,
     scope,
     livePublicSearch.data,
+    liveTrade.data,
     adminIndicators.data,
     adminBatches.data,
   ]);

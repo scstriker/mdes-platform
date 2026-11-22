@@ -2,7 +2,9 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router";
 import { IconArrowLeft, IconFileImport, IconTable, IconX } from "@tabler/icons-react";
 import {
+  decodeCustomsBytes,
   DEFAULT_MAX_ROWS,
+  looksLikeCustomsCsvHeader,
   matchesQuery,
   parseObservationCsv,
   type CsvParseResult,
@@ -26,6 +28,7 @@ import { describeError, errorMessage, rowErrorMessage, useImportCsv, useIndicato
 import { showDemoChrome } from "@/lib/demo-chrome";
 import { getMapper, MAPPERS, type IndicatorMapper } from "@/lib/import-mappers";
 import { cn } from "@/lib/utils";
+import { CustomsTradeImportFlow } from "./customs-trade-import";
 
 const TABLE_STEPS = ["选择指标", "上传文件", "校验", "写入", "结果"];
 const FILE_STEPS = ["选择指标", "上传文件", "校验", "写入", "结果"];
@@ -44,11 +47,16 @@ export default function AdminImportPage() {
   const seq = params.get("seq") ?? "";
   const rawQuery = params.get("q")?.trim() ?? "";
   const mapper = seq ? getMapper(seq) : undefined;
+  const initialTradeMode = params.get("mode") === "customs" ? "customs" : "generic";
+  const [tradeMode, setTradeMode] = useState<"generic" | "customs">(initialTradeMode);
+  const [autoDetectedFile, setAutoDetectedFile] = useState<File | null>(null);
+  const [autoDetectedBytes, setAutoDetectedBytes] = useState<Uint8Array | null>(null);
   const [step, setStep] = useState(mapper ? 1 : 0);
 
   useEffect(() => {
     setStep(mapper ? 1 : 0);
-  }, [mapper]);
+    if (params.get("mode") === "customs") setTradeMode("customs");
+  }, [mapper, params]);
 
   function selectMapper(m: IndicatorMapper) {
     setParams({ seq: m.seq });
@@ -90,6 +98,73 @@ export default function AdminImportPage() {
         <SelectIndicator query={rawQuery} onClearQuery={clearSearch} onSelect={selectMapper} />
       ) : mapper.channel === "file" ? (
         <FileImportFlow mapper={mapper} step={step} setStep={setStep} onReset={reset} />
+      ) : mapper.seq === "38" ? (
+        <div className="grid gap-4">
+          <div
+            role="group"
+            aria-label="38号贸易导入契约切换"
+            className="flex flex-wrap items-center gap-2"
+          >
+            <button
+              type="button"
+              aria-pressed={tradeMode === "customs"}
+              onClick={() => {
+                setTradeMode("customs");
+                setStep(1);
+              }}
+              className={cn(
+                "cursor-pointer rounded-sm border px-3 py-1.5 body-sm font-semibold transition-colors focus-ring",
+                tradeMode === "customs"
+                  ? "border-brand-navy bg-brand-navy text-on-brand"
+                  : "border-border-strong bg-surface text-ink hover:border-brand-navy",
+              )}
+            >
+              海关月度原件与清单（贸易契约）
+            </button>
+            <button
+              type="button"
+              aria-pressed={tradeMode === "generic"}
+              onClick={() => {
+                setTradeMode("generic");
+                setAutoDetectedFile(null);
+                setAutoDetectedBytes(null);
+                setStep(1);
+              }}
+              className={cn(
+                "cursor-pointer rounded-sm border px-3 py-1.5 body-sm font-semibold transition-colors focus-ring",
+                tradeMode === "generic"
+                  ? "border-brand-navy bg-brand-navy text-on-brand"
+                  : "border-border-strong bg-surface text-ink hover:border-brand-navy",
+              )}
+            >
+              通用观测值 CSV（兼容模板）
+            </button>
+          </div>
+
+          {tradeMode === "customs" ? (
+            <CustomsTradeImportFlow
+              mapper={mapper}
+              step={step}
+              setStep={setStep}
+              onReset={reset}
+              initialFile={autoDetectedFile}
+              initialBytes={autoDetectedBytes}
+            />
+          ) : (
+            <TableImportFlow
+              mapper={mapper}
+              step={step}
+              setStep={setStep}
+              onReset={reset}
+              onCustomsFileDetected={(f, bytes) => {
+                setAutoDetectedFile(f);
+                setAutoDetectedBytes(bytes);
+                setTradeMode("customs");
+                setStep(2);
+              }}
+            />
+          )}
+        </div>
       ) : (
         <TableImportFlow mapper={mapper} step={step} setStep={setStep} onReset={reset} />
       )}
@@ -219,11 +294,13 @@ function TableImportFlow({
   step,
   setStep,
   onReset,
+  onCustomsFileDetected,
 }: {
   mapper: IndicatorMapper;
   step: number;
   setStep: (n: number) => void;
   onReset: () => void;
+  onCustomsFileDetected?: (file: File, bytes: Uint8Array) => void;
 }) {
   const [file, setFile] = useState<File | null>(null);
   const [text, setText] = useState<string | null>(null);
@@ -255,6 +332,17 @@ function TableImportFlow({
     setMapping({});
     if (!f) return;
     try {
+      if (onCustomsFileDetected) {
+        const rawBuf = new Uint8Array(await f.arrayBuffer());
+        const dec = decodeCustomsBytes(rawBuf);
+        if (dec.ok) {
+          const firstLine = dec.text.split(/\r?\n/).find((l) => l.trim()) ?? "";
+          if (looksLikeCustomsCsvHeader(firstLine)) {
+            onCustomsFileDetected(f, rawBuf);
+            return;
+          }
+        }
+      }
       const t = await f.text();
       setText(t);
       setMapping(autoMap(mapper, t.split(/\r?\n/).find((l) => l.trim())?.split(",") ?? []));

@@ -8,6 +8,7 @@ import {
   matchesQuery,
   observationMatchesQuery,
   parseObservationCsv,
+  parseTradePeriod,
   tokenizeQuery,
   type ClusterStats,
   type ErrorCode,
@@ -20,6 +21,7 @@ import {
   type Observation,
   type Phase,
   type Stats,
+  type TradeOverviewEmpty,
 } from "@mdes/shared";
 import seed from "../../../../data/indicators_seed.json";
 import sampleCsv from "../../../../data/samples/trd_sample.csv?raw";
@@ -216,6 +218,51 @@ async function handle(method: string, url: URL, body: BodyInit | null | undefine
 
   if (method === "GET" && path === "/api/import/batches") {
     return json({ items: [...batches].reverse().slice(0, 50) });
+  }
+
+  if (method === "GET" && path === "/api/trade/overview") {
+    const reqPeriod = text(q, "period");
+    const dictVersion = text(q, "dictVersion") ?? "202601";
+    if (reqPeriod) {
+      if (!parseTradePeriod(reqPeriod)) {
+        return fail(400, "TRADE_PERIOD_INVALID", { period: reqPeriod });
+      }
+      return fail(404, "NOT_FOUND", { resource: "trade_period", id: reqPeriod });
+    }
+    const empty: TradeOverviewEmpty = {
+      status: "empty",
+      period: null,
+      source: "china_customs",
+      dictVersion,
+      releaseId: null,
+      units: { amount: "USD", displayAmount: "100M_USD", share: "PCT", cr: "PCT", hhi: "0_10000" },
+      availablePeriods: [],
+      coverage: null,
+      sourceBatches: [],
+      totals: null,
+      groupingTotals: null,
+      concentration: null,
+      trend: [],
+      categories: [],
+      partners: [],
+      regimes: [],
+      regions: [],
+      hsItems: [],
+    };
+    return json(empty);
+  }
+
+  if (method === "GET" && path === "/api/trade/periods") {
+    return json({
+      dictVersion: text(q, "dictVersion") ?? "202601",
+      releaseId: null,
+      publishedMonths: [],
+      availablePeriods: [],
+    });
+  }
+
+  if (method === "GET" && path === "/api/trade/batches") {
+    return json({ items: [] });
   }
 
   if (method === "GET" && path === "/api/stats") {

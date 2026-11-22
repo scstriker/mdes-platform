@@ -1,6 +1,6 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "./endpoints";
-import type { ObservationQuery, Phase } from "./types";
+import type { ObservationQuery, Phase, TradeImportManifest } from "./types";
 
 /** 查询键集中管理，导入成功后按前缀失效 */
 export const queryKeys = {
@@ -12,6 +12,10 @@ export const queryKeys = {
   observations: (params: ObservationQuery) => ["observations", params] as const,
   search: (q: string, limit = 12) => ["search", q, limit] as const,
   batches: ["batches"] as const,
+  tradeOverview: (period = "", dictVersion = "") => ["trade", "overview", period, dictVersion] as const,
+  tradePeriods: (dictVersion = "") => ["trade", "periods", dictVersion] as const,
+  tradeBatches: (params: { dictVersion?: string; month?: string; flow?: string; grouping?: string } = {}) =>
+    ["trade", "batches", params] as const,
 };
 
 export const useHealth = () => useQuery({ queryKey: queryKeys.health, queryFn: ({ signal }) => api.health({ signal }) });
@@ -84,12 +88,53 @@ export const useGlobalSearch = (q: string, limit = 12, enabled = true) => {
   });
 };
 
+export const useTradeOverview = (period?: string, dictVersion?: string, enabled = true) =>
+  useQuery({
+    queryKey: queryKeys.tradeOverview(period ?? "", dictVersion ?? ""),
+    queryFn: ({ signal }) => api.tradeOverview({ period: period || undefined, dictVersion: dictVersion || undefined }, { signal }),
+    enabled,
+    retry: false,
+  });
+
+export const useTradePeriods = (dictVersion?: string, enabled = true) =>
+  useQuery({
+    queryKey: queryKeys.tradePeriods(dictVersion ?? ""),
+    queryFn: ({ signal }) => api.tradePeriods({ dictVersion: dictVersion || undefined }, { signal }),
+    enabled,
+  });
+
+export const useTradeBatches = (
+  params: { dictVersion?: string; month?: string; flow?: string; grouping?: string } = {},
+  enabled = true,
+) =>
+  useQuery({
+    queryKey: queryKeys.tradeBatches(params),
+    queryFn: ({ signal }) => api.tradeBatches(params, { signal }).then((r) => r.items),
+    enabled,
+  });
+
 export function useImportCsv() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (file: File) => api.importCsv(file),
     onSuccess: () => {
       for (const key of [["observations"], ["indicators"], ["indicator"], ["stats"], ["batches"], ["search"]]) {
+        qc.invalidateQueries({ queryKey: key });
+      }
+    },
+  });
+}
+
+export function useImportTrade() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (payload: {
+      manifest: TradeImportManifest | string;
+      file?: File | null;
+      emptyEvidences?: File[];
+    }) => api.importTrade(payload),
+    onSuccess: () => {
+      for (const key of [["trade"], ["observations"], ["indicators"], ["indicator"], ["stats"], ["batches"], ["search"]]) {
         qc.invalidateQueries({ queryKey: key });
       }
     },

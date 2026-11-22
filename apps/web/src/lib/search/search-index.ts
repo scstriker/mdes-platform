@@ -6,11 +6,14 @@ import {
   type ImportBatch,
   type IndicatorListItem,
   type ObservationSearchHit,
+  type TradeOverviewPublished,
+  type TradeOverviewResponse,
 } from "@mdes/shared";
 import { DATA_FORM_LABEL, SYSTEM_INDICATORS } from "@/content/system-v3";
 import { formatDateTime } from "@/lib/datetime";
 import { MAPPERS } from "@/lib/import-mappers";
 import { IMPORT_STATUS } from "@/lib/labels";
+import { formatBalanceYi, formatSharePct, formatUsdToYi, formatYoyPct } from "@/lib/trade-format";
 import { PRODUCT_EXPLORER_ROWS } from "@/pages/products/data";
 import {
   ENTERPRISE_POOL_ROWS,
@@ -434,7 +437,98 @@ export const ADMIN_SEARCH_ITEMS: readonly SearchSuggestionItem[] = [
   ),
 ];
 
-export function queryPublicSuggestions(rawQuery: string, activeScope: PublicSearchScope) {
+export function buildLiveTradeSearchItems(snap: TradeOverviewPublished): SearchSuggestionItem[] {
+  const periodParam = encodeURIComponent(snap.period);
+  const catItems: SearchSuggestionItem[] = snap.categories.map((c) => {
+    const id = `trd-live-cat-${c.categoryId}`;
+    const cr3Text = formatSharePct(c.importConcentration.cr3);
+    return {
+      id,
+      scope: "/trade",
+      scopeLabel: "进出口贸易",
+      badge: `海关大类 · ${snap.period}`,
+      title: c.category,
+      subtitle: `出口 ${formatUsdToYi(c.exportUsd, 4)} 亿美元 / 进口 ${formatUsdToYi(c.importUsd, 4)} 亿美元（进口 CR3 ${cr3Text}）`,
+      href: buildPublicSearchUrl({ q: c.category, scope: "/trade", item: id }),
+      subpageHref: `/trade?period=${periodParam}&tab=categories&q=${encodeURIComponent(c.category)}#trade-directory-heading`,
+      fields: [
+        { label: "统计期间与字典", value: `${snap.period} · 字典 ${snap.dictVersion}` },
+        { label: "发布版本 releaseId", value: snap.releaseId },
+        { label: "包含 HS8 税号数", value: `${c.hs8Count} 项（${c.hsRange}）` },
+        { label: "出口额", value: `${formatUsdToYi(c.exportUsd, 4)} 亿美元（${c.exportUsd.toLocaleString("zh-CN")} 美元，同比 ${formatYoyPct(c.exportYoyPct)}）` },
+        { label: "进口额", value: `${formatUsdToYi(c.importUsd, 4)} 亿美元（${c.importUsd.toLocaleString("zh-CN")} 美元，同比 ${formatYoyPct(c.importYoyPct)}）` },
+        { label: "贸易顺逆差", value: `${formatBalanceYi(c.balanceUsd, 4)} 亿美元（${c.balanceUsd.toLocaleString("zh-CN")} 美元）` },
+        { label: "进口来源集中度 CR3", value: cr3Text },
+        { label: "前三位进口来源", value: c.topImportPartners.join(" / ") || "暂无数据" },
+      ],
+      keywords: `${c.category} ${c.hsRange} ${c.topImportPartners.join(" ")} ${snap.period} ${snap.releaseId}`.toLowerCase(),
+    };
+  });
+
+  const hsItems: SearchSuggestionItem[] = snap.hsItems.map((h) => {
+    const id = `trd-live-hs-${h.hs8}`;
+    const cr3Text = formatSharePct(h.importConcentration.cr3);
+    return {
+      id,
+      scope: "/trade",
+      scopeLabel: "进出口贸易",
+      badge: `HS8 · ${snap.period}`,
+      title: `${h.hs8} ${h.itemName}`,
+      subtitle: `${h.category} · 进口 ${formatUsdToYi(h.importUsd, 4)} 亿美元 / 出口 ${formatUsdToYi(h.exportUsd, 4)} 亿美元`,
+      href: buildPublicSearchUrl({ q: h.hs8, scope: "/trade", item: id }),
+      subpageHref: `/trade?period=${periodParam}&tab=hs&q=${encodeURIComponent(h.hs8)}#trade-directory-heading`,
+      fields: [
+        { label: "8 位海关 HS 税号", value: `${h.hs8}（HS6 ${h.hs6}）` },
+        { label: "归属一级类别", value: h.category },
+        { label: "统计期间与字典", value: `${snap.period} · 字典 ${snap.dictVersion}` },
+        { label: "发布版本 releaseId", value: snap.releaseId },
+        { label: "进口规模", value: `${formatUsdToYi(h.importUsd, 4)} 亿美元（${h.importUsd.toLocaleString("zh-CN")} 美元）` },
+        { label: "出口规模", value: `${formatUsdToYi(h.exportUsd, 4)} 亿美元（${h.exportUsd.toLocaleString("zh-CN")} 美元）` },
+        { label: "进口来源集中度 CR3", value: cr3Text },
+        { label: "前三位进口来源", value: h.topImportPartners.join(" / ") || "暂无数据" },
+      ],
+      keywords: `${h.hs8} ${h.hs6} ${h.itemName} ${h.category} ${h.topImportPartners.join(" ")} ${snap.period} ${snap.releaseId}`.toLowerCase(),
+    };
+  });
+
+  const partnerItems: SearchSuggestionItem[] = snap.partners.map((p) => {
+    const id = `trd-live-partner-${p.partnerCode}`;
+    return {
+      id,
+      scope: "/trade",
+      scopeLabel: "进出口贸易",
+      badge: `贸易伙伴 · ${snap.period}`,
+      title: `${p.partnerName}（进口占 ${formatSharePct(p.importSharePct)} · 出口占 ${formatSharePct(p.exportSharePct)}）`,
+      subtitle: `海关原码 ${p.partnerCode} · 核心类别：${p.topCategory || "—"}`,
+      href: buildPublicSearchUrl({ q: p.partnerName, scope: "/trade", item: id }),
+      subpageHref: `/trade?period=${periodParam}&tab=partners&q=${encodeURIComponent(p.partnerName)}#trade-directory-heading`,
+      fields: [
+        { label: "海关伙伴编码与名称", value: `${p.partnerName}（${p.partnerCode}）` },
+        { label: "统计期间与版本", value: `${snap.period} · ${snap.releaseId}` },
+        { label: "我国自该伙伴进口", value: `${formatUsdToYi(p.importUsd, 4)} 亿美元（${p.importUsd.toLocaleString("zh-CN")} 美元，占 ${formatSharePct(p.importSharePct)}）` },
+        { label: "我国对该伙伴出口", value: `${formatUsdToYi(p.exportUsd, 4)} 亿美元（${p.exportUsd.toLocaleString("zh-CN")} 美元，占 ${formatSharePct(p.exportSharePct)}）` },
+        { label: "双边核心类别", value: p.topCategory || "—" },
+      ],
+      keywords: `${p.partnerName} ${p.partnerCode} ${p.topCategory} ${snap.period} ${snap.releaseId}`.toLowerCase(),
+    };
+  });
+
+  return [...catItems, ...hsItems, ...partnerItems];
+}
+
+function resolvePublicPool(liveTradeOverview?: TradeOverviewResponse | null): readonly SearchSuggestionItem[] {
+  if (liveTradeOverview && liveTradeOverview.status === "published") {
+    const nonTrade = PUBLIC_SEARCH_ITEMS.filter((i) => i.scope !== "/trade");
+    return [...nonTrade, ...buildLiveTradeSearchItems(liveTradeOverview)];
+  }
+  return PUBLIC_SEARCH_ITEMS;
+}
+
+export function queryPublicSuggestions(
+  rawQuery: string,
+  activeScope: PublicSearchScope,
+  liveTradeOverview?: TradeOverviewResponse | null,
+) {
   const tokens = tokenizeQuery(rawQuery);
   if (tokens.length === 0) {
     return {
@@ -443,7 +537,8 @@ export function queryPublicSuggestions(rawQuery: string, activeScope: PublicSear
       globalTotal: 0,
     };
   }
-  const allMatches = PUBLIC_SEARCH_ITEMS.filter((item) => matchesQuery(item.keywords, tokens));
+  const pool = resolvePublicPool(liveTradeOverview);
+  const allMatches = pool.filter((item) => matchesQuery(item.keywords, tokens));
   const scopedPool =
     activeScope === "/search"
       ? allMatches.filter((i) => i.scope !== "/system")
@@ -570,12 +665,16 @@ export function queryAdminSuggestions(
   };
 }
 
-export function queryAllPublicGrouped(rawQuery: string) {
+export function queryAllPublicGrouped(
+  rawQuery: string,
+  liveTradeOverview?: TradeOverviewResponse | null,
+) {
   const tokens = tokenizeQuery(rawQuery);
+  const pool = resolvePublicPool(liveTradeOverview);
   const matched =
     tokens.length === 0
-      ? PUBLIC_SEARCH_ITEMS
-      : PUBLIC_SEARCH_ITEMS.filter((item) => matchesQuery(item.keywords, tokens));
+      ? pool
+      : pool.filter((item) => matchesQuery(item.keywords, tokens));
 
   const allGroups: {
     scope: Exclude<PublicSearchScope, "/search">;
