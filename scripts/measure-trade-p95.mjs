@@ -480,11 +480,11 @@ async function inspectSqlPlansAndRowsRead(harness) {
       id: "trade_release_latest",
       endpoint: "GET /api/trade/periods",
       table: "trade_release",
-      expectedIndex: "trade_release_dict_created_idx",
+      expectedIndex: "trade_release_dict_seq_uq",
       sql: `SELECT release_id, published_months_json, available_periods_json, created_at
             FROM trade_release
             WHERE dict_version = ?1
-            ORDER BY created_at DESC
+            ORDER BY version_seq DESC
             LIMIT 1`,
       params: [DICT_VERSION],
     },
@@ -776,9 +776,9 @@ async function insertHistoricalYear2023(harness, dict, template2024OverviewPaylo
     }
   }
 
-  // 写入 2023 历史 release（created_at 早于 2024，不影响当前最新 releaseId 指针）与 29 个历史快照
+  // 写入 2023 历史 release（version_seq = 0 早于 2024，不影响当前最新 releaseId 指针）与 29 个历史快照
   stmts.push(
-    `INSERT INTO trade_release (release_id, dict_version, prev_release_id, published_months_json, available_periods_json, created_at) VALUES (${sqlLit(histReleaseId)}, ${sqlLit(DICT_VERSION)}, NULL, ${sqlLit(JSON.stringify(months2023))}, ${sqlLit(JSON.stringify(periods2023))}, ${sqlLit(histCreatedAt)})`,
+    `INSERT INTO trade_release (release_id, dict_version, prev_release_id, version_seq, published_months_json, available_periods_json, created_at) VALUES (${sqlLit(histReleaseId)}, ${sqlLit(DICT_VERSION)}, NULL, 0, ${sqlLit(JSON.stringify(months2023))}, ${sqlLit(JSON.stringify(periods2023))}, ${sqlLit(histCreatedAt)})`,
   );
 
   const sampleBatchIdRes = await harness.queryWithMeta(

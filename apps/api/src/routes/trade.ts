@@ -61,10 +61,12 @@ export function tradeRoutes(app: Hono<AppEnv>) {
   app.post("/api/trade/import", async (c) => {
     const parsed = await readTradeMultipart(c);
     const failHeader = c.env.ENABLE_TEST_HOOKS === "1" && c.req.header("x-test-fail-before-publish") === "1";
+    const preemptHeader = c.env.ENABLE_TEST_HOOKS === "1" && c.req.header("x-test-preempt-release-once") === "1";
     const result = await importTradeBatch(c.get("db"), {
       ...parsed,
       maxRows: c.get("importMaxRows"),
       failBeforePublishCommit: failHeader,
+      preemptReleaseOnce: preemptHeader,
     });
     return c.json(result);
   });

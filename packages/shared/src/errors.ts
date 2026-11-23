@@ -7,7 +7,13 @@
  */
 
 /** 文件级错误：不建批次，返回 400 */
-export const FILE_ERROR_CODES = ["FILE_REQUIRED", "EMPTY_CSV", "MISSING_HEADER", "ROW_LIMIT_EXCEEDED"] as const;
+export const FILE_ERROR_CODES = [
+  "FILE_REQUIRED",
+  "EMPTY_CSV",
+  "MISSING_HEADER",
+  "ROW_LIMIT_EXCEEDED",
+  "INVALID_WRITE_MODE",
+] as const;
 
 /** 行级错误：该行跳过，其余行照常导入 */
 export const ROW_ERROR_CODES = [
@@ -48,6 +54,7 @@ export type ErrorParamsMap = {
   EMPTY_CSV: Record<string, never>;
   MISSING_HEADER: { header: string };
   ROW_LIMIT_EXCEEDED: { max: number; actual: number };
+  INVALID_WRITE_MODE: { value: string };
   REQUIRED_FIELD_MISSING: { field: string };
   INVALID_VALUE_NUM: { value: string };
   VALUE_MISSING: Record<string, never>;
@@ -92,6 +99,8 @@ export function developerMessage(code: ErrorCode, params: ErrorParams = {}): str
       return `missing required header: ${params.header}`;
     case "ROW_LIMIT_EXCEEDED":
       return `row limit exceeded: ${params.actual} > ${params.max}`;
+    case "INVALID_WRITE_MODE":
+      return `invalid write mode '${params.value ?? ""}': expected 'upsert' or 'append'`;
     case "REQUIRED_FIELD_MISSING":
       return `${params.field} is required`;
     case "INVALID_VALUE_NUM":

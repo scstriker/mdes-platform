@@ -58,7 +58,102 @@ export type ImportTradeBatchOptions = {
   maxRows: number;
   /** 测试钩子：在候选数据写入成功后、正式发布事务提交前抛出异常（验证 AC-014 发布中断与重试） */
   failBeforePublishCommit?: boolean;
+  /** 测试钩子：在首次发布提交前模拟另一 Worker 实例抢先写入同 version_seq，验证 CAS 冲突重读重算 */
+  preemptReleaseOnce?: boolean;
 };
+
+const ID_QUERY_CHUNK_SIZE = 200;
+const MAX_PUBLISH_CAS_RETRIES = 8;
+
+const dictPublishLocks = new Map<string, Promise<unknown>>();
+
+async function withDictPublishLock<T>(dictVersion: string, fn: () => Promise<T>): Promise<T> {
+  const prev = dictPublishLocks.get(dictVersion) ?? Promise.resolve();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const chained = prev.then(() => gate);
+  dictPublishLocks.set(dictVersion, chained);
+  await prev;
+  try {
+    return await fn();
+  } finally {
+    release();
+    if (dictPublishLocks.get(dictVersion) === chained) {
+      dictPublishLocks.delete(dictVersion);
+    }
+  }
+}
+
+function assignEmptyEvidencesToHs8(
+  emptyEvidences: TradeFileInput[],
+  evidenceSha256s: string[],
+  candidateEmptyList: string[],
+  allowSingleUmbrella: boolean,
+): {
+  evidenceCoverageList: Array<{ filename: string; sha256: string; byteLength: number; coveredHs8: string[] }>;
+  provenEmptySet: Set<string>;
+  emptyEvidenceShaByHs8: Map<string, string>;
+} {
+  const evidenceCoverageList: Array<{ filename: string; sha256: string; byteLength: number; coveredHs8: string[] }> = [];
+  const provenEmptySet = new Set<string>();
+  const emptyEvidenceShaByHs8 = new Map<string, string>();
+
+  if (emptyEvidences.length === 0 || candidateEmptyList.length === 0) {
+    return { evidenceCoverageList, provenEmptySet, emptyEvidenceShaByHs8 };
+  }
+
+  // 单张截图覆盖整批无记录税号（仅限无 CSV 或仅表头空 CSV 的整批空查询）
+  if (allowSingleUmbrella && emptyEvidences.length === 1) {
+    const sha = evidenceSha256s[0];
+    for (const c of candidateEmptyList) {
+      provenEmptySet.add(c);
+      emptyEvidenceShaByHs8.set(c, sha);
+    }
+    evidenceCoverageList.push({
+      filename: emptyEvidences[0].filename || "empty_evidence_1.png",
+      sha256: sha,
+      byteLength: emptyEvidences[0].bytes.byteLength,
+      coveredHs8: [...candidateEmptyList],
+    });
+    return { evidenceCoverageList, provenEmptySet, emptyEvidenceShaByHs8 };
+  }
+
+  const candidateSet = new Set(candidateEmptyList);
+  let nextUnassignedIdx = 0;
+
+  emptyEvidences.forEach((ev, idx) => {
+    const sha = evidenceSha256s[idx];
+    const namedMatches = (ev.filename.match(/\d{8}/g) ?? []).filter((c) => candidateSet.has(c));
+    let covered: string[] = [];
+    if (namedMatches.length > 0) {
+      covered = [...new Set(namedMatches)];
+    } else {
+      while (nextUnassignedIdx < candidateEmptyList.length && provenEmptySet.has(candidateEmptyList[nextUnassignedIdx])) {
+        nextUnassignedIdx += 1;
+      }
+      if (nextUnassignedIdx < candidateEmptyList.length) {
+        covered = [candidateEmptyList[nextUnassignedIdx]];
+        nextUnassignedIdx += 1;
+      }
+    }
+    for (const c of covered) {
+      provenEmptySet.add(c);
+      if (!emptyEvidenceShaByHs8.has(c)) {
+        emptyEvidenceShaByHs8.set(c, sha);
+      }
+    }
+    evidenceCoverageList.push({
+      filename: ev.filename || `empty_evidence_${idx + 1}.png`,
+      sha256: sha,
+      byteLength: ev.bytes.byteLength,
+      coveredHs8: covered,
+    });
+  });
+
+  return { evidenceCoverageList, provenEmptySet, emptyEvidenceShaByHs8 };
+}
 
 type DictItemRow = {
   hs8: string;
@@ -248,7 +343,8 @@ export async function importTradeBatch(
   let filename = "";
   let rows: ParsedCustomsFactRow[] = [];
   let coverage: TradeImportCoverage;
-  const evidenceCoverageList: Array<{ filename: string; sha256: string; byteLength: number; coveredHs8: string[] }> = [];
+  let evidenceCoverageList: Array<{ filename: string; sha256: string; byteLength: number; coveredHs8: string[] }> = [];
+  let emptyEvidenceShaByHs8 = new Map<string, string>();
 
   if (!options.file) {
     // 仅上传 emptyEvidence：emptyHs8 必须与 hs8 完全一致
@@ -257,19 +353,14 @@ export async function importTradeBatch(
     }
     sourceSha256 = evidenceSha256s[0];
     filename = options.emptyEvidences[0].filename || "empty_evidence.png";
+    const assigned = assignEmptyEvidencesToHs8(options.emptyEvidences, evidenceSha256s, manifest.hs8, true);
+    evidenceCoverageList = assigned.evidenceCoverageList;
+    emptyEvidenceShaByHs8 = assigned.emptyEvidenceShaByHs8;
     coverage = {
       received: [],
-      confirmedEmpty: [...manifest.hs8],
-      missing: [],
+      confirmedEmpty: manifest.hs8.filter((c) => assigned.provenEmptySet.has(c)),
+      missing: manifest.hs8.filter((c) => !assigned.provenEmptySet.has(c)),
     };
-    options.emptyEvidences.forEach((ev, idx) => {
-      evidenceCoverageList.push({
-        filename: ev.filename || `empty_evidence_${idx + 1}.png`,
-        sha256: evidenceSha256s[idx],
-        byteLength: ev.bytes.byteLength,
-        coveredHs8: idx === 0 ? [...manifest.hs8] : [],
-      });
-    });
   } else {
     sourceSha256 = await sha256Hex(options.file.bytes);
     filename = options.file.filename || "customs.csv";
@@ -286,50 +377,20 @@ export async function importTradeBatch(
     rows = csvParsed.rows;
 
     const receivedSet = new Set(rows.map((r) => r.hs8));
-    const provenEmptySet = new Set<string>();
     const candidateEmptyList = manifest.emptyHs8.filter((c) => !receivedSet.has(c));
-
-    if (allowHeaderOnlyEmpty && rows.length === 0) {
-      for (const c of candidateEmptyList) provenEmptySet.add(c);
-      options.emptyEvidences.forEach((ev, idx) => {
-        evidenceCoverageList.push({
-          filename: ev.filename || `empty_evidence_${idx + 1}.png`,
-          sha256: evidenceSha256s[idx],
-          byteLength: ev.bytes.byteLength,
-          coveredHs8: idx === 0 ? [...candidateEmptyList] : [],
-        });
-      });
-    } else if (options.emptyEvidences.length > 0 && candidateEmptyList.length > 0) {
-      const candidateSet = new Set(candidateEmptyList);
-      let nextUnassignedIdx = 0;
-      options.emptyEvidences.forEach((ev, idx) => {
-        const namedMatches = (ev.filename.match(/\d{8}/g) ?? []).filter((c) => candidateSet.has(c));
-        let covered: string[] = [];
-        if (namedMatches.length > 0) {
-          covered = [...new Set(namedMatches)];
-        } else {
-          while (nextUnassignedIdx < candidateEmptyList.length && provenEmptySet.has(candidateEmptyList[nextUnassignedIdx])) {
-            nextUnassignedIdx += 1;
-          }
-          if (nextUnassignedIdx < candidateEmptyList.length) {
-            covered = [candidateEmptyList[nextUnassignedIdx]];
-            nextUnassignedIdx += 1;
-          }
-        }
-        for (const c of covered) provenEmptySet.add(c);
-        evidenceCoverageList.push({
-          filename: ev.filename || `empty_evidence_${idx + 1}.png`,
-          sha256: evidenceSha256s[idx],
-          byteLength: ev.bytes.byteLength,
-          coveredHs8: covered,
-        });
-      });
-    }
+    const assigned = assignEmptyEvidencesToHs8(
+      options.emptyEvidences,
+      evidenceSha256s,
+      candidateEmptyList,
+      allowHeaderOnlyEmpty && rows.length === 0,
+    );
+    evidenceCoverageList = assigned.evidenceCoverageList;
+    emptyEvidenceShaByHs8 = assigned.emptyEvidenceShaByHs8;
 
     coverage = {
       received: manifest.hs8.filter((c) => receivedSet.has(c)),
-      confirmedEmpty: manifest.hs8.filter((c) => !receivedSet.has(c) && provenEmptySet.has(c)),
-      missing: manifest.hs8.filter((c) => !receivedSet.has(c) && !provenEmptySet.has(c)),
+      confirmedEmpty: manifest.hs8.filter((c) => !receivedSet.has(c) && assigned.provenEmptySet.has(c)),
+      missing: manifest.hs8.filter((c) => !receivedSet.has(c) && !assigned.provenEmptySet.has(c)),
     };
   }
 
@@ -376,6 +437,7 @@ export async function importTradeBatch(
     // 该批次是当前最新候选（superseded_by IS NULL 且 publish_state = 'staged'），如上次发布前中断后重试：继续尝试发布
     const pub = await evaluateAndPublishMonth(db, manifest.dictVersion, manifest.month, {
       failBeforePublishCommit: options.failBeforePublishCommit,
+      preemptReleaseOnce: options.preemptReleaseOnce,
     });
     return {
       batchId: existingReplay.batch_id,
@@ -492,7 +554,7 @@ export async function importTradeBatch(
     ...coverage.confirmedEmpty.map((hs8) => ({
       hs8,
       status: "confirmed_empty",
-      evidenceSha256: evidenceSha256s[0] ?? sourceSha256,
+      evidenceSha256: emptyEvidenceShaByHs8.get(hs8) ?? evidenceSha256s[0] ?? sourceSha256,
     })),
     ...coverage.missing.map((hs8) => ({ hs8, status: "missing", evidenceSha256: null })),
   ];
@@ -531,6 +593,7 @@ export async function importTradeBatch(
   // 4. 评估当月 2×4 覆盖与全国/分组对账，就绪则生成快照并原子切换版本
   const pub = await evaluateAndPublishMonth(db, manifest.dictVersion, manifest.month, {
     failBeforePublishCommit: options.failBeforePublishCommit,
+    preemptReleaseOnce: options.preemptReleaseOnce,
   });
 
   return {
@@ -546,11 +609,82 @@ export async function importTradeBatch(
   };
 }
 
+async function queryBatchesByIds(db: D1Database, batchIds: readonly string[]): Promise<Map<string, BatchMetaRow>> {
+  const out = new Map<string, BatchMetaRow>();
+  for (let i = 0; i < batchIds.length; i += ID_QUERY_CHUNK_SIZE) {
+    const slice = batchIds.slice(i, i + ID_QUERY_CHUNK_SIZE);
+    const { results } = await db
+      .prepare("SELECT * FROM trade_import_batch WHERE batch_id IN (SELECT value FROM json_each(?1))")
+      .bind(JSON.stringify(slice))
+      .all<BatchMetaRow>();
+    for (const r of results) out.set(r.batch_id, r);
+  }
+  return out;
+}
+
+async function queryFactsByBatchIds(db: D1Database, batchIds: readonly string[]): Promise<FactDbRow[]> {
+  const out: FactDbRow[] = [];
+  for (let i = 0; i < batchIds.length; i += ID_QUERY_CHUNK_SIZE) {
+    const slice = batchIds.slice(i, i + ID_QUERY_CHUNK_SIZE);
+    const { results } = await db
+      .prepare(
+        `SELECT batch_id, month, flow, grouping, hs8, item_name, group_code, group_name,
+                CAST(usd_scaled AS TEXT) AS usd_scaled_str, qty1, unit1, qty2, unit2
+         FROM trade_fact
+         WHERE batch_id IN (SELECT value FROM json_each(?1))`,
+      )
+      .bind(JSON.stringify(slice))
+      .all<FactDbRow>();
+    out.push(...results);
+  }
+  return out;
+}
+
+function isTradeReleaseCasConflict(err: unknown): boolean {
+  const msg = err instanceof Error ? `${err.message} ${String((err as { cause?: unknown }).cause ?? "")}` : String(err);
+  return (
+    msg.includes("UNIQUE constraint failed: trade_release") ||
+    msg.includes("trade_release_dict_seq_uq")
+  );
+}
+
 async function evaluateAndPublishMonth(
   db: D1Database,
   dictVersion: string,
   month: string,
-  opts?: { failBeforePublishCommit?: boolean },
+  opts?: { failBeforePublishCommit?: boolean; preemptReleaseOnce?: boolean },
+): Promise<{ published: boolean; releaseId: string | null; reconciliationNote: string | null }> {
+  return withDictPublishLock(dictVersion, async () => {
+    let didPreempt = false;
+    for (let attempt = 0; attempt < MAX_PUBLISH_CAS_RETRIES; attempt++) {
+      try {
+        return await attemptPublishMonthOnce(db, dictVersion, month, {
+          failBeforePublishCommit: opts?.failBeforePublishCommit,
+          injectPreemptNow: Boolean(opts?.preemptReleaseOnce && !didPreempt),
+          onPreemptInjected: () => {
+            didPreempt = true;
+          },
+        });
+      } catch (err) {
+        if (isTradeReleaseCasConflict(err) && attempt + 1 < MAX_PUBLISH_CAS_RETRIES) {
+          continue;
+        }
+        throw err;
+      }
+    }
+    throw new AppError(500, "INTERNAL_ERROR");
+  });
+}
+
+async function attemptPublishMonthOnce(
+  db: D1Database,
+  dictVersion: string,
+  month: string,
+  opts?: {
+    failBeforePublishCommit?: boolean;
+    injectPreemptNow?: boolean;
+    onPreemptInjected?: () => void;
+  },
 ): Promise<{ published: boolean; releaseId: string | null; reconciliationNote: string | null }> {
   const year = Number(month.slice(0, 4));
   const dictItems = await loadDictForYear(db, dictVersion, year);
@@ -595,18 +729,9 @@ async function evaluateAndPublishMonth(
     }
   }
 
-  // 读取当月候选批次的全部事实，逐码对账 product 与 partner / regime / region
+  // 分块（json_each 单参数绑定）读取当月候选批次的全部事实，避免超过 D1 每条查询 100 绑定参数上限
   const candidateIds = candidateBatches.map((b) => b.batch_id);
-  const placeholders = candidateIds.map((_, i) => `?${i + 1}`).join(",");
-  const { results: monthFacts } = await db
-    .prepare(
-      `SELECT batch_id, month, flow, grouping, hs8, item_name, group_code, group_name,
-              CAST(usd_scaled AS TEXT) AS usd_scaled_str, qty1, unit1, qty2, unit2
-       FROM trade_fact
-       WHERE batch_id IN (${placeholders})`,
-    )
-    .bind(...candidateIds)
-    .all<FactDbRow>();
+  const monthFacts = await queryFactsByBatchIds(db, candidateIds);
 
   const sumByCombo = new Map<string, bigint>();
   for (const f of monthFacts) {
@@ -660,11 +785,23 @@ async function evaluateAndPublishMonth(
     throw new Error("simulated failure before trade publication commit");
   }
 
-  // 汇总所有已发布月份 + 当前就绪月份，计算受影响期间与次年同期基期期间
+  // 汇总所有已发布月份 + 当前就绪月份，读取当前字典最新 version_seq 作为 CAS 前提
   const prevRelease = await db
-    .prepare("SELECT release_id FROM trade_release WHERE dict_version = ?1 ORDER BY created_at DESC LIMIT 1")
+    .prepare(
+      `SELECT release_id, COALESCE(version_seq, 0) AS version_seq, published_months_json, available_periods_json
+       FROM trade_release
+       WHERE dict_version = ?1
+       ORDER BY version_seq DESC, rowid DESC
+       LIMIT 1`,
+    )
     .bind(dictVersion)
-    .first<{ release_id: string }>();
+    .first<{
+      release_id: string;
+      version_seq: number;
+      published_months_json: string;
+      available_periods_json: string;
+    }>();
+  const nextVersionSeq = (prevRelease?.version_seq ?? 0) + 1;
 
   const { results: activeScopeRows } = await db
     .prepare("SELECT * FROM trade_active_scope WHERE dict_version = ?1")
@@ -685,7 +822,7 @@ async function evaluateAndPublishMonth(
   const availablePeriods = computeAllAvailablePeriods(publishedMonthSet);
   const latestMonth = publishedMonths[publishedMonths.length - 1];
 
-  const targetPeriods = computeAffectedPeriods(month, publishedMonthSet);
+  const targetPeriods = computeAffectedPeriods(month, publishedMonthSet, availablePeriods);
   const releaseId = crypto.randomUUID();
   const triggerBatchId = candidateBatches[candidateBatches.length - 1]?.batch_id ?? candidateIds[0];
 
@@ -716,35 +853,13 @@ async function evaluateAndPublishMonth(
     }
   }
 
-  const batchMetaMap = new Map<string, BatchMetaRow>();
-  for (let i = 0; i < neededBatchIds.length; i += 80) {
-    const slice = neededBatchIds.slice(i, i + 80);
-    const ph = slice.map((_, idx) => `?${idx + 1}`).join(",");
-    const { results } = await db
-      .prepare(`SELECT * FROM trade_import_batch WHERE batch_id IN (${ph})`)
-      .bind(...slice)
-      .all<BatchMetaRow>();
-    for (const r of results) batchMetaMap.set(r.batch_id, r);
-  }
-
+  const batchMetaMap = await queryBatchesByIds(db, neededBatchIds);
+  const allNeededFacts = await queryFactsByBatchIds(db, neededBatchIds);
   const factsByMonth = new Map<string, FactDbRow[]>();
-  for (let i = 0; i < neededBatchIds.length; i += 80) {
-    const slice = neededBatchIds.slice(i, i + 80);
-    const ph = slice.map((_, idx) => `?${idx + 1}`).join(",");
-    const { results } = await db
-      .prepare(
-        `SELECT batch_id, month, flow, grouping, hs8, item_name, group_code, group_name,
-                CAST(usd_scaled AS TEXT) AS usd_scaled_str, qty1, unit1, qty2, unit2
-         FROM trade_fact
-         WHERE batch_id IN (${ph})`,
-      )
-      .bind(...slice)
-      .all<FactDbRow>();
-    for (const f of results) {
-      const list = factsByMonth.get(f.month) ?? [];
-      list.push(f);
-      factsByMonth.set(f.month, list);
-    }
+  for (const f of allNeededFacts) {
+    const list = factsByMonth.get(f.month) ?? [];
+    list.push(f);
+    factsByMonth.set(f.month, list);
   }
 
   const dictCache = new Map<number, DictItemRow[]>();
@@ -787,18 +902,39 @@ async function evaluateAndPublishMonth(
     derivedObsRows.push(...buildDerivedObservations(payload));
   }
 
-  // 组装一次短 D1 原子发布事务
+  // 测试钩子：模拟跨 Worker 实例在快照计算完毕后、事务提交前抢先提交了同 version_seq
+  if (opts?.injectPreemptNow) {
+    opts.onPreemptInjected?.();
+    await db
+      .prepare(
+        `INSERT INTO trade_release (release_id, dict_version, prev_release_id, version_seq, published_months_json, available_periods_json, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)`,
+      )
+      .bind(
+        crypto.randomUUID(),
+        dictVersion,
+        prevRelease?.release_id ?? null,
+        nextVersionSeq,
+        prevRelease?.published_months_json ?? "[]",
+        prevRelease?.available_periods_json ?? "[]",
+        now,
+      )
+      .run();
+  }
+
+  // 组装一次短 D1 原子发布事务（首条 trade_release 利用 UNIQUE(dict_version, version_seq) 做 CAS 乐观锁保护）
   const publishStmts: D1PreparedStatement[] = [
     ...reconStmts,
     db
       .prepare(
-        `INSERT INTO trade_release (release_id, dict_version, prev_release_id, published_months_json, available_periods_json, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)`,
+        `INSERT INTO trade_release (release_id, dict_version, prev_release_id, version_seq, published_months_json, available_periods_json, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)`,
       )
       .bind(
         releaseId,
         dictVersion,
         prevRelease?.release_id ?? null,
+        nextVersionSeq,
         JSON.stringify(publishedMonths),
         JSON.stringify(availablePeriods),
         now,
@@ -808,17 +944,35 @@ async function evaluateAndPublishMonth(
       .bind(dictVersion, month),
   ];
 
-  for (const b of candidateBatches) {
+  for (let i = 0; i < candidateBatches.length; i += ID_QUERY_CHUNK_SIZE) {
+    const scopeChunk = candidateBatches.slice(i, i + ID_QUERY_CHUNK_SIZE).map((b) => ({
+      scopeKey: b.scope_key,
+      flow: b.flow,
+      grouping: b.grouping,
+      batchId: b.batch_id,
+    }));
+    const idChunk = scopeChunk.map((s) => s.batchId);
     publishStmts.push(
       db
         .prepare(
           `INSERT INTO trade_active_scope (scope_key, dict_version, month, flow, grouping, batch_id, release_id, updated_at)
-           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)`,
+           SELECT
+             json_extract(value, '$.scopeKey'),
+             ?1,
+             ?2,
+             json_extract(value, '$.flow'),
+             json_extract(value, '$.grouping'),
+             json_extract(value, '$.batchId'),
+             ?3,
+             ?4
+           FROM json_each(?5)`,
         )
-        .bind(b.scope_key, dictVersion, month, b.flow, b.grouping, b.batch_id, releaseId, now),
+        .bind(dictVersion, month, releaseId, now, JSON.stringify(scopeChunk)),
       db
-        .prepare("UPDATE trade_import_batch SET publish_state = 'published' WHERE batch_id = ?1")
-        .bind(b.batch_id),
+        .prepare(
+          "UPDATE trade_import_batch SET publish_state = 'published' WHERE batch_id IN (SELECT value FROM json_each(?1))",
+        )
+        .bind(JSON.stringify(idChunk)),
     );
   }
 
@@ -904,42 +1058,54 @@ function computeAllAvailablePeriods(publishedMonthSet: ReadonlySet<string>): str
   return out;
 }
 
-function computeAffectedPeriods(changedMonth: string, publishedMonthSet: ReadonlySet<string>): string[] {
-  const year = Number(changedMonth.slice(0, 4));
-  const mNum = Number(changedMonth.slice(5, 7));
-  const qNum = Math.ceil(mNum / 3);
+function snapshotReferencesMonth(
+  period: string,
+  targetMonth: string,
+  publishedMonthSet: ReadonlySet<string>,
+): boolean {
+  const parsed = parseTradePeriod(period);
+  if (!parsed) return false;
+  if (parsed.months.includes(targetMonth)) return true;
+
+  const priorParsed = parseTradePeriod(parsed.priorPeriod);
+  if (
+    priorParsed &&
+    priorParsed.months.every((m) => publishedMonthSet.has(m)) &&
+    priorParsed.months.includes(targetMonth)
+  ) {
+    return true;
+  }
+
+  const trendMonths =
+    parsed.kind === "month"
+      ? Array.from({ length: Number(parsed.period.slice(5, 7)) }, (_, i) =>
+          `${parsed.year}-${String(i + 1).padStart(2, "0")}`,
+        ).filter((m) => publishedMonthSet.has(m))
+      : parsed.months;
+
+  if (trendMonths.includes(targetMonth)) return true;
+
+  for (const tm of trendMonths) {
+    const priorTrendMonth = `${Number(tm.slice(0, 4)) - 1}-${tm.slice(5, 7)}`;
+    if (priorTrendMonth === targetMonth && publishedMonthSet.has(priorTrendMonth)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function computeAffectedPeriods(
+  changedMonth: string,
+  publishedMonthSet: ReadonlySet<string>,
+  availablePeriods = computeAllAvailablePeriods(publishedMonthSet),
+): string[] {
   const candidates = new Set<string>([changedMonth]);
-
-  const qStr = `${year}-Q${qNum}`;
-  if (parseTradePeriod(qStr)!.months.every((m) => publishedMonthSet.has(m))) {
-    candidates.add(qStr);
-  }
-  const yStr = String(year);
-  if (parseTradePeriod(yStr)!.months.every((m) => publishedMonthSet.has(m))) {
-    candidates.add(yStr);
-  }
-  for (let endM = mNum; endM <= 12; endM++) {
-    const ytdStr = `${year}-YTD-${String(endM).padStart(2, "0")}`;
-    if (parseTradePeriod(ytdStr)!.months.every((m) => publishedMonthSet.has(m))) {
-      candidates.add(ytdStr);
+  for (const p of availablePeriods) {
+    if (snapshotReferencesMonth(p, changedMonth, publishedMonthSet)) {
+      candidates.add(p);
     }
   }
-
-  // 若次年同期期间已发布，作为同比基期变动需要一并重算次年对应快照
-  const nextYear = year + 1;
-  const downstreamChecks = [
-    `${nextYear}-${String(mNum).padStart(2, "0")}`,
-    `${nextYear}-Q${qNum}`,
-    String(nextYear),
-    ...Array.from({ length: 12 - mNum + 1 }, (_, idx) => `${nextYear}-YTD-${String(mNum + idx).padStart(2, "0")}`),
-  ];
-  for (const dp of downstreamChecks) {
-    const parsed = parseTradePeriod(dp);
-    if (parsed && parsed.months.every((m) => publishedMonthSet.has(m))) {
-      candidates.add(dp);
-    }
-  }
-
   return [...candidates].sort();
 }
 
@@ -1648,7 +1814,7 @@ export async function getTradePeriodsMeta(db: D1Database, rawDictVersion?: strin
       `SELECT release_id, published_months_json, available_periods_json, created_at
        FROM trade_release
        WHERE dict_version = ?1
-       ORDER BY created_at DESC
+       ORDER BY version_seq DESC, rowid DESC
        LIMIT 1`,
     )
     .bind(dictVersion)

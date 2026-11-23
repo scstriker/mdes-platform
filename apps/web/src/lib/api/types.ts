@@ -4,6 +4,7 @@ export type {
   Cluster,
   ClusterStats,
   ConcentrationMetrics,
+  CsvWriteMode,
   GlobalSearchResult,
   Health,
   ImportBatch,

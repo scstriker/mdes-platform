@@ -2,12 +2,16 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router";
 import { IconArrowLeft, IconFileImport, IconTable, IconX } from "@tabler/icons-react";
 import {
+  applyObservationColumnMapping,
+  canonicalizeDimsJson,
   decodeCustomsBytes,
   DEFAULT_MAX_ROWS,
+  extractCsvHeaders,
   looksLikeCustomsCsvHeader,
   matchesQuery,
   parseObservationCsv,
   type CsvParseResult,
+  type CsvWriteMode,
   type ImportResult,
 } from "@mdes/shared";
 import {
@@ -26,7 +30,7 @@ import { QueryError } from "@/components/layout/query-error";
 import { Button } from "@/components/ui/button";
 import { describeError, errorMessage, rowErrorMessage, useImportCsv, useIndicators } from "@/lib/api";
 import { showDemoChrome } from "@/lib/demo-chrome";
-import { getMapper, MAPPERS, type IndicatorMapper } from "@/lib/import-mappers";
+import { getMapper, MAPPERS, type IndicatorMapper, type MapperField } from "@/lib/import-mappers";
 import { cn } from "@/lib/utils";
 import { CustomsTradeImportFlow } from "./customs-trade-import";
 
@@ -34,8 +38,41 @@ const TABLE_STEPS = ["选择指标", "上传文件", "校验", "写入", "结果
 const FILE_STEPS = ["选择指标", "上传文件", "校验", "写入", "结果"];
 const MAX_FILE_BYTES = 10 * 1024 * 1024;
 
-type WriteMode = "upsert" | "append";
+type WriteMode = CsvWriteMode;
 type ChannelFilter = "all" | "table" | "file";
+
+const CORE_OBSERVATION_FIELDS: readonly MapperField[] = [
+  { key: "indicator_id", label: "工程指标编码", required: true, aliases: ["indicator_id", "指标编码", "指标编号"] },
+  { key: "period", label: "期间", required: true, aliases: ["period", "期间", "统计年月", "统计期间"] },
+  { key: "value_num", label: "金额/数值", required: true, aliases: ["value_num", "金额", "数值", "金额/数值"] },
+  { key: "value_text", label: "文本值", required: false, aliases: ["value_text", "文本值", "状态文本"] },
+  { key: "geo", label: "地域", required: false, aliases: ["geo", "地域", "省市", "省市关区"] },
+  { key: "unit", label: "计量单位", required: false, aliases: ["unit", "单位", "计量单位"] },
+  { key: "dims", label: "维度 JSON", required: false, aliases: ["dims", "维度", "维度json"] },
+];
+
+const CORE_OBSERVATION_KEYS = new Set(CORE_OBSERVATION_FIELDS.map((f) => f.key));
+
+function buildEffectiveTableFields(mapper: IndicatorMapper): { fields: MapperField[]; extraDimKeys: string[] } {
+  const byKey = new Map(mapper.fields.map((f) => [f.key, f]));
+  const mergedCore = CORE_OBSERVATION_FIELDS.map((base) => {
+    const custom = byKey.get(base.key);
+    if (!custom) return base;
+    return {
+      key: base.key,
+      label: custom.label || base.label,
+      required: base.required,
+      aliases: [...new Set([...(base.aliases ?? []), ...(custom.aliases ?? [])])],
+    };
+  });
+  const extraFields = mapper.fields
+    .filter((f) => !CORE_OBSERVATION_KEYS.has(f.key) && f.key !== "remark")
+    .map((f) => ({ ...f, required: false }));
+  return {
+    fields: [...mergedCore, ...extraFields],
+    extraDimKeys: extraFields.map((f) => f.key),
+  };
+}
 
 /**
  * 数据后台 · 新建导入：按 mapper.channel 分支
@@ -313,16 +350,19 @@ function TableImportFlow({
     () => (indicators.data ? new Set(indicators.data.map((i) => i.id)) : undefined),
     [indicators.data],
   );
-  const check: CsvParseResult | null = useMemo(
-    () => (text != null ? parseObservationCsv(text, { maxRows: DEFAULT_MAX_ROWS, knownIndicatorIds: known }) : null),
-    [text, known],
+  const { fields: effectiveFields, extraDimKeys } = useMemo(() => buildEffectiveTableFields(mapper), [mapper]);
+  const headers = useMemo(() => (text != null ? extractCsvHeaders(text) : []), [text]);
+  const mappedText = useMemo(
+    () => (text != null ? applyObservationColumnMapping(text, mapping, extraDimKeys) : null),
+    [text, mapping, extraDimKeys],
   );
-
-  const headers = useMemo(() => {
-    if (!text) return [] as string[];
-    const line = text.split(/\r?\n/).find((l) => l.trim());
-    return line ? line.split(",").map((h) => h.trim().replace(/^"|"$/g, "")) : [];
-  }, [text]);
+  const check: CsvParseResult | null = useMemo(
+    () =>
+      mappedText != null
+        ? parseObservationCsv(mappedText, { maxRows: DEFAULT_MAX_ROWS, knownIndicatorIds: known })
+        : null,
+    [mappedText, known],
+  );
 
   async function choose(f: File | null) {
     importCsv.reset();
@@ -345,11 +385,17 @@ function TableImportFlow({
       }
       const t = await f.text();
       setText(t);
-      setMapping(autoMap(mapper, t.split(/\r?\n/).find((l) => l.trim())?.split(",") ?? []));
+      setMapping(autoMap(effectiveFields, extractCsvHeaders(t)));
       setStep(2);
     } catch (err) {
       setReadError(describeError(err));
     }
+  }
+
+  function submitMappedCsv() {
+    if (!file || mappedText == null) return;
+    setStep(3);
+    importCsv.mutate({ filename: file.name, csvText: mappedText, mode: writeMode });
   }
 
   const effectiveStep = importCsv.isSuccess ? 4 : importCsv.isPending ? 3 : step;
@@ -388,17 +434,15 @@ function TableImportFlow({
           writeMode={writeMode}
           onWriteMode={setWriteMode}
           mapper={mapper}
+          fields={effectiveFields}
           headers={headers}
           mapping={mapping}
           onMappingChange={setMapping}
           importing={false}
           importError={null}
           onBack={() => setStep(1)}
-          onWrite={() => {
-            setStep(3);
-            importCsv.mutate(file);
-          }}
-          onRetry={() => importCsv.mutate(file)}
+          onWrite={submitMappedCsv}
+          onRetry={submitMappedCsv}
         />
       )}
 
@@ -419,30 +463,28 @@ function TableImportFlow({
           writeMode={writeMode}
           onWriteMode={setWriteMode}
           mapper={mapper}
+          fields={effectiveFields}
           headers={headers}
           mapping={mapping}
           onMappingChange={setMapping}
           importing={false}
           importError={importCsv.error}
           onBack={() => setStep(2)}
-          onWrite={() => {
-            setStep(3);
-            importCsv.mutate(file);
-          }}
-          onRetry={() => importCsv.mutate(file)}
+          onWrite={submitMappedCsv}
+          onRetry={submitMappedCsv}
         />
       )}
     </div>
   );
 }
 
-function autoMap(mapper: IndicatorMapper, rawHeaders: string[]) {
+function autoMap(fields: readonly MapperField[], rawHeaders: string[]) {
   const headers = rawHeaders.map((h) => h.trim().replace(/^"|"$/g, ""));
   const out: Record<string, string> = {};
-  for (const field of mapper.fields) {
+  for (const field of fields) {
     const hit = headers.find(
       (h) =>
-        h === field.key ||
+        h.toLowerCase() === field.key.toLowerCase() ||
         h === field.label ||
         field.aliases?.some((a) => a.toLowerCase() === h.toLowerCase()),
     );
@@ -489,28 +531,32 @@ function MetaBar({
 }
 
 function FieldMappingPanel({
-  mapper,
+  fields,
   headers,
   mapping,
   onChange,
 }: {
-  mapper: IndicatorMapper;
+  fields: readonly MapperField[];
   headers: string[];
   mapping: Record<string, string>;
   onChange: (m: Record<string, string>) => void;
 }) {
-  const rows = mapper.fields.map((f) => ({
-    key: f.key,
-    label: f.label,
-    required: f.required,
-    header: mapping[f.key] ?? "",
-    status: mapping[f.key] ? ("matched" as const) : f.key === "remark" ? ("skip" as const) : ("miss" as const),
-  }));
+  const rows = fields.map((f) => {
+    const hasAltValue = f.key === "value_num" && Boolean(mapping["value_text"]);
+    const isRequired = Boolean(f.required) && !hasAltValue;
+    return {
+      key: f.key,
+      label: f.label,
+      required: isRequired,
+      header: mapping[f.key] ?? "",
+      status: mapping[f.key] ? ("matched" as const) : isRequired ? ("miss" as const) : ("skip" as const),
+    };
+  });
 
   return (
     <div className="grid gap-3" aria-label="字段对照">
       <h3 className="title-nav text-brand-navy">字段对照</h3>
-      <p className="caption text-ink-muted">按源文件表头自动识别映射，支持手动微调列对应关系。</p>
+      <p className="caption text-ink-muted">按源文件表头自动识别映射，支持手动微调列对应关系并实时重算预校验。</p>
       <div className="overflow-x-auto">
         <table className="w-full min-w-140 border-collapse body">
           <thead>
@@ -571,6 +617,7 @@ function ValidateStep({
   writeMode,
   onWriteMode,
   mapper,
+  fields,
   headers,
   mapping,
   onMappingChange,
@@ -584,6 +631,7 @@ function ValidateStep({
   writeMode: WriteMode;
   onWriteMode: (m: WriteMode) => void;
   mapper: IndicatorMapper;
+  fields: readonly MapperField[];
   headers: string[];
   mapping: Record<string, string>;
   onMappingChange: (m: Record<string, string>) => void;
@@ -593,7 +641,8 @@ function ValidateStep({
   onWrite: () => void;
   onRetry: () => void;
 }) {
-  if (!check.ok) {
+  // 空文件或超行数上限：直接返回文件级错误；缺列（MISSING_HEADER）时保留字段对照面板以便手动映射恢复
+  if (!check.ok && check.fileError.code !== "MISSING_HEADER") {
     return (
       <div className="grid gap-4">
         <Notice tone="danger" title={errorMessage(check.fileError.code, check.fileError.params)} />
@@ -604,24 +653,37 @@ function ValidateStep({
     );
   }
 
-  const { rows, errors } = check;
-  const pk = mapper.primaryKey ? "按业务主键融合更新" : "按注册证号融合更新";
-
-  const newRows = Math.max(0, rows.length - Math.min(rows.length, 20));
-  const existingRows = Math.min(rows.length, 20);
+  const rows = check.ok ? check.rows : [];
+  const errors = check.ok ? check.errors : [];
+  const dataRows = check.ok ? check.dataRows : 0;
+  const writableCount = useMemo(() => {
+    if (writeMode !== "upsert") return rows.length;
+    const keys = new Set(
+      rows.map((r) => `${r.indicator_id}\u0000${r.period}\u0000${r.geo}\u0000${canonicalizeDimsJson(r.dims)}`),
+    );
+    return keys.size;
+  }, [rows, writeMode]);
+  const inBatchMerged = Math.max(0, rows.length - writableCount);
+  const pk = mapper.primaryKey ? "按业务主键融合更新" : "按自然切片融合更新";
 
   return (
     <section className="grid gap-5" aria-label="校验">
       <SectionTitle level={2}>校验</SectionTitle>
       <div className="grid gap-6 lg:grid-cols-2">
-        <FieldMappingPanel mapper={mapper} headers={headers} mapping={mapping} onChange={onMappingChange} />
+        <FieldMappingPanel fields={fields} headers={headers} mapping={mapping} onChange={onMappingChange} />
         <div className="grid gap-4 content-start">
-          <div className="grid grid-cols-2 gap-2 border border-border p-3 sm:grid-cols-4">
-            <StatChip label="可写入" value={rows.length} unit="行" emphasize />
-            <StatChip label="新增记录" value={newRows} unit="行" />
-            <StatChip label="主键对齐" value={existingRows} unit="行" />
-            <StatChip label="跳过" value={errors.length} unit="行" />
-          </div>
+          {!check.ok ? (
+            <Notice tone="warning" title={errorMessage(check.fileError.code, check.fileError.params)}>
+              请在左侧「字段对照」面板中为必填字段指定对应的源文件列。
+            </Notice>
+          ) : (
+            <div className="grid grid-cols-2 gap-2 border border-border p-3 sm:grid-cols-4">
+              <StatChip label="可写入" value={writableCount} unit="行" emphasize />
+              <StatChip label="有效数据" value={dataRows} unit="行" />
+              <StatChip label="批内归并" value={inBatchMerged} unit="行" />
+              <StatChip label="跳过" value={errors.length} unit="行" />
+            </div>
+          )}
           {errors.length > 0 && (
             <Notice tone="warning" title={`${errors.length} 行校验未通过，事务写入时自动跳过`}>
               {showDemoChrome() ? "可核对下方异常原因后修正源文件再上传。" : "请修正源文件异常行后重新上传。"}
@@ -655,7 +717,7 @@ function ValidateStep({
           <span>
             {pk}
             <span className="block caption text-ink-muted">
-              对齐既有业务主键与维度切片更新最新记录，并同步写入新增期间观测值。
+              对齐既有指标、期间、地域与维度切片更新最新记录，并同步写入新增期间观测值。
             </span>
           </span>
         </label>
@@ -688,11 +750,11 @@ function ValidateStep({
           上一步
         </Button>
         <p className="caption text-ink-muted">
-          将写入 {formatNumber(rows.length)} 行，跳过 {formatNumber(errors.length)} 行
+          将写入 {formatNumber(writableCount)} 行，跳过 {formatNumber(errors.length)} 行
         </p>
-        <Button onClick={onWrite} disabled={importing || rows.length === 0}>
+        <Button onClick={onWrite} disabled={importing || !check.ok || writableCount === 0}>
           <IconFileImport aria-hidden="true" />
-          {importing ? "写入中" : `写入 ${formatNumber(rows.length)} 行`}
+          {importing ? "写入中" : `写入 ${formatNumber(writableCount)} 行`}
         </Button>
       </div>
     </section>

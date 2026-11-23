@@ -39,6 +39,8 @@ const MESSAGES: Record<ErrorCode, (p: ApiErrorParams) => string> = {
       : `缺少必需的列 ${text(p.header, "（未知列）")}，请对照导入模板补齐表头`,
   ROW_LIMIT_EXCEEDED: (p) =>
     `数据超过 ${text(p.max, "上限")} 行${p.actual ? `（当前 ${p.actual} 行）` : ""}，请拆分为多个文件后分批导入`,
+  INVALID_WRITE_MODE: (p) =>
+    `不支持的事务写入策略「${text(p.value, "未知策略")}」，仅支持融合更新（upsert）或增量追加（append）`,
   REQUIRED_FIELD_MISSING: (p) => `${field(p.field)}为空，请补齐后重试`,
   INVALID_VALUE_NUM: (p) => `数值「${text(p.value)}」不是有效数字，请填写阿拉伯数字，不带单位和千分位`,
   VALUE_MISSING: () => "数值（value_num）与文本值（value_text）至少填写一个",
