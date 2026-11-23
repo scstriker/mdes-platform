@@ -1,7 +1,14 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { parseCsvRecords, parseObservationCsv, type CsvParseResult } from "../src/csv";
+import {
+  applyObservationColumnMapping,
+  canonicalizeDimsJson,
+  extractCsvHeaders,
+  parseCsvRecords,
+  parseObservationCsv,
+  type CsvParseResult,
+} from "../src/csv";
 import { developerMessage, ERROR_CODES } from "../src/errors";
 
 const HEADER = "indicator_id,period,geo,value_num,unit,value_text,dims";
@@ -133,5 +140,62 @@ describe("developerMessage", () => {
     for (const code of ERROR_CODES) {
       expect(developerMessage(code, { header: "period", field: "period", value: "x", indicator_id: "TRD-099", resource: "indicator", id: "X", max: 1, actual: 2 })).toMatch(/^[ -~]+$/);
     }
+  });
+});
+
+describe("extractCsvHeaders / canonicalizeDimsJson / applyObservationColumnMapping", () => {
+  it("extractCsvHeaders 按 RFC 4180 提取带引号与逗号的表头并忽略前导空行", () => {
+    expect(extractCsvHeaders('\ufeff\r\n"指标,编码",period,"corrected_amount"\r\nTRD-001,2024-01,20')).toEqual([
+      "指标,编码",
+      "period",
+      "corrected_amount",
+    ]);
+  });
+
+  it("canonicalizeDimsJson 递归按对象键名排序，使不同键序的等价 JSON 完全一致", () => {
+    expect(canonicalizeDimsJson({ b: 2, a: { y: 1, x: 2 } })).toBe('{"a":{"x":2,"y":1},"b":2}');
+    expect(canonicalizeDimsJson({ a: { x: 2, y: 1 }, b: 2 })).toBe('{"a":{"x":2,"y":1},"b":2}');
+  });
+
+  it("手动将 value_num 映射到 corrected_amount=20 后，预检与解析读取 20 而非原 value_num=10，且保留原行号", () => {
+    const raw = [
+      "",
+      "indicator_id,period,value_num,corrected_amount,商品编码",
+      "TRD-001,2024-01,10,20,90181100",
+      "",
+      "TRD-001,2024-02,15,bad_num,90181100",
+    ].join("\r\n");
+
+    const mapped = applyObservationColumnMapping(
+      raw,
+      {
+        indicator_id: "indicator_id",
+        period: "period",
+        value_num: "corrected_amount",
+        hs: "商品编码",
+      },
+      ["hs"],
+    );
+
+    const parsed = ok(parseObservationCsv(mapped));
+    expect(parsed.rows).toEqual([
+      {
+        line: 3,
+        indicator_id: "TRD-001",
+        period: "2024-01",
+        geo: "CN",
+        value_num: 20,
+        value_text: null,
+        unit: "",
+        dims: { hs: "90181100" },
+      },
+    ]);
+    expect(parsed.errors).toEqual([
+      {
+        line: 5,
+        code: "INVALID_VALUE_NUM",
+        params: { value: "bad_num" },
+      },
+    ]);
   });
 });

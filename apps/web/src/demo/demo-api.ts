@@ -68,15 +68,53 @@ const batches: ImportBatch[] = [];
 let nextObservationId = 1;
 let clock = Date.parse("2026-11-05T02:00:00Z");
 
-function importText(filename: string, text: string): ImportResult | { fileError: { code: ErrorCode; params: ErrorParams } } {
+function importText(
+  filename: string,
+  text: string,
+  mode: "upsert" | "append" = "append",
+): ImportResult | { fileError: { code: ErrorCode; params: ErrorParams } } {
   const parsed = parseObservationCsv(text, { maxRows: 5000, knownIndicatorIds: knownIds });
   if (!parsed.ok) return { fileError: { code: parsed.fileError.code, params: parsed.fileError.params as ErrorParams } };
-  const { rows, errors } = parsed;
+  const { errors } = parsed;
+  const rows =
+    mode === "upsert"
+      ? [
+          ...new Map(
+            parsed.rows.map((r) => [
+              `${r.indicator_id}\u0000${r.period}\u0000${r.geo}\u0000${JSON.stringify(
+                Object.fromEntries(Object.entries(r.dims).sort(([a], [b]) => a.localeCompare(b))),
+              )}`,
+              r,
+            ]),
+          ).values(),
+        ]
+      : parsed.rows;
   const status: ImportStatus = rows.length === 0 ? "failed" : errors.length ? "completed_with_errors" : "completed";
   clock = Math.max(clock + 60_000, Date.now());
   const created_at = new Date(clock).toISOString();
   const id = crypto.randomUUID();
   batches.push({ id, filename, status, row_ok: rows.length, row_err: errors.length, errors_json: errors, created_at });
+
+  if (mode === "upsert") {
+    const incomingKeys = new Set(
+      rows.map(
+        (r) =>
+          `${r.indicator_id}\u0000${r.period}\u0000${r.geo}\u0000${JSON.stringify(
+            Object.fromEntries(Object.entries(r.dims).sort(([a], [b]) => a.localeCompare(b))),
+          )}`,
+      ),
+    );
+    for (let idx = observations.length - 1; idx >= 0; idx--) {
+      const o = observations[idx];
+      const k = `${o.indicator_id}\u0000${o.period}\u0000${o.geo}\u0000${JSON.stringify(
+        Object.fromEntries(Object.entries(o.dims).sort(([a], [b]) => a.localeCompare(b))),
+      )}`;
+      if (incomingKeys.has(k)) {
+        observations.splice(idx, 1);
+      }
+    }
+  }
+
   for (const r of rows) {
     observations.push({
       id: String(nextObservationId++),
@@ -210,10 +248,26 @@ async function handle(method: string, url: URL, body: BodyInit | null | undefine
   }
 
   if (method === "POST" && path === "/api/import/csv") {
-    const file = body instanceof FormData ? body.get("file") : null;
-    if (!file || typeof file === "string") return fail(400, "FILE_REQUIRED");
-    const result = importText(file.name || "upload.csv", await file.text());
-    return "fileError" in result ? fail(400, result.fileError.code, result.fileError.params) : json(result);
+    if (body instanceof FormData) {
+      const file = body.get("file");
+      const rawMode = body.get("mode");
+      const mode = rawMode === "upsert" ? "upsert" : "append";
+      if (!file || typeof file === "string") return fail(400, "FILE_REQUIRED");
+      const result = importText(file.name || "upload.csv", await file.text(), mode);
+      return "fileError" in result ? fail(400, result.fileError.code, result.fileError.params) : json(result);
+    }
+    if (typeof body === "string") {
+      try {
+        const parsedBody = JSON.parse(body) as { filename?: string; csvText?: string; mode?: string };
+        if (typeof parsedBody.csvText !== "string") return fail(400, "FILE_REQUIRED");
+        const mode = parsedBody.mode === "upsert" ? "upsert" : "append";
+        const result = importText(parsedBody.filename || "upload.csv", parsedBody.csvText, mode);
+        return "fileError" in result ? fail(400, result.fileError.code, result.fileError.params) : json(result);
+      } catch {
+        return fail(400, "FILE_REQUIRED");
+      }
+    }
+    return fail(400, "FILE_REQUIRED");
   }
 
   if (method === "GET" && path === "/api/import/batches") {

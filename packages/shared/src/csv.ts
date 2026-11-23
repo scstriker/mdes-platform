@@ -81,6 +81,137 @@ export function parseCsvRecords(text: string): string[][] {
 
 const isBlank = (fields: string[]) => fields.every((f) => f.trim() === "");
 
+/** RFC 4180 单元格转义 */
+function encodeCsvCell(value: string): string {
+  if (/[",\r\n]/.test(value)) {
+    return `"${value.replace(/"/g, '""')}"`;
+  }
+  return value;
+}
+
+/** 递归按对象键名字典序重排，保证等价 JSON 序列化文本一致 */
+export function canonicalizeDimsObject(value: unknown): unknown {
+  if (value === null || typeof value !== "object") return value;
+  if (Array.isArray(value)) return value.map(canonicalizeDimsObject);
+  const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b));
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of entries) {
+    out[k] = canonicalizeDimsObject(v);
+  }
+  return out;
+}
+
+export function canonicalizeDimsJson(dims: Record<string, unknown>): string {
+  return JSON.stringify(canonicalizeDimsObject(dims));
+}
+
+/** 按 RFC 4180 提取首行非空表头（去除 BOM 与首尾空白，保留表头原始大小写） */
+export function extractCsvHeaders(text: string): string[] {
+  const records = parseCsvRecords(text.replace(/^\uFEFF/, ""));
+  const headerRow = records.find((r) => !isBlank(r));
+  return headerRow ? headerRow.map((h) => h.trim()) : [];
+}
+
+/**
+ * 将源 CSV 按字段对照映射表转换为标准观测值 CSV（保留原文件前导及中间空行以对齐表格行号）：
+ * - 标准目标列：indicator_id, period, geo, value_num, value_text, unit, dims
+ * - extraDimKeys 中被映射的非空列自动合并入对应行的 dims JSON 对象
+ */
+export function applyObservationColumnMapping(
+  rawText: string,
+  mapping: Readonly<Record<string, string>>,
+  extraDimKeys: readonly string[] = [],
+): string {
+  const records = parseCsvRecords(rawText.replace(/^\uFEFF/, ""));
+  const headerIndex = records.findIndex((r) => !isBlank(r));
+  if (headerIndex < 0) return rawText;
+
+  const sourceHeaders = records[headerIndex].map((h) => h.trim());
+  const colIndexByHeader = new Map<string, number>();
+  sourceHeaders.forEach((h, idx) => {
+    if (!colIndexByHeader.has(h)) colIndexByHeader.set(h, idx);
+  });
+  // 大小写不敏感兜底
+  const colIndexLower = new Map<string, number>();
+  sourceHeaders.forEach((h, idx) => {
+    const low = h.toLowerCase();
+    if (!colIndexLower.has(low)) colIndexLower.set(low, idx);
+  });
+
+  const resolveColIndex = (mappedHeader: string | undefined): number | undefined => {
+    const trimmed = mappedHeader?.trim();
+    if (!trimmed) return undefined;
+    return colIndexByHeader.get(trimmed) ?? colIndexLower.get(trimmed.toLowerCase());
+  };
+
+  const canonicalTargets = ["indicator_id", "period", "geo", "value_num", "value_text", "unit", "dims"] as const;
+  const activeExtraKeys = extraDimKeys.filter((k) => resolveColIndex(mapping[k]) !== undefined);
+  const activeTargets = canonicalTargets.filter((t) => {
+    if (t === "dims" && activeExtraKeys.length > 0) return true;
+    return resolveColIndex(mapping[t]) !== undefined;
+  });
+
+  // 若用户将全部目标列都设为了“不导入”，输出一个占位表头使 parseObservationCsv 精确报 MISSING_HEADER: indicator_id
+  const outHeaders = activeTargets.length > 0 ? [...activeTargets] : ["__unmapped__"];
+  const outLines: string[] = [];
+
+  for (let rIdx = 0; rIdx < records.length; rIdx++) {
+    const row = records[rIdx];
+    if (rIdx < headerIndex || (rIdx > headerIndex && isBlank(row))) {
+      outLines.push("");
+      continue;
+    }
+    if (rIdx === headerIndex) {
+      outLines.push(outHeaders.map(encodeCsvCell).join(","));
+      continue;
+    }
+
+    const readCell = (targetKey: string): string => {
+      const cIdx = resolveColIndex(mapping[targetKey]);
+      return cIdx === undefined ? "" : (row[cIdx] ?? "").trim();
+    };
+
+    if (activeTargets.length === 0) {
+      outLines.push(encodeCsvCell(row[0] ?? "x"));
+      continue;
+    }
+
+    const cells = activeTargets.map((target) => {
+      if (target !== "dims") {
+        return encodeCsvCell(readCell(target));
+      }
+      const rawDims = readCell("dims");
+      if (activeExtraKeys.length === 0) {
+        return encodeCsvCell(rawDims);
+      }
+      const extraObj: Record<string, string> = {};
+      for (const ek of activeExtraKeys) {
+        const val = readCell(ek);
+        if (val !== "") extraObj[ek] = val;
+      }
+      if (Object.keys(extraObj).length === 0) {
+        return encodeCsvCell(rawDims);
+      }
+      if (!rawDims) {
+        return encodeCsvCell(canonicalizeDimsJson(extraObj));
+      }
+      try {
+        const parsed = JSON.parse(rawDims) as unknown;
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+          return encodeCsvCell(rawDims);
+        }
+        return encodeCsvCell(canonicalizeDimsJson({ ...(parsed as Record<string, unknown>), ...extraObj }));
+      } catch {
+        // 保留非法 JSON 原串，交由 parseObservationCsv 报出对应行号的 DIMS_INVALID_JSON
+        return encodeCsvCell(rawDims);
+      }
+    });
+    outLines.push(cells.join(","));
+  }
+
+  return outLines.join("\n");
+}
+
 export function parseObservationCsv(text: string, options: CsvParseOptions = {}): CsvParseResult {
   const maxRows = options.maxRows ?? DEFAULT_MAX_ROWS;
   const known = options.knownIndicatorIds

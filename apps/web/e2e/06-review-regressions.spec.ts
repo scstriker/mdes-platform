@@ -173,4 +173,52 @@ test.describe.serial("PR #2 代码审查缺陷全量回归测试（P1 / P2）", 
     expect(svgXml).toContain("中国海关 8 位 HS 商品编码原产国统计");
     expect(svgXml).toContain("CR3 指前三位进口原产国金额占同类进口总额比重");
   });
+
+  test("7. [PR #3 P2×2] 新建导入：手动字段映射（corrected_amount=20 覆盖原 value_num=10、无标准列时保留面板恢复）与默认「融合更新」单条覆盖不重复", async ({
+    page,
+  }, testInfo) => {
+    const csvV1Path = testInfo.outputPath("mapping_upsert_v1.csv");
+    fs.writeFileSync(
+      csvV1Path,
+      ["indicator_id,period,value_num,corrected_amount,unit", "TRD-001,2099-12,10,20,亿美元"].join("\n"),
+      "utf8",
+    );
+
+    await page.goto("/admin/import?seq=38");
+    await page.locator('input[type="file"][accept*="csv"]').setInputFiles(csvV1Path);
+    await expect(page.getByRole("heading", { level: 3, name: "字段对照" })).toBeVisible();
+
+    // 手动将「金额/数值」从默认匹配的 value_num(10) 改绑为 corrected_amount(20)
+    await page.getByLabel("金额/数值对应表头").selectOption("corrected_amount");
+    await page.getByRole("button", { name: /写入 1 行/ }).click();
+    await expect(page.getByText("导入完成，1 行全部写入")).toBeVisible();
+
+    await page.goto("/admin/observations?indicator_id=TRD-001&period=2099-12");
+    const obsTable = page.getByRole("table", { name: "观测值查询结果" });
+    await expect(obsTable.locator("tbody tr")).toHaveCount(1);
+    await expect(obsTable.locator("tbody tr").first()).toContainText("20");
+    await expect(obsTable.locator("tbody tr").first()).not.toContainText("10");
+
+    // 第二批：表头不含 value_num（仅含 custom_revised=35），验证缺列时仍保留字段对照面板供手动映射，且默认融合更新不产生重复行
+    const csvV2Path = testInfo.outputPath("mapping_upsert_v2.csv");
+    fs.writeFileSync(
+      csvV2Path,
+      ["indicator_id,period,custom_revised,unit", "TRD-001,2099-12,35,亿美元"].join("\n"),
+      "utf8",
+    );
+
+    await page.goto("/admin/import?seq=38");
+    await page.locator('input[type="file"][accept*="csv"]').setInputFiles(csvV2Path);
+    await expect(page.getByRole("heading", { level: 3, name: "字段对照" })).toBeVisible();
+    await expect(page.getByRole("button", { name: /写入/ })).toBeDisabled();
+
+    await page.getByLabel("金额/数值对应表头").selectOption("custom_revised");
+    await expect(page.getByRole("button", { name: /写入 1 行/ })).toBeEnabled();
+    await page.getByRole("button", { name: /写入 1 行/ }).click();
+    await expect(page.getByText("导入完成，1 行全部写入")).toBeVisible();
+
+    await page.goto("/admin/observations?indicator_id=TRD-001&period=2099-12");
+    await expect(obsTable.locator("tbody tr")).toHaveCount(1);
+    await expect(obsTable.locator("tbody tr").first()).toContainText("35");
+  });
 });

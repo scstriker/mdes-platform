@@ -1,6 +1,6 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "./endpoints";
-import type { ObservationQuery, Phase, TradeImportManifest } from "./types";
+import type { CsvWriteMode, ObservationQuery, Phase, TradeImportManifest } from "./types";
 
 /** 查询键集中管理，导入成功后按前缀失效 */
 export const queryKeys = {
@@ -128,7 +128,8 @@ export const useTradeCoverage = (
 export function useImportCsv() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (file: File) => api.importCsv(file),
+    mutationFn: (payload: File | { filename: string; csvText: string; mode?: CsvWriteMode }) =>
+      api.importCsv(payload),
     onSuccess: () => {
       for (const key of [["observations"], ["indicators"], ["indicator"], ["stats"], ["batches"], ["search"]]) {
         qc.invalidateQueries({ queryKey: key });

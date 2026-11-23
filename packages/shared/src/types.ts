@@ -82,6 +82,7 @@ export type GlobalSearchResult = {
 };
 
 export type ImportStatus = "completed" | "completed_with_errors" | "failed";
+export type CsvWriteMode = "upsert" | "append";
 
 export type ImportResult = {
   batch_id: string;

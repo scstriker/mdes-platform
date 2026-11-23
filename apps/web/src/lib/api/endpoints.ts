@@ -1,6 +1,7 @@
 import { request } from "./client";
 import type {
   Cluster,
+  CsvWriteMode,
   GlobalSearchResult,
   Health,
   ImportBatch,
@@ -39,10 +40,20 @@ export const api = {
   search: (params: { q: string; limit?: number }, o?: Opts) =>
     request<GlobalSearchResult>("/api/search", { ...o, query: params }),
   batches: (o?: Opts) => request<{ items: ImportBatch[] }>("/api/import/batches", o),
-  importCsv: (file: File, o?: Opts) => {
-    const fd = new FormData();
-    fd.append("file", file);
-    return request<ImportResult>("/api/import/csv", { ...o, method: "POST", body: fd });
+  importCsv: (
+    payload: File | { filename: string; csvText: string; mode?: CsvWriteMode },
+    o?: Opts,
+  ) => {
+    if (payload instanceof File) {
+      const fd = new FormData();
+      fd.append("file", payload);
+      return request<ImportResult>("/api/import/csv", { ...o, method: "POST", body: fd });
+    }
+    return request<ImportResult>("/api/import/csv", {
+      ...o,
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
   },
   tradeOverview: (params: { period?: string; dictVersion?: string } = {}, o?: Opts) =>
     request<TradeOverviewResponse>("/api/trade/overview", { ...o, query: params }),
