@@ -4,6 +4,7 @@
  * 导入用 @mdes/shared 的同一套解析器；数据只在内存里，刷新页面即重置。
  */
 import {
+  canonicalizeDimsJson,
   errorBody,
   matchesQuery,
   observationMatchesQuery,
@@ -81,9 +82,7 @@ function importText(
       ? [
           ...new Map(
             parsed.rows.map((r) => [
-              `${r.indicator_id}\u0000${r.period}\u0000${r.geo}\u0000${JSON.stringify(
-                Object.fromEntries(Object.entries(r.dims).sort(([a], [b]) => a.localeCompare(b))),
-              )}`,
+              `${r.indicator_id}\u0000${r.period}\u0000${r.geo}\u0000${canonicalizeDimsJson(r.dims)}`,
               r,
             ]),
           ).values(),
@@ -97,18 +96,11 @@ function importText(
 
   if (mode === "upsert") {
     const incomingKeys = new Set(
-      rows.map(
-        (r) =>
-          `${r.indicator_id}\u0000${r.period}\u0000${r.geo}\u0000${JSON.stringify(
-            Object.fromEntries(Object.entries(r.dims).sort(([a], [b]) => a.localeCompare(b))),
-          )}`,
-      ),
+      rows.map((r) => `${r.indicator_id}\u0000${r.period}\u0000${r.geo}\u0000${canonicalizeDimsJson(r.dims)}`),
     );
     for (let idx = observations.length - 1; idx >= 0; idx--) {
       const o = observations[idx];
-      const k = `${o.indicator_id}\u0000${o.period}\u0000${o.geo}\u0000${JSON.stringify(
-        Object.fromEntries(Object.entries(o.dims).sort(([a], [b]) => a.localeCompare(b))),
-      )}`;
+      const k = `${o.indicator_id}\u0000${o.period}\u0000${o.geo}\u0000${canonicalizeDimsJson(o.dims)}`;
       if (incomingKeys.has(k)) {
         observations.splice(idx, 1);
       }

@@ -461,4 +461,65 @@ describe("PR #3 独立审查 6 项问题回归验证（2 P1 + 4 P2）", () => {
     },
     30_000,
   );
+
+  it(
+    "[P2] 升级前存量未排序/嵌套/空白 dims 记录在 mode=upsert 下被精确匹配删除并更新，绝不产生两条并存重复",
+    async () => {
+      // 模拟升级前旧版代码落库的存量观测记录：键顺序未重排（b 在 a 前、含空格与嵌套逆序键 z.d/z.c 及 1.0 浮点字面量）
+      await h.sql([
+        `INSERT INTO import_batch (id, filename, status, row_ok, row_err, errors_json, created_at)
+         VALUES ('legacy-batch-001', 'legacy_pre_upgrade.csv', 'completed', 2, 0, '[]', '2025-01-01T00:00:00.000Z')`,
+        `INSERT INTO observation (indicator_id, period, geo, dims, value_num, unit, batch_id, created_at)
+         VALUES ('TRD-001', '2024-01', 'CN', '{ "b": 2, "a": 1 }', 10, '亿元', 'legacy-batch-001', '2025-01-01T00:00:00.000Z')`,
+        `INSERT INTO observation (indicator_id, period, geo, dims, value_num, unit, batch_id, created_at)
+         VALUES ('TRD-001', '2024-02', 'CN', '{"z":{"d":4,"c":3},"a":1.0}', 50, '亿元', 'legacy-batch-001', '2025-01-01T00:00:00.000Z')`,
+      ]);
+
+      // 升级后使用 mode=upsert 导入相同业务切片的新修正值（20 与 60）
+      const res = await h.request("/api/import/csv", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          filename: "post_upgrade_upsert.csv",
+          mode: "upsert",
+          csvText: [
+            "indicator_id,period,geo,dims,value_num,unit",
+            'TRD-001,2024-01,CN,"{""a"":1,""b"":2}",20,亿元',
+            'TRD-001,2024-02,CN,"{""a"":1,""z"":{""c"":3,""d"":4}}",60,亿元',
+          ].join("\n"),
+        }),
+      });
+      expect(res.status).toBe(200);
+      expect((await res.json()) as ImportResult).toMatchObject({ status: "completed", row_ok: 2 });
+
+      const page = (await (await h.request("/api/observations?indicator_id=TRD-001")).json()) as ObservationPage;
+      // 严禁旧值 10/50 与新值 20/60 并存！总数必须保持 2 条且数值更新为 20、60
+      expect(page.total).toBe(2);
+      const byPeriod = Object.fromEntries(page.items.map((o) => [o.period, o.value_num]));
+      expect(byPeriod).toEqual({ "2024-01": 20, "2024-02": 60 });
+
+      // 同时验证 0006 迁移 SQL 对存量顶层未排序 dims 的直接规范化效果
+      await h.sql([
+        `INSERT INTO observation (indicator_id, period, geo, dims, value_num, unit, batch_id, created_at)
+         VALUES ('TRD-002', '2024-01', 'CN', '{ "trade_type": "export", "partner": "DE" }', 88, '亿元', 'legacy-batch-001', '2025-01-01T00:00:00.000Z')`,
+      ]);
+      const mig0006 = (await import("node:fs")).readFileSync(
+        new URL("../migrations/0006_canonicalize_observation_dims.sql", import.meta.url),
+        "utf8",
+      );
+      await h.sql([
+        mig0006
+          .split(/\r?\n/)
+          .filter((l) => !l.trim().startsWith("--"))
+          .join("\n")
+          .trim()
+          .replace(/;$/, ""),
+      ]);
+      const migratedRow = await h.query<{ dims: string }>(
+        "SELECT dims FROM observation WHERE indicator_id = 'TRD-002' AND period = '2024-01'",
+      );
+      expect(migratedRow[0].dims).toBe('{"partner":"DE","trade_type":"export"}');
+    },
+    30_000,
+  );
 });
