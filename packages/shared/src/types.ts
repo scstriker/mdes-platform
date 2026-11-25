@@ -143,6 +143,30 @@ export type TradeImportResponse = {
   reconciliationNote?: string | null;
 };
 
+export type TradeBulkImportResponse = {
+  dictVersion: string;
+  months: string[];
+  monthCount: number;
+  batchIds: string[];
+  sourceSha256: string;
+  evidenceSha256s: string[];
+  totalRowCount: number;
+  status: TradePublishStatus;
+  releaseId: string | null;
+  publishedMonths: string[];
+  reconciliationNotes: Record<string, string>;
+};
+
+export type TradePublishResponse = {
+  dictVersion: string;
+  published: boolean;
+  releaseId: string | null;
+  newlyPublishedMonths: string[];
+  publishedMonths: string[];
+  availablePeriods: string[];
+  reconciliationNotes: Record<string, string>;
+};
+
 export type TradeSourceBatchRef = {
   batchId: string;
   month: string;

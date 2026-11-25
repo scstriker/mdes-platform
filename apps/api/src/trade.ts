@@ -1,17 +1,21 @@
 import {
+  buildTradeScopeKey,
   computeConcentration,
   computeYoyPct,
   isPngBytes,
   parseCustomsCsvBytes,
+  parseMultiMonthCustomsCsvBytes,
   parseTradePeriod,
   roundMetric,
   scaledToUsdNumber,
   TRADE_FLOWS,
   TRADE_GROUPINGS,
+  validateTradeBulkManifest,
   validateTradeManifest,
   type NormalizedTradeManifest,
   type ParsedCustomsFactRow,
   type TradeBatchListItem,
+  type TradeBulkImportResponse,
   type TradeCategoryStat,
   type TradeCoverageCell,
   type TradeCoverageCellStatus,
@@ -27,6 +31,7 @@ import {
   type TradeOverviewPublished,
   type TradeOverviewResponse,
   type TradePartnerStat,
+  type TradePublishResponse,
   type TradeQuantityStat,
   type TradeRegimeStat,
   type TradeRegionStat,
@@ -56,10 +61,20 @@ export type ImportTradeBatchOptions = {
   file: TradeFileInput | null;
   emptyEvidences: TradeFileInput[];
   maxRows: number;
+  /** 延迟发布：仅落盘暂存候选批次与覆盖矩阵，等待显式 POST /api/trade/publish 一次性发布 */
+  deferPublish?: boolean;
   /** 测试钩子：在候选数据写入成功后、正式发布事务提交前抛出异常（验证 AC-014 发布中断与重试） */
   failBeforePublishCommit?: boolean;
   /** 测试钩子：在首次发布提交前模拟另一 Worker 实例抢先写入同 version_seq，验证 CAS 冲突重读重算 */
   preemptReleaseOnce?: boolean;
+};
+
+export type ImportTradeBulkOptions = {
+  rawManifest: string | null;
+  file: TradeFileInput | null;
+  emptyEvidences: TradeFileInput[];
+  maxRows: number;
+  deferPublish?: boolean;
 };
 
 const ID_QUERY_CHUNK_SIZE = 200;
@@ -263,6 +278,31 @@ const INSERT_DERIVED_OBS_CHUNK = `
   FROM json_each(?3)
 `;
 
+const INSERT_RECON_CHUNK = `
+  INSERT INTO trade_reconciliation_log (
+    dict_version, month, flow, hs8, grouping, product_usd_scaled, group_usd_scaled, diff_usd_scaled, status, checked_at
+  )
+  SELECT
+    ?1,
+    json_extract(value, '$.month'),
+    json_extract(value, '$.flow'),
+    json_extract(value, '$.hs8'),
+    json_extract(value, '$.grouping'),
+    CAST(json_extract(value, '$.prodScaled') AS INTEGER),
+    CAST(json_extract(value, '$.grpScaled') AS INTEGER),
+    CAST(json_extract(value, '$.diffScaled') AS INTEGER),
+    json_extract(value, '$.status'),
+    ?2
+  FROM json_each(?3)
+  WHERE 1 = 1
+  ON CONFLICT(dict_version, month, flow, hs8, grouping) DO UPDATE SET
+    product_usd_scaled = excluded.product_usd_scaled,
+    group_usd_scaled = excluded.group_usd_scaled,
+    diff_usd_scaled = excluded.diff_usd_scaled,
+    status = excluded.status,
+    checked_at = excluded.checked_at
+`;
+
 async function loadDictForYear(db: D1Database, dictVersion: string, year: number): Promise<DictItemRow[]> {
   const { results } = await db
     .prepare(
@@ -365,7 +405,8 @@ export async function importTradeBatch(
     sourceSha256 = await sha256Hex(options.file.bytes);
     filename = options.file.filename || "customs.csv";
     const allowHeaderOnlyEmpty =
-      options.emptyEvidences.length > 0 && manifest.emptyHs8.length === manifest.hs8.length;
+      Boolean(manifest.probeVerifiedZero) ||
+      (options.emptyEvidences.length > 0 && manifest.emptyHs8.length === manifest.hs8.length);
 
     const csvParsed = parseCustomsCsvBytes(options.file.bytes, manifest, {
       maxRows: options.maxRows,
@@ -387,11 +428,19 @@ export async function importTradeBatch(
     evidenceCoverageList = assigned.evidenceCoverageList;
     emptyEvidenceShaByHs8 = assigned.emptyEvidenceShaByHs8;
 
-    coverage = {
-      received: manifest.hs8.filter((c) => receivedSet.has(c)),
-      confirmedEmpty: manifest.hs8.filter((c) => !receivedSet.has(c) && assigned.provenEmptySet.has(c)),
-      missing: manifest.hs8.filter((c) => !receivedSet.has(c) && !assigned.provenEmptySet.has(c)),
-    };
+    if (manifest.probeVerifiedZero) {
+      coverage = {
+        received: manifest.hs8.filter((c) => receivedSet.has(c)),
+        confirmedEmpty: manifest.hs8.filter((c) => !receivedSet.has(c)),
+        missing: [],
+      };
+    } else {
+      coverage = {
+        received: manifest.hs8.filter((c) => receivedSet.has(c)),
+        confirmedEmpty: manifest.hs8.filter((c) => !receivedSet.has(c) && assigned.provenEmptySet.has(c)),
+        missing: manifest.hs8.filter((c) => !receivedSet.has(c) && !assigned.provenEmptySet.has(c)),
+      };
+    }
   }
 
   const emptyHs8Json = JSON.stringify(manifest.emptyHs8);
@@ -412,8 +461,8 @@ export async function importTradeBatch(
     .first<BatchMetaRow>();
 
   if (existingReplay) {
-    // 若该批次已被后续新修订替代（superseded_by 非空），或已成功发布：直接返回原批次，不覆盖当前正式发布版本
-    if (existingReplay.superseded_by !== null || existingReplay.publish_state === "published") {
+    // 若该批次已被后续新修订替代（superseded_by 非空），或已成功发布，或请求显式延迟发布：直接返回原批次
+    if (existingReplay.superseded_by !== null || existingReplay.publish_state === "published" || options.deferPublish) {
       const currentSnap = await db
         .prepare("SELECT release_id FROM trade_current_snapshot WHERE dict_version = ?1 AND period = ?2")
         .bind(manifest.dictVersion, manifest.month)
@@ -590,6 +639,24 @@ export async function importTradeBatch(
 
   await db.batch(stagingStmts);
 
+  if (options.deferPublish) {
+    const currentSnap = await db
+      .prepare("SELECT release_id FROM trade_current_snapshot WHERE dict_version = ?1 AND period = ?2")
+      .bind(manifest.dictVersion, manifest.month)
+      .first<{ release_id: string }>();
+    return {
+      batchId,
+      sourceSha256,
+      evidenceSha256s,
+      rowCount: rows.length,
+      coverage,
+      status: "staged",
+      releaseId: currentSnap?.release_id ?? null,
+      replayed: false,
+      reconciliationNote: null,
+    };
+  }
+
   // 4. 评估当月 2×4 覆盖与全国/分组对账，就绪则生成快照并原子切换版本
   const pub = await evaluateAndPublishMonth(db, manifest.dictVersion, manifest.month, {
     failBeforePublishCommit: options.failBeforePublishCommit,
@@ -606,6 +673,815 @@ export async function importTradeBatch(
     releaseId: pub.releaseId,
     replayed: false,
     reconciliationNote: pub.reconciliationNote,
+  };
+}
+
+export async function importTradeBulkBatch(
+  db: D1Database,
+  options: ImportTradeBulkOptions,
+): Promise<TradeBulkImportResponse> {
+  if (!options.rawManifest || !options.rawManifest.trim()) {
+    throw new AppError(400, "TRADE_MANIFEST_INVALID", { field: "manifest", reason: "missing manifest" });
+  }
+  let parsedJson: unknown;
+  try {
+    parsedJson = JSON.parse(options.rawManifest);
+  } catch {
+    throw new AppError(400, "TRADE_MANIFEST_INVALID", { field: "manifest", reason: "invalid JSON" });
+  }
+
+  const rawDictVer =
+    parsedJson && typeof parsedJson === "object" && !Array.isArray(parsedJson)
+      ? String((parsedJson as Record<string, unknown>).dictVersion ?? "").trim()
+      : "";
+
+  const { results: dictVersions } = await db
+    .prepare("SELECT dict_version FROM trade_dict_meta")
+    .all<{ dict_version: string }>();
+  const knownDictVersions = new Set(dictVersions.map((d) => d.dict_version));
+
+  const { results: rawAllDictRows } = rawDictVer
+    ? await db
+        .prepare("SELECT hs8 FROM trade_hs_dict WHERE dict_version = ?1")
+        .bind(rawDictVer)
+        .all<{ hs8: string }>()
+    : { results: [] as Array<{ hs8: string }> };
+  const dictHs8Set = new Set(rawAllDictRows.map((r) => r.hs8));
+
+  const manifestCheck = validateTradeBulkManifest(parsedJson, {
+    knownDictVersions,
+    dictHs8Set: knownDictVersions.has(rawDictVer) ? dictHs8Set : undefined,
+  });
+  if (!manifestCheck.ok) {
+    throw new AppError(manifestCheck.error.status, manifestCheck.error.code, manifestCheck.error.params);
+  }
+  const bulkManifest = manifestCheck.value;
+  const deferPublish = options.deferPublish ?? true;
+
+  for (const ev of options.emptyEvidences) {
+    if (!isPngBytes(ev.bytes)) {
+      throw new AppError(400, "TRADE_EVIDENCE_INVALID", { reason: "emptyEvidence_must_be_png" });
+    }
+  }
+  const evidenceSha256s = await Promise.all(options.emptyEvidences.map((ev) => sha256Hex(ev.bytes)));
+
+  if (!options.file && options.emptyEvidences.length === 0) {
+    throw new AppError(400, "TRADE_EVIDENCE_INVALID", { reason: "file_or_emptyEvidence_required" });
+  }
+
+  let sourceSha256 = "";
+  let filename = "";
+  let byMonth = new Map<string, ParsedCustomsFactRow[]>();
+  for (const m of bulkManifest.months) {
+    byMonth.set(m, []);
+  }
+
+  if (!options.file) {
+    if (!bulkManifest.probeVerifiedZero && bulkManifest.emptyHs8.length !== bulkManifest.hs8.length) {
+      throw new AppError(400, "TRADE_EVIDENCE_INVALID", { reason: "empty_evidence_only_requires_full_emptyHs8" });
+    }
+    sourceSha256 = evidenceSha256s[0];
+    filename = options.emptyEvidences[0].filename || "empty_evidence.png";
+  } else {
+    sourceSha256 = await sha256Hex(options.file.bytes);
+    filename = options.file.filename || "customs_bulk.csv";
+    const parsedMulti = parseMultiMonthCustomsCsvBytes(options.file.bytes, bulkManifest, {
+      maxRows: Math.max(options.maxRows, 100_000),
+      allowHeaderOnlyEmpty: Boolean(bulkManifest.probeVerifiedZero || options.emptyEvidences.length > 0),
+    });
+    if (!parsedMulti.ok) {
+      throw new AppError(parsedMulti.error.status, parsedMulti.error.code, parsedMulti.error.params);
+    }
+    byMonth = parsedMulti.byMonth;
+  }
+
+  const dictByYear = new Map<number, DictItemRow[]>();
+  const getYearDict = async (yr: number) => {
+    if (!dictByYear.has(yr)) {
+      dictByYear.set(yr, await loadDictForYear(db, bulkManifest.dictVersion, yr));
+    }
+    return dictByYear.get(yr)!;
+  };
+
+  const batchIds: string[] = [];
+  const activeMonths: string[] = [];
+  let totalRowCount = 0;
+  const createdAt = new Date().toISOString();
+  const evidenceJson = JSON.stringify(evidenceSha256s);
+  const stagingStmts: D1PreparedStatement[] = [];
+
+  for (const month of bulkManifest.months) {
+    const year = Number(month.slice(0, 4));
+    const yDict = await getYearDict(year);
+    const yearApplicableSet = new Set(yDict.filter((d) => d.applicable === 1).map((d) => d.hs8));
+    const monthRows = byMonth.get(month) ?? [];
+
+    for (const r of monthRows) {
+      if (!yearApplicableSet.has(r.hs8)) {
+        throw new AppError(400, "TRADE_CSV_INVALID", {
+          line: r.line,
+          field: "hs8",
+          reason: `hs8 '${r.hs8}' is marked notApplicable in year ${year}`,
+        });
+      }
+    }
+
+    const monthHs8 = bulkManifest.hs8.filter((c) => yearApplicableSet.has(c));
+    if (monthHs8.length === 0) {
+      continue;
+    }
+    activeMonths.push(month);
+    totalRowCount += monthRows.length;
+
+    const receivedSet = new Set(monthRows.map((r) => r.hs8));
+    let coverage: TradeImportCoverage;
+    let evidenceCoverageList: Array<{ filename: string; sha256: string; byteLength: number; coveredHs8: string[] }> = [];
+    let emptyEvidenceShaByHs8 = new Map<string, string>();
+
+    if (!options.file) {
+      const assigned = assignEmptyEvidencesToHs8(options.emptyEvidences, evidenceSha256s, monthHs8, true);
+      evidenceCoverageList = assigned.evidenceCoverageList;
+      emptyEvidenceShaByHs8 = assigned.emptyEvidenceShaByHs8;
+      coverage = {
+        received: [],
+        confirmedEmpty: monthHs8.filter((c) => assigned.provenEmptySet.has(c)),
+        missing: monthHs8.filter((c) => !assigned.provenEmptySet.has(c)),
+      };
+    } else if (bulkManifest.probeVerifiedZero) {
+      coverage = {
+        received: monthHs8.filter((c) => receivedSet.has(c)),
+        confirmedEmpty: monthHs8.filter((c) => !receivedSet.has(c)),
+        missing: [],
+      };
+    } else {
+      const candidateEmpty = bulkManifest.emptyHs8.filter((c) => yearApplicableSet.has(c) && !receivedSet.has(c));
+      const assigned = assignEmptyEvidencesToHs8(
+        options.emptyEvidences,
+        evidenceSha256s,
+        candidateEmpty,
+        options.emptyEvidences.length > 0 && monthRows.length === 0,
+      );
+      evidenceCoverageList = assigned.evidenceCoverageList;
+      emptyEvidenceShaByHs8 = assigned.emptyEvidenceShaByHs8;
+      coverage = {
+        received: monthHs8.filter((c) => receivedSet.has(c)),
+        confirmedEmpty: monthHs8.filter((c) => !receivedSet.has(c) && assigned.provenEmptySet.has(c)),
+        missing: monthHs8.filter((c) => !receivedSet.has(c) && !assigned.provenEmptySet.has(c)),
+      };
+    }
+
+    const scopeKey = buildTradeScopeKey({
+      dictVersion: bulkManifest.dictVersion,
+      month,
+      flow: bulkManifest.flow,
+      currency: "USD",
+      grouping: bulkManifest.grouping,
+      hs8: monthHs8,
+    });
+    const monthEmptyHs8 = coverage.confirmedEmpty;
+    const emptyHs8Json = JSON.stringify(monthEmptyHs8);
+
+    const existingReplay = await db
+      .prepare(
+        `SELECT * FROM trade_import_batch
+         WHERE scope_key = ?1
+           AND source_sha256 = ?2
+           AND empty_hs8_json = ?3
+           AND evidence_sha256s_json = ?4
+         ORDER BY created_at DESC
+         LIMIT 1`,
+      )
+      .bind(scopeKey, sourceSha256, emptyHs8Json, evidenceJson)
+      .first<BatchMetaRow>();
+
+    if (existingReplay) {
+      batchIds.push(existingReplay.batch_id);
+      continue;
+    }
+
+    const { results: siblingBatches } = await db
+      .prepare(
+        `SELECT batch_id, scope_key, hs8_json
+         FROM trade_import_batch
+         WHERE dict_version = ?1 AND month = ?2 AND flow = ?3 AND grouping = ?4 AND superseded_by IS NULL`,
+      )
+      .bind(bulkManifest.dictVersion, month, bulkManifest.flow, bulkManifest.grouping)
+      .all<{ batch_id: string; scope_key: string; hs8_json: string }>();
+
+    let prevSameScopeBatchId: string | null = null;
+    for (const sib of siblingBatches) {
+      if (sib.scope_key === scopeKey) {
+        prevSameScopeBatchId = sib.batch_id;
+        continue;
+      }
+      const sibHs8 = JSON.parse(sib.hs8_json) as string[];
+      const sibSet = new Set(sibHs8);
+      if (monthHs8.some((code) => sibSet.has(code))) {
+        throw new AppError(409, "TRADE_SCOPE_CONFLICT", {
+          existingBatchId: sib.batch_id,
+          existingHs8: sibHs8.join(","),
+          requestedHs8: monthHs8.join(","),
+        });
+      }
+    }
+
+    const batchId = crypto.randomUUID();
+    batchIds.push(batchId);
+
+    stagingStmts.push(
+      db
+        .prepare(
+          `INSERT INTO import_batch (id, filename, status, row_ok, row_err, errors_json, created_at)
+           VALUES (?1, ?2, 'completed', ?3, 0, '[]', ?4)`,
+        )
+        .bind(batchId, filename, monthRows.length, createdAt),
+      db
+        .prepare(
+          `INSERT INTO trade_import_batch (
+             batch_id, dict_version, month, flow, currency, grouping, scope_key,
+             hs8_json, empty_hs8_json, received_hs8_json, confirmed_empty_hs8_json, missing_hs8_json,
+             filename, source_sha256, evidence_sha256s_json, row_count, publish_state, superseded_by, created_at
+           ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, 'staged', NULL, ?17)`,
+        )
+        .bind(
+          batchId,
+          bulkManifest.dictVersion,
+          month,
+          bulkManifest.flow,
+          "USD",
+          bulkManifest.grouping,
+          scopeKey,
+          JSON.stringify(monthHs8),
+          emptyHs8Json,
+          JSON.stringify(coverage.received),
+          JSON.stringify(coverage.confirmedEmpty),
+          JSON.stringify(coverage.missing),
+          filename,
+          sourceSha256,
+          evidenceJson,
+          monthRows.length,
+          createdAt,
+        ),
+    );
+
+    if (prevSameScopeBatchId) {
+      stagingStmts.push(
+        db
+          .prepare("UPDATE trade_import_batch SET superseded_by = ?1 WHERE batch_id = ?2")
+          .bind(batchId, prevSameScopeBatchId),
+      );
+    }
+
+    for (const evItem of evidenceCoverageList) {
+      stagingStmts.push(
+        db
+          .prepare(
+            `INSERT INTO trade_batch_evidence (id, batch_id, filename, sha256, byte_length, covered_hs8_json, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)`,
+          )
+          .bind(
+            crypto.randomUUID(),
+            batchId,
+            evItem.filename,
+            evItem.sha256,
+            evItem.byteLength,
+            JSON.stringify(evItem.coveredHs8),
+            createdAt,
+          ),
+      );
+    }
+
+    const coverageRecords = [
+      ...coverage.received.map((hs8) => ({ hs8, status: "received", evidenceSha256: sourceSha256 })),
+      ...coverage.confirmedEmpty.map((hs8) => ({
+        hs8,
+        status: "confirmed_empty",
+        evidenceSha256: emptyEvidenceShaByHs8.get(hs8) ?? evidenceSha256s[0] ?? sourceSha256,
+      })),
+      ...coverage.missing.map((hs8) => ({ hs8, status: "missing", evidenceSha256: null })),
+    ];
+    for (let i = 0; i < coverageRecords.length; i += CHUNK_SIZE) {
+      stagingStmts.push(
+        db
+          .prepare(INSERT_COVERAGE_CHUNK)
+          .bind(
+            batchId,
+            bulkManifest.dictVersion,
+            month,
+            bulkManifest.flow,
+            bulkManifest.grouping,
+            JSON.stringify(coverageRecords.slice(i, i + CHUNK_SIZE)),
+          ),
+      );
+    }
+
+    for (let i = 0; i < monthRows.length; i += CHUNK_SIZE) {
+      const chunk = monthRows.slice(i, i + CHUNK_SIZE).map((r) => ({
+        hs8: r.hs8,
+        itemName: r.itemName,
+        groupCode: r.groupCode,
+        groupName: r.groupName,
+        usdScaled: r.usdScaled.toString(),
+        usdRaw: r.usdRaw,
+        qty1: r.qty1,
+        unit1: r.unit1,
+        qty2: r.qty2,
+        unit2: r.unit2,
+      }));
+      stagingStmts.push(
+        db
+          .prepare(INSERT_FACT_CHUNK)
+          .bind(bulkManifest.dictVersion === "" ? batchId : batchId, bulkManifest.dictVersion, month, bulkManifest.flow, bulkManifest.grouping, JSON.stringify(chunk)),
+      );
+    }
+  }
+
+  for (let i = 0; i < stagingStmts.length; i += 200) {
+    await db.batch(stagingStmts.slice(i, i + 200));
+  }
+
+  if (deferPublish) {
+    return {
+      dictVersion: bulkManifest.dictVersion,
+      months: activeMonths,
+      monthCount: activeMonths.length,
+      batchIds,
+      sourceSha256,
+      evidenceSha256s,
+      totalRowCount,
+      status: "staged",
+      releaseId: null,
+      publishedMonths: [],
+      reconciliationNotes: {},
+    };
+  }
+
+  const pub = await publishAllReadyTradeMonths(db, bulkManifest.dictVersion);
+  return {
+    dictVersion: bulkManifest.dictVersion,
+    months: activeMonths,
+    monthCount: activeMonths.length,
+    batchIds,
+    sourceSha256,
+    evidenceSha256s,
+    totalRowCount,
+    status: pub.published ? "published" : "staged",
+    releaseId: pub.releaseId,
+    publishedMonths: pub.publishedMonths,
+    reconciliationNotes: pub.reconciliationNotes,
+  };
+}
+
+export async function publishAllReadyTradeMonths(
+  db: D1Database,
+  rawDictVersion?: string | null,
+): Promise<TradePublishResponse> {
+  const dictVersion = rawDictVersion?.trim() || DEFAULT_DICT_VERSION;
+  const dictMeta = await db
+    .prepare("SELECT dict_version FROM trade_dict_meta WHERE dict_version = ?1")
+    .bind(dictVersion)
+    .first<{ dict_version: string }>();
+  if (!dictMeta) {
+    throw new AppError(400, "TRADE_MANIFEST_INVALID", { field: "dictVersion", reason: `unknown dictVersion: ${dictVersion}` });
+  }
+
+  return withDictPublishLock(dictVersion, async () => {
+    for (let attempt = 0; attempt < MAX_PUBLISH_CAS_RETRIES; attempt++) {
+      try {
+        return await attemptPublishAllReadyOnce(db, dictVersion);
+      } catch (err) {
+        if (isTradeReleaseCasConflict(err) && attempt + 1 < MAX_PUBLISH_CAS_RETRIES) {
+          continue;
+        }
+        throw err;
+      }
+    }
+    throw new AppError(500, "INTERNAL_ERROR");
+  });
+}
+
+async function attemptPublishAllReadyOnce(db: D1Database, dictVersion: string): Promise<TradePublishResponse> {
+  const prevRelease = await db
+    .prepare(
+      `SELECT release_id, COALESCE(version_seq, 0) AS version_seq, published_months_json, available_periods_json
+       FROM trade_release
+       WHERE dict_version = ?1
+       ORDER BY version_seq DESC, rowid DESC
+       LIMIT 1`,
+    )
+    .bind(dictVersion)
+    .first<{
+      release_id: string;
+      version_seq: number;
+      published_months_json: string;
+      available_periods_json: string;
+    }>();
+
+  const { results: activeScopeRows } = await db
+    .prepare("SELECT * FROM trade_active_scope WHERE dict_version = ?1")
+    .bind(dictVersion)
+    .all<{ scope_key: string; month: string; flow: TradeFlow; grouping: TradeGrouping; batch_id: string }>();
+
+  const prevActiveByMonth = new Map<string, string[]>();
+  for (const r of activeScopeRows) {
+    const arr = prevActiveByMonth.get(r.month) ?? [];
+    arr.push(r.batch_id);
+    prevActiveByMonth.set(r.month, arr);
+  }
+
+  const { results: allCandidates } = await db
+    .prepare(
+      `SELECT * FROM trade_import_batch
+       WHERE dict_version = ?1 AND superseded_by IS NULL
+       ORDER BY month ASC, flow ASC, grouping ASC, scope_key ASC`,
+    )
+    .bind(dictVersion)
+    .all<BatchMetaRow>();
+
+  const candidatesByMonth = new Map<string, BatchMetaRow[]>();
+  for (const b of allCandidates) {
+    const arr = candidatesByMonth.get(b.month) ?? [];
+    arr.push(b);
+    candidatesByMonth.set(b.month, arr);
+  }
+
+  const dictCache = new Map<number, DictItemRow[]>();
+  const getDict = async (y: number) => {
+    if (!dictCache.has(y)) {
+      dictCache.set(y, await loadDictForYear(db, dictVersion, y));
+    }
+    return dictCache.get(y)!;
+  };
+
+  const activeBatchesByMonth = new Map<string, string[]>(prevActiveByMonth);
+  const monthsToReconcile: Array<{ month: string; applicableSet: Set<string>; batches: BatchMetaRow[] }> = [];
+
+  for (const [month, batches] of [...candidatesByMonth.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+    const year = Number(month.slice(0, 4));
+    const dictItems = await getDict(year);
+    const applicableSet = new Set(dictItems.filter((d) => d.applicable === 1).map((d) => d.hs8));
+    if (applicableSet.size === 0) continue;
+
+    let complete = true;
+    for (const flow of TRADE_FLOWS) {
+      for (const grouping of TRADE_GROUPINGS) {
+        const covered = new Set<string>();
+        const matching = batches.filter((b) => b.flow === flow && b.grouping === grouping);
+        for (const b of matching) {
+          const missing = JSON.parse(b.missing_hs8_json) as string[];
+          if (missing.length > 0) {
+            complete = false;
+            break;
+          }
+          for (const c of JSON.parse(b.received_hs8_json) as string[]) covered.add(c);
+          for (const c of JSON.parse(b.confirmed_empty_hs8_json) as string[]) covered.add(c);
+        }
+        if (!complete) break;
+        for (const reqHs8 of applicableSet) {
+          if (!covered.has(reqHs8)) {
+            complete = false;
+            break;
+          }
+        }
+        if (!complete) break;
+      }
+      if (!complete) break;
+    }
+    if (!complete) continue;
+
+    const candIdsSorted = batches.map((b) => b.batch_id).sort();
+    const prevIdsSorted = [...(prevActiveByMonth.get(month) ?? [])].sort();
+    const isUnchanged =
+      candIdsSorted.length === prevIdsSorted.length && candIdsSorted.every((id, idx) => id === prevIdsSorted[idx]);
+    if (isUnchanged) {
+      continue;
+    }
+
+    monthsToReconcile.push({ month, applicableSet, batches });
+  }
+
+  const reconciliationNotes: Record<string, string> = {};
+  const newlyPublishedMonths: string[] = [];
+  const newlyPublishedBatches: BatchMetaRow[] = [];
+  const reconPayloadRows: Array<{
+    month: string;
+    flow: TradeFlow;
+    hs8: string;
+    grouping: TradeGrouping;
+    prodScaled: string;
+    grpScaled: string;
+    diffScaled: string;
+    status: string;
+  }> = [];
+
+  if (monthsToReconcile.length > 0) {
+    const reconcileBatchIds = monthsToReconcile.flatMap((m) => m.batches.map((b) => b.batch_id));
+    const reconcileFacts = await queryFactsByBatchIds(db, reconcileBatchIds);
+    const factsByMonthRecon = new Map<string, FactDbRow[]>();
+    for (const f of reconcileFacts) {
+      const list = factsByMonthRecon.get(f.month) ?? [];
+      list.push(f);
+      factsByMonthRecon.set(f.month, list);
+    }
+
+    for (const { month, applicableSet, batches } of monthsToReconcile) {
+      const sumByCombo = new Map<string, bigint>();
+      for (const f of factsByMonthRecon.get(month) ?? []) {
+        const key = `${f.flow}|${f.grouping}|${f.hs8}`;
+        sumByCombo.set(key, (sumByCombo.get(key) ?? 0n) + BigInt(f.usd_scaled_str));
+      }
+
+      const discrepancies: string[] = [];
+      for (const flow of TRADE_FLOWS) {
+        for (const hs8 of applicableSet) {
+          const prodVal = sumByCombo.get(`${flow}|product|${hs8}`) ?? 0n;
+          for (const g of ["partner", "regime", "region"] as const) {
+            const grpVal = sumByCombo.get(`${flow}|${g}|${hs8}`) ?? 0n;
+            const diff = grpVal - prodVal;
+            if (diff !== 0n) {
+              discrepancies.push(`${flow}/${g}/${hs8}: diff=${scaledToUsdNumber(diff)}`);
+            }
+            reconPayloadRows.push({
+              month,
+              flow,
+              hs8,
+              grouping: g,
+              prodScaled: prodVal.toString(),
+              grpScaled: grpVal.toString(),
+              diffScaled: diff.toString(),
+              status: diff === 0n ? "matched" : "pending_review",
+            });
+          }
+        }
+      }
+
+      if (discrepancies.length > 0) {
+        reconciliationNotes[month] = discrepancies.join("; ");
+      } else {
+        newlyPublishedMonths.push(month);
+        newlyPublishedBatches.push(...batches);
+        activeBatchesByMonth.set(
+          month,
+          batches.map((b) => b.batch_id),
+        );
+      }
+    }
+  }
+
+  const now = new Date().toISOString();
+  if (reconPayloadRows.length > 0) {
+    const reconStmts: D1PreparedStatement[] = [];
+    for (let i = 0; i < reconPayloadRows.length; i += CHUNK_SIZE) {
+      reconStmts.push(
+        db.prepare(INSERT_RECON_CHUNK).bind(dictVersion, now, JSON.stringify(reconPayloadRows.slice(i, i + CHUNK_SIZE))),
+      );
+    }
+    for (let i = 0; i < reconStmts.length; i += 100) {
+      await db.batch(reconStmts.slice(i, i + 100));
+    }
+  }
+
+  const publishedMonths = [...activeBatchesByMonth.keys()].sort();
+  const publishedMonthSet = new Set(publishedMonths);
+  const availablePeriods = computeAllAvailablePeriods(publishedMonthSet);
+
+  if (newlyPublishedMonths.length === 0) {
+    return {
+      dictVersion,
+      published: false,
+      releaseId: prevRelease?.release_id ?? null,
+      newlyPublishedMonths: [],
+      publishedMonths,
+      availablePeriods,
+      reconciliationNotes,
+    };
+  }
+
+  const nextVersionSeq = (prevRelease?.version_seq ?? 0) + 1;
+  const latestMonth = publishedMonths[publishedMonths.length - 1];
+  const releaseId = crypto.randomUUID();
+  const triggerBatchId = newlyPublishedBatches[newlyPublishedBatches.length - 1]!.batch_id;
+
+  const targetPeriodsSet = new Set<string>();
+  for (const m of newlyPublishedMonths) {
+    for (const p of computeAffectedPeriods(m, publishedMonthSet, availablePeriods)) {
+      targetPeriodsSet.add(p);
+    }
+  }
+  const targetPeriods = [...targetPeriodsSet].sort();
+
+  const neededMonths = new Set<string>();
+  for (const tp of targetPeriods) {
+    const parsed = parseTradePeriod(tp)!;
+    for (const m of parsed.months) neededMonths.add(m);
+    const prior = parseTradePeriod(parsed.priorPeriod)!;
+    if (prior.months.every((m) => publishedMonthSet.has(m))) {
+      for (const m of prior.months) neededMonths.add(m);
+    }
+    for (let mm = 1; mm <= 12; mm++) {
+      const mStr = `${parsed.year}-${String(mm).padStart(2, "0")}`;
+      if (publishedMonthSet.has(mStr)) {
+        neededMonths.add(mStr);
+        const priorMStr = `${parsed.year - 1}-${String(mm).padStart(2, "0")}`;
+        if (publishedMonthSet.has(priorMStr)) neededMonths.add(priorMStr);
+      }
+    }
+  }
+
+  const neededBatchIds: string[] = [];
+  for (const m of neededMonths) {
+    for (const bid of activeBatchesByMonth.get(m) ?? []) {
+      neededBatchIds.push(bid);
+    }
+  }
+
+  const batchMetaMap = await queryBatchesByIds(db, neededBatchIds);
+  const allNeededFacts = await queryFactsByBatchIds(db, neededBatchIds);
+  const factsByMonth = new Map<string, FactDbRow[]>();
+  for (const f of allNeededFacts) {
+    const list = factsByMonth.get(f.month) ?? [];
+    list.push(f);
+    factsByMonth.set(f.month, list);
+  }
+
+  const snapshotsToWrite: Array<{ period: string; payload: TradeOverviewPublished }> = [];
+  const derivedObsRows: Array<{
+    indicator_id: string;
+    period: string;
+    geo: string;
+    dims: string;
+    value_num: number | null;
+    value_text: string | null;
+    unit: string;
+    object_ref: string;
+  }> = [];
+
+  for (const tp of targetPeriods) {
+    const parsed = parseTradePeriod(tp)!;
+    const yDict = await getDict(parsed.year);
+    const prevYDict = await getDict(parsed.year - 1);
+    const payload = buildPeriodSnapshot({
+      dictVersion,
+      period: tp,
+      releaseId,
+      availablePeriods,
+      publishedMonthSet,
+      activeBatchesByMonth,
+      batchMetaMap,
+      factsByMonth,
+      yearDict: yDict,
+      priorYearDict: prevYDict,
+    });
+    snapshotsToWrite.push({ period: tp, payload });
+    derivedObsRows.push(...buildDerivedObservations(payload));
+  }
+
+  const headerStmts: D1PreparedStatement[] = [
+    db
+      .prepare(
+        `INSERT INTO trade_release (release_id, dict_version, prev_release_id, version_seq, published_months_json, available_periods_json, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)`,
+      )
+      .bind(
+        releaseId,
+        dictVersion,
+        prevRelease?.release_id ?? null,
+        nextVersionSeq,
+        JSON.stringify(publishedMonths),
+        JSON.stringify(availablePeriods),
+        now,
+      ),
+    db
+      .prepare("DELETE FROM trade_active_scope WHERE dict_version = ?1 AND month IN (SELECT value FROM json_each(?2))")
+      .bind(dictVersion, JSON.stringify(newlyPublishedMonths)),
+  ];
+
+  for (let i = 0; i < newlyPublishedBatches.length; i += ID_QUERY_CHUNK_SIZE) {
+    const scopeChunk = newlyPublishedBatches.slice(i, i + ID_QUERY_CHUNK_SIZE).map((b) => ({
+      scopeKey: b.scope_key,
+      month: b.month,
+      flow: b.flow,
+      grouping: b.grouping,
+      batchId: b.batch_id,
+    }));
+    const idChunk = scopeChunk.map((s) => s.batchId);
+    headerStmts.push(
+      db
+        .prepare(
+          `INSERT INTO trade_active_scope (scope_key, dict_version, month, flow, grouping, batch_id, release_id, updated_at)
+           SELECT
+             json_extract(value, '$.scopeKey'),
+             ?1,
+             json_extract(value, '$.month'),
+             json_extract(value, '$.flow'),
+             json_extract(value, '$.grouping'),
+             json_extract(value, '$.batchId'),
+             ?2,
+             ?3
+           FROM json_each(?4)`,
+        )
+        .bind(dictVersion, releaseId, now, JSON.stringify(scopeChunk)),
+      db
+        .prepare(
+          "UPDATE trade_import_batch SET publish_state = 'published' WHERE batch_id IN (SELECT value FROM json_each(?1))",
+        )
+        .bind(JSON.stringify(idChunk)),
+    );
+  }
+
+  const buildSnapStmts = (slice: Array<{ period: string; payload: TradeOverviewPublished }>) => {
+    const stmts: D1PreparedStatement[] = [];
+    for (const { period, payload } of slice) {
+      const payloadStr = JSON.stringify(payload);
+      const batchesStr = JSON.stringify(payload.sourceBatches);
+      stmts.push(
+        db
+          .prepare(
+            `INSERT INTO trade_period_snapshot (snapshot_id, dict_version, period, release_id, source_batches_json, payload_json, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)`,
+          )
+          .bind(crypto.randomUUID(), dictVersion, period, releaseId, batchesStr, payloadStr, now),
+        db
+          .prepare(
+            `INSERT INTO trade_current_snapshot (dict_version, period, is_latest_month, release_id, available_periods_json, payload_json, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(dict_version, period) DO UPDATE SET
+               is_latest_month = excluded.is_latest_month,
+               release_id = excluded.release_id,
+               available_periods_json = excluded.available_periods_json,
+               payload_json = excluded.payload_json,
+               updated_at = excluded.updated_at`,
+          )
+          .bind(
+            dictVersion,
+            period,
+            period === latestMonth ? 1 : 0,
+            releaseId,
+            JSON.stringify(availablePeriods),
+            payloadStr,
+            now,
+          ),
+        db
+          .prepare("DELETE FROM observation WHERE object_ref = ?1")
+          .bind(`trade_snapshot:${dictVersion}:${period}`),
+      );
+    }
+    return stmts;
+  };
+
+  if (snapshotsToWrite.length <= 30) {
+    const publishStmts = [
+      ...headerStmts,
+      ...buildSnapStmts(snapshotsToWrite),
+      db
+        .prepare(
+          `UPDATE trade_current_snapshot
+           SET is_latest_month = CASE WHEN period = ?2 THEN 1 ELSE 0 END,
+               available_periods_json = ?3
+           WHERE dict_version = ?1`,
+        )
+        .bind(dictVersion, latestMonth, JSON.stringify(availablePeriods)),
+    ];
+    for (let i = 0; i < derivedObsRows.length; i += CHUNK_SIZE) {
+      publishStmts.push(
+        db.prepare(INSERT_DERIVED_OBS_CHUNK).bind(triggerBatchId, now, JSON.stringify(derivedObsRows.slice(i, i + CHUNK_SIZE))),
+      );
+    }
+    await db.batch(publishStmts);
+  } else {
+    // 大跨度多年批量发布：先提交 CAS 版本头，再按 25 个期间一批安全写入快照（兼顾远程 D1 单次 RPC 体积上限）
+    await db.batch(headerStmts);
+    for (let i = 0; i < snapshotsToWrite.length; i += 25) {
+      await db.batch(buildSnapStmts(snapshotsToWrite.slice(i, i + 25)));
+    }
+    const tailStmts: D1PreparedStatement[] = [
+      db
+        .prepare(
+          `UPDATE trade_current_snapshot
+           SET is_latest_month = CASE WHEN period = ?2 THEN 1 ELSE 0 END,
+               available_periods_json = ?3
+           WHERE dict_version = ?1`,
+        )
+        .bind(dictVersion, latestMonth, JSON.stringify(availablePeriods)),
+    ];
+    for (let i = 0; i < derivedObsRows.length; i += CHUNK_SIZE) {
+      tailStmts.push(
+        db.prepare(INSERT_DERIVED_OBS_CHUNK).bind(triggerBatchId, now, JSON.stringify(derivedObsRows.slice(i, i + CHUNK_SIZE))),
+      );
+    }
+    for (let i = 0; i < tailStmts.length; i += 100) {
+      await db.batch(tailStmts.slice(i, i + 100));
+    }
+  }
+
+  return {
+    dictVersion,
+    published: true,
+    releaseId,
+    newlyPublishedMonths,
+    publishedMonths,
+    availablePeriods,
+    reconciliationNotes,
   };
 }
 
