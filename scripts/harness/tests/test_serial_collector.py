@@ -151,6 +151,22 @@ class SerialCollectorTests(unittest.TestCase):
 
         self.assertIn("browser-use", os.environ.get("PYTHONPATH", ""))
 
+    def test_chunked_bridge_injection_stays_under_64kib_ipc_limit(self):
+        from agent_helpers import inject_customs_suite_bridge
+
+        sent_expressions = []
+
+        def fake_js(expr: str):
+            sent_expressions.append(expr)
+            if "verifyDictionary" in expr:
+                return {"dictVersion": "202601", "hs8Count": 164}
+            return None
+
+        res = inject_customs_suite_bridge(fake_js, collector.DEFAULT_USERSCRIPT_PATH)
+        self.assertEqual(res["hs8Count"], 164)
+        self.assertGreater(len(sent_expressions), 3)
+        self.assertTrue(all(len(json.dumps({"expr": e}).encode("utf-8")) < 40_000 for e in sent_expressions))
+
 
 if __name__ == "__main__":
     unittest.main()

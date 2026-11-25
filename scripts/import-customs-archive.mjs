@@ -7,11 +7,12 @@
  *   node scripts/import-customs-archive.mjs --archive data/customs-raw --target local-d1
  *   node scripts/import-customs-archive.mjs --archive data/customs-raw --api-url http://127.0.0.1:8787
  */
+import { spawn } from "node:child_process";
 import fs from "node:fs";
+import net from "node:net";
+import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { build } from "esbuild";
-import { Miniflare } from "miniflare";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const PLATFORM_ROOT = path.resolve(here, "..");
@@ -24,7 +25,7 @@ function parseArgs(argv) {
     target: "local-d1",
     apiUrl: "",
     dictVersion: "202601",
-    persistDir: path.join(API_ROOT, ".wrangler", "state", "v3", "d1"),
+    persistDir: path.join(API_ROOT, ".wrangler", "state"),
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -53,59 +54,97 @@ function collectManifestFiles(dir) {
   return out.sort();
 }
 
+function findFreePort() {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.listen(0, "127.0.0.1", () => {
+      const addr = srv.address();
+      const port = typeof addr === "object" && addr ? addr.port : 0;
+      srv.close((err) => (err ? reject(err) : resolve(port)));
+    });
+    srv.on("error", reject);
+  });
+}
+
+function normalizeWranglerPersistRoot(persistDir) {
+  const resolved = path.resolve(persistDir);
+  const norm = resolved.replace(/\\/g, "/").replace(/\/+$/, "");
+  if (norm.endsWith("/v3/d1")) {
+    return path.resolve(resolved, "../..");
+  }
+  return resolved;
+}
+
 async function createLocalD1Client(persistDir) {
-  const tmpOutDir = path.join(API_ROOT, ".wrangler", "archive-import");
-  fs.mkdirSync(tmpOutDir, { recursive: true });
-  const outfile = path.join(tmpOutDir, `worker-${process.pid}.mjs`);
-  await build({
-    entryPoints: [path.join(API_ROOT, "src", "index.ts")],
-    bundle: true,
-    format: "esm",
-    platform: "browser",
-    conditions: ["workerd", "worker", "browser"],
-    target: "es2022",
-    outfile,
-    logLevel: "silent",
-  });
+  const require = createRequire(import.meta.url);
+  const wranglerBin = path.resolve(
+    path.dirname(require.resolve("wrangler/package.json")),
+    "bin/wrangler.js",
+  );
+  const persistRoot = normalizeWranglerPersistRoot(persistDir);
+  const port = await findFreePort();
+  const baseUrl = `http://127.0.0.1:${port}`;
 
-  // Wrangler local D1 database id from wrangler.toml (`database_id = "09c2b216-6620-4f7c-b39d-c170df208156"`)
-  const wranglerToml = fs.readFileSync(path.join(API_ROOT, "wrangler.toml"), "utf8");
-  const idMatch = /database_id\s*=\s*"([^"]+)"/.exec(wranglerToml);
-  const d1Id = idMatch ? idMatch[1] : "mdes";
-
-  const mf = new Miniflare({
-    cf: false,
-    modules: true,
-    scriptPath: outfile,
-    compatibilityDate: "2026-07-01",
-    compatibilityFlags: ["nodejs_compat"],
-    d1Databases: { DB: d1Id },
-    d1Persist: persistDir,
-    bindings: { IMPORT_MAX_ROWS: "100000" },
-  });
-  await mf.ready;
-
-  return {
-    async sendMultipart(pathname, form) {
-      const encoded = new Request("http://localhost", { method: "POST", body: form });
-      const res = await mf.dispatchFetch(`http://localhost${pathname}`, {
-        method: "POST",
-        body: await encoded.arrayBuffer(),
-        headers: { "content-type": encoded.headers.get("content-type") },
-      });
-      return { status: res.status, json: await res.json() };
+  const proc = spawn(
+    process.execPath,
+    [
+      wranglerBin,
+      "dev",
+      "--port",
+      String(port),
+      "--ip",
+      "127.0.0.1",
+      "--persist-to",
+      persistRoot,
+      "--var",
+      "IMPORT_MAX_ROWS:100000",
+    ],
+    {
+      cwd: API_ROOT,
+      env: { ...process.env, WRANGLER_SEND_METRICS: "false", CI: "1" },
+      stdio: ["ignore", "pipe", "pipe"],
     },
-    async sendJson(pathname, method = "GET", body = undefined) {
-      const init = { method, headers: {} };
-      if (body !== undefined) {
-        init.headers["content-type"] = "application/json";
-        init.body = JSON.stringify(body);
+  );
+
+  let stderrTail = "";
+  proc.stderr?.on("data", (chunk) => {
+    stderrTail = (stderrTail + chunk.toString("utf8")).slice(-2000);
+  });
+
+  const deadline = Date.now() + 45_000;
+  let ready = false;
+  while (Date.now() < deadline) {
+    if (proc.exitCode !== null) {
+      throw new Error(`本地 wrangler dev 提前退出 (code=${proc.exitCode}): ${stderrTail}`);
+    }
+    try {
+      const res = await fetch(`${baseUrl}/api/health`);
+      if (res.ok) {
+        ready = true;
+        break;
       }
-      const res = await mf.dispatchFetch(`http://localhost${pathname}`, init);
-      return { status: res.status, json: await res.json() };
-    },
+    } catch (_) {}
+    await new Promise((r) => setTimeout(r, 350));
+  }
+
+  if (!ready) {
+    proc.kill();
+    throw new Error(`等待本地 wrangler dev (${baseUrl}) 超时: ${stderrTail}`);
+  }
+
+  const http = createHttpClient(baseUrl);
+  return {
+    sendMultipart: http.sendMultipart,
+    sendJson: http.sendJson,
     async dispose() {
-      await mf.dispose();
+      proc.kill();
+      await new Promise((resolve) => {
+        const timer = setTimeout(resolve, 2000);
+        proc.once("exit", () => {
+          clearTimeout(timer);
+          resolve();
+        });
+      });
     },
   };
 }

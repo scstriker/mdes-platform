@@ -212,4 +212,104 @@ describe("G6 / AC-018：china_customs_suite.user.js v4.0 医疗器械 164 码字
     expect(outcome.reason).toBe("html_error_page");
     expect(outcome.circuitBreakRequired).toBe(true);
   });
+
+  it("在非 HTTPS 上下文（http://stats.customs.gov.cn 无 crypto.subtle）下仍通过纯 JS SHA-256 精确核验 164 码字典", async () => {
+    const code = fs.readFileSync(TOP_SUITE_PATH, "utf8");
+    const nonSecureSandbox: Record<string, unknown> = {
+      TextEncoder,
+      TextDecoder,
+      URLSearchParams,
+      Uint8Array,
+      Uint32Array,
+      DataView,
+      ArrayBuffer,
+      crypto: {}, // 模拟 http:// 非安全上下文无 subtle
+      Buffer,
+      setTimeout,
+      clearTimeout,
+      console,
+      btoa: (str: string) => Buffer.from(str, "binary").toString("base64"),
+      atob: (b64: string) => Buffer.from(b64, "base64").toString("binary"),
+      fetch: async () => new Response("", { status: 200 }),
+    };
+    nonSecureSandbox.globalThis = nonSecureSandbox;
+    vm.createContext(nonSecureSandbox);
+    vm.runInContext(code, nonSecureSandbox, { filename: "china_customs_suite.user.js" });
+
+    const bridge = nonSecureSandbox.__CUSTOMS_SUITE_BRIDGE__ as {
+      verifyDictionary: () => Promise<{ sha256: string; hs8Count: number }>;
+    };
+    const info = await bridge.verifyDictionary();
+    expect(info.sha256).toBe(EXPECTED_DICT_SHA256);
+    expect(info.hs8Count).toBe(164);
+  });
+
+  it("对齐海关真站 selectTableState 三分支规则，且遇 0 字节会话验证码门禁响应立即标记 captcha_session_gate_required 熔断", async () => {
+    for (const scriptPath of [TOP_SUITE_PATH, COLLECTOR_COPY_PATH]) {
+      const emptyFetch: typeof fetch = async () => new Response(new Uint8Array(0), { status: 200 });
+      const sb = loadUserscriptHeadless(scriptPath, emptyFetch);
+      const bridge = sb.__CUSTOMS_SUITE_BRIDGE__ as {
+        computeOfficialSelectTableState: (
+          year: number,
+          startMonth: number,
+          endMonth: number,
+          currentStartTime?: string,
+          currentEndTime?: string,
+        ) => number;
+        probeCount: (opts: {
+          year: number;
+          startMonth: number;
+          endMonth: number;
+          monthFlag: "" | "1";
+          flow: "import" | "export";
+          grouping: "product" | "partner" | "regime" | "region";
+          hs8: string[];
+          skipPoliteWaitForUnitTest?: boolean;
+        }) => Promise<{ ok: boolean; reason?: string; circuitBreakRequired?: boolean }>;
+        fetchRawExportBase64: (opts: {
+          year: number;
+          startMonth: number;
+          endMonth: number;
+          monthFlag: "" | "1";
+          flow: "import" | "export";
+          grouping: "product" | "partner" | "regime" | "region";
+          hs8: string[];
+          selectTableState?: number;
+          skipPoliteWaitForUnitTest?: boolean;
+        }) => Promise<{ ok: boolean; reason?: string; circuitBreakRequired?: boolean }>;
+      };
+
+      expect(bridge.computeOfficialSelectTableState(2024, 1, 12, "202504", "202610")).toBe(2);
+      expect(bridge.computeOfficialSelectTableState(2026, 1, 10, "202504", "202610")).toBe(1);
+      expect(bridge.computeOfficialSelectTableState(2025, 1, 12, "202504", "202610")).toBe(3);
+
+      const probeRes = await bridge.probeCount({
+        year: 2024,
+        startMonth: 1,
+        endMonth: 12,
+        monthFlag: "1",
+        flow: "import",
+        grouping: "product",
+        hs8: ["90181100"],
+        skipPoliteWaitForUnitTest: true,
+      });
+      expect(probeRes.ok).toBe(false);
+      expect(probeRes.reason).toBe("captcha_session_gate_required");
+      expect(probeRes.circuitBreakRequired).toBe(true);
+
+      const dlRes = await bridge.fetchRawExportBase64({
+        year: 2024,
+        startMonth: 1,
+        endMonth: 12,
+        monthFlag: "1",
+        flow: "import",
+        grouping: "product",
+        hs8: ["90181100"],
+        skipPoliteWaitForUnitTest: true,
+      });
+      expect(dlRes.ok).toBe(false);
+      expect(dlRes.reason).toBe("captcha_session_gate_required");
+      expect(dlRes.circuitBreakRequired).toBe(true);
+    }
+  });
 });

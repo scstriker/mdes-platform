@@ -194,6 +194,14 @@ Returns：
 
 清单、编码或单位不符合约定时返回 HTTP 400，标出字段或 CSV 行号；修订与既有批次范围部分重叠时返回 HTTP 409 并指出冲突覆盖范围。校验失败时保留当前已发布结果。本期仅在本地管理环境启用写入。
 
+### POST /api/trade/import-bulk
+
+用于接收 `monthFlag="1"` 年度/多月分列海关原始 CSV（或整窗无记录截图）并按 `数据年月` 自动无损拆解为单月候选批次，所有拆解出的月度批次共享母文件 `sourceSha256`。`multipart/form-data` 包含 `manifest`（支持 `months: string[]` 与 `probeVerifiedZero?: boolean`）、`file`、可选 `emptyEvidence` 及 `deferPublish`（默认 `true`，仅暂存不触发逐月重算）。自动按当年 `trade_hs_year_applicability` 过滤当年适用税号集。
+
+### POST /api/trade/publish
+
+Body：`{ "dictVersion": "202601" }`（可选）。扫描指定字典下全部已完成双流向四分组覆盖且对账一致的暂存月份，执行 **1 次** 全周期（月度、季度、YTD、完整年度）快照生成与 `trade_release` 乐观锁切换，返回 `{ dictVersion, published, releaseId, newlyPublishedMonths, publishedMonths, availablePeriods, reconciliationNotes }`。
+
 ### GET /api/trade/overview
 
 `period` 支持月（`2024-12`）、季度（`2024-Q4`）、年度（`2024`）和截至指定月的年内累计（`2024-YTD-09`）。省略时返回最新已发布月份；空库返回 HTTP 200、`status: "empty"`、`period: null` 和空数据。显式请求未发布期间返回 HTTP 404；期间格式错误返回 HTTP 400。
@@ -202,8 +210,8 @@ Returns：
 | --- | --- |
 | `status`、`period`、`source`、`dictVersion`、`releaseId` | 状态为 `published`，来源为 `china_customs`。同一期间的图表、详情与导出引用同一发布版本。 |
 | `coverage`、`sourceBatches` | 实际覆盖月份和税号数。列出来源批次标识及原件摘要，可在本地档案定位原件。 |
-| `totals`、`trend`、`categories` | 返回期间、进口美元金额、出口美元金额、差额和同期变化率。分类按 HS8 所属一级类别汇总。金额值先保持原始精度，页面最后换算为亿美元。 |
-| `partners`、`concentration`、`regimes`、`regions`、`hsItems` | 按海关原码和来源名称提供伙伴、方式及注册地分布；税号、品类及全篮子集中度区分流向。不可计算的同比或集中度为 `null`。 |
+| `totals`、`trend`、`annualTrend`、`narrativeSummary`、`categories` | `totals` 返回进口、出口、进出口总额（`totalUsd`）、差额及各自可比同比；`trend` 为期内月度序列；`annualTrend` 为跨年年度/YTD 序列（含 `isPartial` 与同窗口期同比）；`narrativeSummary` 为区分相邻期“同比”与跨多年“区间变化”的确定性研判文段。 |
+| `partners`、`concentration`、`regimes`、`regions`、`hsItems` | 按海关原码和来源名称提供伙伴、方式及注册地分布；`hsItems` 含同单位第一数量同比（`importQty1YoyPct` / `exportQty1YoyPct`，异构单位返回 `null`）。 |
 
 例如，以下是 AC-013 单码隔离库的**目标响应节选**。其中的金额来自验收金标准。同比百分数约定 `25` 表示 25%，基期未知时用 `null`。
 
@@ -215,11 +223,13 @@ Returns：
   "totals": {
     "importUsd": 20375226,
     "exportUsd": 89723246,
+    "totalUsd": 110098472,
     "balanceUsd": 69348020,
     "importYoyPct": null,
-    "exportYoyPct": null
+    "exportYoyPct": null,
+    "totalYoyPct": null
   }
 }
 ```
 
-查询只读取已发布快照。收件样例与归档方式见[海关原件采集规程](海关原件采集规程.md)，发布前后各接口的可见结果见[后端功能设计](贸易后端功能设计.md)。验收使用 AC-013 至 AC-017。
+查询只读取已发布快照。收件样例与归档方式见[海关原件采集规程](海关原件采集规程.md)，发布前后各接口的可见结果见[后端功能设计](贸易后端功能设计.md)。验收使用 AC-013 至 AC-021。

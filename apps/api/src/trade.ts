@@ -1178,20 +1178,10 @@ async function attemptPublishAllReadyOnce(db: D1Database, dictVersion: string): 
 
   if (monthsToReconcile.length > 0) {
     const reconcileBatchIds = monthsToReconcile.flatMap((m) => m.batches.map((b) => b.batch_id));
-    const reconcileFacts = await queryFactsByBatchIds(db, reconcileBatchIds);
-    const factsByMonthRecon = new Map<string, FactDbRow[]>();
-    for (const f of reconcileFacts) {
-      const list = factsByMonthRecon.get(f.month) ?? [];
-      list.push(f);
-      factsByMonthRecon.set(f.month, list);
-    }
+    const comboSumsByMonth = await queryFactComboSumsByBatchIds(db, reconcileBatchIds);
 
     for (const { month, applicableSet, batches } of monthsToReconcile) {
-      const sumByCombo = new Map<string, bigint>();
-      for (const f of factsByMonthRecon.get(month) ?? []) {
-        const key = `${f.flow}|${f.grouping}|${f.hs8}`;
-        sumByCombo.set(key, (sumByCombo.get(key) ?? 0n) + BigInt(f.usd_scaled_str));
-      }
+      const sumByCombo = comboSumsByMonth.get(month) ?? new Map<string, bigint>();
 
       const discrepancies: string[] = [];
       for (const flow of TRADE_FLOWS) {
@@ -1221,7 +1211,7 @@ async function attemptPublishAllReadyOnce(db: D1Database, dictVersion: string): 
         reconciliationNotes[month] = discrepancies.join("; ");
       } else {
         newlyPublishedMonths.push(month);
-        newlyPublishedBatches.push(...batches);
+        for (const b of batches) newlyPublishedBatches.push(b);
         activeBatchesByMonth.set(
           month,
           batches.map((b) => b.batch_id),
@@ -1347,7 +1337,9 @@ async function attemptPublishAllReadyOnce(db: D1Database, dictVersion: string): 
       priorYearDict: prevYDict,
     });
     snapshotsToWrite.push({ period: tp, payload });
-    derivedObsRows.push(...buildDerivedObservations(payload));
+    for (const obsRow of buildDerivedObservations(payload)) {
+      derivedObsRows.push(obsRow);
+    }
   }
 
   const headerStmts: D1PreparedStatement[] = [
@@ -1463,10 +1455,10 @@ async function attemptPublishAllReadyOnce(db: D1Database, dictVersion: string): 
     }
     await db.batch(publishStmts);
   } else {
-    // 大跨度多年批量发布：先提交 CAS 版本头，再按 25 个期间一批安全写入快照（兼顾远程 D1 单次 RPC 体积上限）
+    // 大跨度多年批量发布：先提交 CAS 版本头，再按 10 个期间一批安全写入快照（兼顾远程 D1 单次 RPC 体积上限）
     await db.batch(headerStmts);
-    for (let i = 0; i < snapshotsToWrite.length; i += 25) {
-      await db.batch(buildSnapStmts(snapshotsToWrite.slice(i, i + 25)));
+    for (let i = 0; i < snapshotsToWrite.length; i += 10) {
+      await db.batch(buildSnapStmts(snapshotsToWrite.slice(i, i + 10)));
     }
     const tailStmts: D1PreparedStatement[] = [
       db
@@ -1512,20 +1504,65 @@ async function queryBatchesByIds(db: D1Database, batchIds: readonly string[]): P
   return out;
 }
 
-async function queryFactsByBatchIds(db: D1Database, batchIds: readonly string[]): Promise<FactDbRow[]> {
-  const out: FactDbRow[] = [];
-  for (let i = 0; i < batchIds.length; i += ID_QUERY_CHUNK_SIZE) {
-    const slice = batchIds.slice(i, i + ID_QUERY_CHUNK_SIZE);
+const FACT_BATCH_QUERY_CHUNK = 24;
+const FACT_PAGE_ROW_LIMIT = 25_000;
+
+async function queryFactComboSumsByBatchIds(
+  db: D1Database,
+  batchIds: readonly string[],
+): Promise<Map<string, Map<string, bigint>>> {
+  const byMonth = new Map<string, Map<string, bigint>>();
+  for (let i = 0; i < batchIds.length; i += 64) {
+    const slice = batchIds.slice(i, i + 64);
     const { results } = await db
       .prepare(
-        `SELECT batch_id, month, flow, grouping, hs8, item_name, group_code, group_name,
-                CAST(usd_scaled AS TEXT) AS usd_scaled_str, qty1, unit1, qty2, unit2
+        `SELECT month, flow, grouping, hs8, CAST(SUM(usd_scaled) AS TEXT) AS sum_scaled_str
          FROM trade_fact
-         WHERE batch_id IN (SELECT value FROM json_each(?1))`,
+         WHERE batch_id IN (SELECT value FROM json_each(?1))
+         GROUP BY month, flow, grouping, hs8`,
       )
       .bind(JSON.stringify(slice))
-      .all<FactDbRow>();
-    out.push(...results);
+      .all<{ month: string; flow: TradeFlow; grouping: TradeGrouping; hs8: string; sum_scaled_str: string }>();
+    for (let k = 0; k < results.length; k++) {
+      const r = results[k]!;
+      let mMap = byMonth.get(r.month);
+      if (!mMap) {
+        mMap = new Map<string, bigint>();
+        byMonth.set(r.month, mMap);
+      }
+      const key = `${r.flow}|${r.grouping}|${r.hs8}`;
+      mMap.set(key, (mMap.get(key) ?? 0n) + BigInt(r.sum_scaled_str));
+    }
+  }
+  return byMonth;
+}
+
+async function queryFactsByBatchIds(db: D1Database, batchIds: readonly string[]): Promise<FactDbRow[]> {
+  const out: FactDbRow[] = [];
+  for (let i = 0; i < batchIds.length; i += FACT_BATCH_QUERY_CHUNK) {
+    const slice = batchIds.slice(i, i + FACT_BATCH_QUERY_CHUNK);
+    const sliceJson = JSON.stringify(slice);
+    let offset = 0;
+    while (true) {
+      const { results } = await db
+        .prepare(
+          `SELECT batch_id, month, flow, grouping, hs8, item_name, group_code, group_name,
+                  CAST(usd_scaled AS TEXT) AS usd_scaled_str, qty1, unit1, qty2, unit2
+           FROM trade_fact
+           WHERE batch_id IN (SELECT value FROM json_each(?1))
+           ORDER BY rowid ASC
+           LIMIT ?2 OFFSET ?3`,
+        )
+        .bind(sliceJson, FACT_PAGE_ROW_LIMIT, offset)
+        .all<FactDbRow>();
+      for (let k = 0; k < results.length; k++) {
+        out.push(results[k]!);
+      }
+      if (results.length < FACT_PAGE_ROW_LIMIT) {
+        break;
+      }
+      offset += FACT_PAGE_ROW_LIMIT;
+    }
   }
   return out;
 }
@@ -1801,7 +1838,9 @@ async function attemptPublishMonthOnce(
       priorYearDict: prevYDict,
     });
     snapshotsToWrite.push({ period: tp, payload });
-    derivedObsRows.push(...buildDerivedObservations(payload));
+    for (const obsRow of buildDerivedObservations(payload)) {
+      derivedObsRows.push(obsRow);
+    }
   }
 
   // 测试钩子：模拟跨 Worker 实例在快照计算完毕后、事务提交前抢先提交了同 version_seq

@@ -473,6 +473,7 @@ def ensure_dedicated_chrome_cdp(port: int = 9333, profile_dir: Path = DEFAULT_CH
             f"--user-data-dir={profile_dir}",
             "--no-first-run",
             "--no-default-browser-check",
+            "--disable-features=HttpsFirstBalancedModeAutoEnable,HttpsUpgrades",
             "http://stats.customs.gov.cn/",
         ],
         stdout=subprocess.DEVNULL,
@@ -511,10 +512,31 @@ class BrowserHarnessTransport:
         tabs = bh.list_tabs()
         customs_tab = next((t for t in tabs if "customs.gov.cn" in (t.get("url") or "")), None)
         if customs_tab:
-            bh.switch_tab(customs_tab)
+            bh.switch_tab(customs_tab, activate=True)
+            bh.wait_for_load(timeout=20.0)
+            time.sleep(3.0)
         else:
             bh.new_tab("http://stats.customs.gov.cn/")
             bh.wait_for_load(timeout=20.0)
+            time.sleep(3.0)
+
+        curr_href = str(self._eval_async_js("location.href", timeout=10.0) or "")
+        if curr_href.startswith("chrome-error://") or "customs.gov.cn" not in curr_href:
+            bh.goto_url("http://stats.customs.gov.cn/")
+            bh.wait_for_load(timeout=20.0)
+            time.sleep(3.0)
+            curr_href = str(self._eval_async_js("location.href", timeout=10.0) or "")
+            if curr_href.startswith("chrome-error://"):
+                err_txt = str(
+                    self._eval_async_js(
+                        "document.documentElement ? document.documentElement.innerText.slice(0, 300) : String()",
+                        timeout=10.0,
+                    )
+                    or ""
+                ).replace("\n", " ")
+                raise CustomsCircuitBreakError(
+                    f"Target portal http://stats.customs.gov.cn/ unreachable in Chrome ({curr_href}): {err_txt}"
+                )
 
         disable_customs_debugger_traps(bh.cdp)
         self.userscript_path = userscript_path
@@ -641,19 +663,17 @@ def main(argv: list[str] | None = None) -> int:
 
     status = transport.check_session_ready()
     if not status.get("ready"):
-        print(
-            "[human-check] Waiting for stats.customs.gov.cn session warmup in visible Chrome "
-            "(if a query page or verification dialog is visible, click '查询' once in the Chrome window)...",
-            flush=True,
+        collector_tmp = SerialCustomsCollector(
+            transport=transport,
+            archive_dir=Path(args.archive_dir),
+            rate_policy=policy,
+            latest_complete_month=args.latest_month,
         )
-        deadline = time.time() + max(0, args.wait_human_seconds)
-        while time.time() < deadline:
-            time.sleep(5.0)
-            status = transport.check_session_ready()
-            if status.get("ready"):
-                break
-        if not status.get("ready"):
-            raise CustomsCircuitBreakError(f"Session not ready after waiting {args.wait_human_seconds}s: {status}")
+        collector_tmp._save_checkpoint(halted_reason=str(status.get("reason") or "session_or_captcha_gate"))
+        raise CustomsCircuitBreakError(
+            "stats.customs.gov.cn requires manual human verification (/queryData/toCaptchaView) in visible Chrome "
+            f"before querying ({status.get('reason')}). Saved _checkpoint.json; run again after completing human check."
+        )
 
     collector = SerialCustomsCollector(
         transport=transport,
