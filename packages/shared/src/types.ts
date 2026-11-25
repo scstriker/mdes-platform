@@ -186,9 +186,11 @@ export type TradeQuantityStat = {
 export type TradeTotals = {
   importUsd: number;
   exportUsd: number;
+  totalUsd: number;
   balanceUsd: number;
   importYoyPct: number | null;
   exportYoyPct: number | null;
+  totalYoyPct: number | null;
 };
 
 export type TradeTrendPoint = {
@@ -199,6 +201,28 @@ export type TradeTrendPoint = {
   importYoyPct: number | null;
   exportYoyPct: number | null;
   isPartial: boolean;
+};
+
+export type TradeAnnualTrendPoint = {
+  period: string;
+  year: number;
+  coveredMonths: number;
+  importUsd: number;
+  exportUsd: number;
+  totalUsd: number;
+  balanceUsd: number;
+  importYoyPct: number | null;
+  exportYoyPct: number | null;
+  totalYoyPct: number | null;
+  isPartial: boolean;
+};
+
+export type TradeNarrativeSummary = {
+  headline: string;
+  scaleParagraph: string;
+  multiYearParagraph: string;
+  structureParagraph: string;
+  concentrationAlert: string;
 };
 
 export type TradeCategoryStat = {
@@ -259,8 +283,10 @@ export type TradeHsItemStat = {
   exportYoyPct: number | null;
   importQty1: TradeQuantityStat;
   importQty2: TradeQuantityStat;
+  importQty1YoyPct: number | null;
   exportQty1: TradeQuantityStat;
   exportQty2: TradeQuantityStat;
+  exportQty1YoyPct: number | null;
   importConcentration: ConcentrationMetrics;
   exportConcentration: ConcentrationMetrics;
   topImportPartners: string[];
@@ -313,6 +339,8 @@ export type TradeOverviewEmpty = {
   groupingTotals: null;
   concentration: null;
   trend: [];
+  annualTrend: [];
+  narrativeSummary: null;
   categories: [];
   partners: [];
   regimes: [];
@@ -344,6 +372,8 @@ export type TradeOverviewPublished = {
     export: ConcentrationMetrics;
   };
   trend: TradeTrendPoint[];
+  annualTrend: TradeAnnualTrendPoint[];
+  narrativeSummary: TradeNarrativeSummary;
   categories: TradeCategoryStat[];
   partners: TradePartnerStat[];
   regimes: TradeRegimeStat[];

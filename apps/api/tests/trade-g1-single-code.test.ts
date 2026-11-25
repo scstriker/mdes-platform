@@ -323,9 +323,11 @@ describe("G1 / AC-013：单税号隔离库贯通（90181100 心电图记录仪 2
     expect(annual.totals).toEqual({
       importUsd: 20_375_226,
       exportUsd: 89_723_246,
+      totalUsd: 110_098_472,
       balanceUsd: 69_348_020,
       importYoyPct: null,
       exportYoyPct: null,
+      totalYoyPct: null,
     });
 
     expect(annual.hsItems).toHaveLength(1);
