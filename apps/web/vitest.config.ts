@@ -4,5 +4,5 @@ import viteConfig from "./vite.config";
 // 单元测试只跑 tests/；e2e/ 下是 Playwright 用例（npm run e2e）
 export default mergeConfig(
   viteConfig({ mode: "test", command: "serve" }),
-  defineConfig({ test: { include: ["tests/**/*.test.ts"] } }),
+  defineConfig({ test: { include: ["tests/**/*.test.{ts,tsx}"] } }),
 );
