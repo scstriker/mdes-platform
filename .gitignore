@@ -11,3 +11,6 @@ test-results/
 playwright-report/
 dist-demo/
 dist-e2e/
+__pycache__/
+*.py[cod]
+data/customs-raw/

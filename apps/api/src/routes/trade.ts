@@ -6,7 +6,9 @@ import {
   getTradeOverview,
   getTradePeriodsMeta,
   importTradeBatch,
+  importTradeBulkBatch,
   listTradeBatches,
+  publishAllReadyTradeMonths,
   type TradeFileInput,
 } from "../trade";
 
@@ -14,10 +16,20 @@ function isFileLike(v: unknown): v is File {
   return Boolean(v && typeof v === "object" && "arrayBuffer" in v && typeof (v as File).arrayBuffer === "function");
 }
 
+function parseBoolField(raw: unknown, defaultValue: boolean): boolean {
+  const val = Array.isArray(raw) ? raw[0] : raw;
+  if (typeof val !== "string") return defaultValue;
+  const norm = val.trim().toLowerCase();
+  if (norm === "1" || norm === "true" || norm === "yes") return true;
+  if (norm === "0" || norm === "false" || norm === "no") return false;
+  return defaultValue;
+}
+
 async function readTradeMultipart(c: Context<AppEnv>): Promise<{
   rawManifest: string | null;
   file: TradeFileInput | null;
   emptyEvidences: TradeFileInput[];
+  deferPublishField: unknown;
 }> {
   const contentType = c.req.header("content-type") || "";
   if (!contentType.includes("multipart/form-data")) {
@@ -54,7 +66,7 @@ async function readTradeMultipart(c: Context<AppEnv>): Promise<{
     }
   }
 
-  return { rawManifest, file, emptyEvidences };
+  return { rawManifest, file, emptyEvidences, deferPublishField: body["deferPublish"] };
 }
 
 export function tradeRoutes(app: Hono<AppEnv>) {
@@ -62,12 +74,42 @@ export function tradeRoutes(app: Hono<AppEnv>) {
     const parsed = await readTradeMultipart(c);
     const failHeader = c.env.ENABLE_TEST_HOOKS === "1" && c.req.header("x-test-fail-before-publish") === "1";
     const preemptHeader = c.env.ENABLE_TEST_HOOKS === "1" && c.req.header("x-test-preempt-release-once") === "1";
+    const deferPublish = parseBoolField(parsed.deferPublishField, false);
     const result = await importTradeBatch(c.get("db"), {
-      ...parsed,
+      rawManifest: parsed.rawManifest,
+      file: parsed.file,
+      emptyEvidences: parsed.emptyEvidences,
       maxRows: c.get("importMaxRows"),
+      deferPublish,
       failBeforePublishCommit: failHeader,
       preemptReleaseOnce: preemptHeader,
     });
+    return c.json(result);
+  });
+
+  app.post("/api/trade/import-bulk", async (c) => {
+    const parsed = await readTradeMultipart(c);
+    const deferPublish = parseBoolField(parsed.deferPublishField, true);
+    const result = await importTradeBulkBatch(c.get("db"), {
+      rawManifest: parsed.rawManifest,
+      file: parsed.file,
+      emptyEvidences: parsed.emptyEvidences,
+      maxRows: c.get("importMaxRows"),
+      deferPublish,
+    });
+    return c.json(result);
+  });
+
+  app.post("/api/trade/publish", async (c) => {
+    let dictVersion: string | null = textParam(c.req.query("dictVersion")) ?? null;
+    const ct = c.req.header("content-type") || "";
+    if (ct.includes("application/json")) {
+      const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+      if (typeof body.dictVersion === "string" && body.dictVersion.trim()) {
+        dictVersion = body.dictVersion.trim();
+      }
+    }
+    const result = await publishAllReadyTradeMonths(c.get("db"), dictVersion);
     return c.json(result);
   });
 

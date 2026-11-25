@@ -98,6 +98,13 @@ export function seedTradeDictStatements(dictPath = HS_DICT_PATH, dictVersion = "
         `category_id = excluded.category_id, category_name = excluded.category_name, category_order = excluded.category_order, seq_no = excluded.seq_no`,
     );
   }
+  if (dictVersion === "202601" && hs8Set.has("90189080")) {
+    statements.push(
+      `INSERT INTO trade_hs_year_applicability (dict_version, year, hs8, applicable, basis_note) VALUES (` +
+        `'202601', 2022, '90189080', 0, '2022年版中华人民共和国进出口税则尚未单列手术机器人子目（2023年自90189099析出增列）'` +
+        `) ON CONFLICT(dict_version, year, hs8) DO UPDATE SET applicable = excluded.applicable, basis_note = excluded.basis_note`,
+    );
+  }
   return statements;
 }
 

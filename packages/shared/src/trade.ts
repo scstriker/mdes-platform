@@ -19,6 +19,18 @@ export type TradeImportManifest = {
   grouping: TradeGrouping;
   hs8: string[];
   emptyHs8: string[];
+  probeVerifiedZero?: boolean;
+};
+
+export type TradeBulkImportManifest = {
+  dictVersion: string;
+  months: string[];
+  flow: TradeFlow;
+  currency: string;
+  grouping: TradeGrouping;
+  hs8: string[];
+  emptyHs8?: string[];
+  probeVerifiedZero?: boolean;
 };
 
 export type NormalizedTradeManifest = {
@@ -30,8 +42,34 @@ export type NormalizedTradeManifest = {
   grouping: TradeGrouping;
   hs8: string[];
   emptyHs8: string[];
+  probeVerifiedZero: boolean;
   scopeKey: string;
 };
+
+export type NormalizedTradeBulkManifest = {
+  dictVersion: string;
+  months: string[];
+  flow: TradeFlow;
+  currency: "USD";
+  grouping: TradeGrouping;
+  hs8: string[];
+  emptyHs8: string[];
+  probeVerifiedZero: boolean;
+};
+
+export type MultiMonthCustomsCsvParseOutcome =
+  | {
+      ok: true;
+      encoding: "utf-8" | "gb18030";
+      headers: string[];
+      byMonth: Map<string, ParsedCustomsFactRow[]>;
+      totalRows: number;
+      summaryRowsSkipped: number;
+    }
+  | {
+      ok: false;
+      error: TradeValidationFailure;
+    };
 
 export type ParsedCustomsFactRow = {
   line: number;
@@ -268,7 +306,138 @@ export function validateTradeManifest(
       grouping,
       hs8,
       emptyHs8,
+      probeVerifiedZero: Boolean(obj.probeVerifiedZero),
       scopeKey: buildTradeScopeKey({ dictVersion, month, flow, currency: "USD", grouping, hs8 }),
+    },
+  };
+}
+
+export function validateTradeBulkManifest(
+  raw: unknown,
+  options?: { knownDictVersions?: Set<string>; dictHs8Set?: Set<string> },
+): { ok: true; value: NormalizedTradeBulkManifest } | { ok: false; error: TradeValidationFailure } {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return {
+      ok: false,
+      error: { status: 400, code: "TRADE_MANIFEST_INVALID", params: { field: "manifest", reason: "must be JSON object" } },
+    };
+  }
+  const obj = raw as Record<string, unknown>;
+  const dictVersion = typeof obj.dictVersion === "string" ? obj.dictVersion.trim() : "";
+  if (!dictVersion || (options?.knownDictVersions && !options.knownDictVersions.has(dictVersion))) {
+    return {
+      ok: false,
+      error: { status: 400, code: "TRADE_MANIFEST_INVALID", params: { field: "dictVersion", reason: "unknown or empty" } },
+    };
+  }
+
+  const rawMonthsInput = Array.isArray(obj.months)
+    ? obj.months
+    : typeof obj.month === "string" && obj.month.trim()
+      ? [obj.month.trim()]
+      : [];
+  if (rawMonthsInput.length === 0 || rawMonthsInput.length > 60) {
+    return {
+      ok: false,
+      error: { status: 400, code: "TRADE_MANIFEST_INVALID", params: { field: "months", reason: "1..60 YYYY-MM months required" } },
+    };
+  }
+  const monthSet = new Set<string>();
+  for (const mItem of rawMonthsInput) {
+    const mStr = typeof mItem === "string" ? mItem.trim() : "";
+    if (!/^(\d{4})-(0[1-9]|1[0-2])$/.test(mStr)) {
+      return {
+        ok: false,
+        error: { status: 400, code: "TRADE_MANIFEST_INVALID", params: { field: "months", reason: `expected YYYY-MM, got '${String(mItem)}'` } },
+      };
+    }
+    monthSet.add(mStr);
+  }
+  const months = [...monthSet].sort();
+
+  const flow = typeof obj.flow === "string" ? obj.flow.trim() : "";
+  if (flow !== "import" && flow !== "export") {
+    return {
+      ok: false,
+      error: { status: 400, code: "TRADE_MANIFEST_INVALID", params: { field: "flow", reason: "expected import or export" } },
+    };
+  }
+
+  const currency = typeof obj.currency === "string" ? obj.currency.trim().toUpperCase() : "";
+  if (currency !== "USD") {
+    return {
+      ok: false,
+      error: { status: 400, code: "TRADE_CURRENCY_INVALID", params: { currency: String(obj.currency ?? "") } },
+    };
+  }
+
+  const grouping = typeof obj.grouping === "string" ? obj.grouping.trim() : "";
+  if (grouping !== "product" && grouping !== "partner" && grouping !== "regime" && grouping !== "region") {
+    return {
+      ok: false,
+      error: { status: 400, code: "TRADE_MANIFEST_INVALID", params: { field: "grouping", reason: "invalid grouping" } },
+    };
+  }
+
+  if (!Array.isArray(obj.hs8) || obj.hs8.length === 0) {
+    return {
+      ok: false,
+      error: { status: 400, code: "TRADE_MANIFEST_INVALID", params: { field: "hs8", reason: "non-empty array required" } },
+    };
+  }
+  const hs8Set = new Set<string>();
+  for (const item of obj.hs8) {
+    const code = typeof item === "string" ? item.trim() : "";
+    if (!/^\d{8}$/.test(code)) {
+      return {
+        ok: false,
+        error: { status: 400, code: "TRADE_MANIFEST_INVALID", params: { field: "hs8", reason: `invalid hs8 '${String(item)}'` } },
+      };
+    }
+    if (options?.dictHs8Set && !options.dictHs8Set.has(code)) {
+      return {
+        ok: false,
+        error: { status: 400, code: "TRADE_MANIFEST_INVALID", params: { field: "hs8", reason: `hs8 '${code}' not in dictionary` } },
+      };
+    }
+    hs8Set.add(code);
+  }
+  const hs8 = [...hs8Set].sort();
+
+  const rawEmpty = obj.emptyHs8 ?? [];
+  if (!Array.isArray(rawEmpty)) {
+    return {
+      ok: false,
+      error: { status: 400, code: "TRADE_MANIFEST_INVALID", params: { field: "emptyHs8", reason: "array required" } },
+    };
+  }
+  const emptySet = new Set<string>();
+  for (const item of rawEmpty) {
+    const code = typeof item === "string" ? item.trim() : "";
+    if (!/^\d{8}$/.test(code) || !hs8Set.has(code)) {
+      return {
+        ok: false,
+        error: {
+          status: 400,
+          code: "TRADE_MANIFEST_INVALID",
+          params: { field: "emptyHs8", reason: `emptyHs8 '${String(item)}' must belong to hs8` },
+        },
+      };
+    }
+    emptySet.add(code);
+  }
+
+  return {
+    ok: true,
+    value: {
+      dictVersion,
+      months,
+      flow,
+      currency: "USD",
+      grouping,
+      hs8,
+      emptyHs8: [...emptySet].sort(),
+      probeVerifiedZero: Boolean(obj.probeVerifiedZero),
     },
   };
 }
@@ -638,6 +807,296 @@ export function parseCustomsCsvBytes(
     encoding: decoded.encoding,
     headers,
     rows,
+    summaryRowsSkipped,
+  };
+}
+
+export function parseMultiMonthCustomsCsvBytes(
+  bytes: Uint8Array,
+  manifest: Pick<
+    TradeBulkImportManifest,
+    "dictVersion" | "months" | "flow" | "currency" | "grouping" | "hs8" | "emptyHs8" | "probeVerifiedZero"
+  >,
+  options?: { maxRows?: number; allowHeaderOnlyEmpty?: boolean },
+): MultiMonthCustomsCsvParseOutcome {
+  if (manifest.currency.trim().toUpperCase() !== "USD") {
+    return {
+      ok: false,
+      error: { status: 400, code: "TRADE_CURRENCY_INVALID", params: { currency: manifest.currency } },
+    };
+  }
+  const decoded = decodeCustomsBytes(bytes);
+  if (!decoded.ok) return decoded;
+
+  const rawRecords = parseCsvRecords(decoded.text);
+  const isBlank = (fields: string[]) => fields.every((f) => f.trim() === "");
+  const headerIndex = rawRecords.findIndex((r) => !isBlank(r));
+  if (headerIndex < 0) {
+    return { ok: false, error: { status: 400, code: "EMPTY_CSV", params: {} } };
+  }
+
+  const headers = rawRecords[headerIndex].map((f) => f.trim());
+  if (findCol(headers, NON_USD_HEADERS) !== -1 && findCol(headers, USD_HEADERS) === -1) {
+    const badHeader = headers[findCol(headers, NON_USD_HEADERS)];
+    return {
+      ok: false,
+      error: { status: 400, code: "TRADE_CURRENCY_INVALID", params: { currency: badHeader } },
+    };
+  }
+
+  const hsCol = findCol(headers, HS_HEADERS);
+  if (hsCol === -1) {
+    return {
+      ok: false,
+      error: { status: 400, code: "TRADE_CSV_INVALID", params: { line: 1, field: "hs8", reason: "missing product code header" } },
+    };
+  }
+  const nameCol = findCol(headers, ITEM_NAME_HEADERS);
+  if (nameCol === -1) {
+    return {
+      ok: false,
+      error: { status: 400, code: "TRADE_CSV_INVALID", params: { line: 1, field: "itemName", reason: "missing product name header" } },
+    };
+  }
+  const usdCol = findCol(headers, USD_HEADERS);
+  if (usdCol === -1) {
+    return {
+      ok: false,
+      error: { status: 400, code: "TRADE_CURRENCY_INVALID", params: { currency: "missing_usd_header" } },
+    };
+  }
+
+  const partnerCodeCol = findCol(headers, PARTNER_CODE_HEADERS);
+  const partnerNameCol = findCol(headers, PARTNER_NAME_HEADERS);
+  const regimeCodeCol = findCol(headers, REGIME_CODE_HEADERS);
+  const regimeNameCol = findCol(headers, REGIME_NAME_HEADERS);
+  const regionCodeCol = findCol(headers, REGION_CODE_HEADERS);
+  const regionNameCol = findCol(headers, REGION_NAME_HEADERS);
+
+  let groupCodeCol = -1;
+  let groupNameCol = -1;
+  if (manifest.grouping === "partner") {
+    groupCodeCol = partnerCodeCol;
+    groupNameCol = partnerNameCol;
+    if (groupCodeCol === -1 || groupNameCol === -1) {
+      return {
+        ok: false,
+        error: { status: 400, code: "TRADE_CSV_INVALID", params: { line: 1, field: "partner", reason: "missing partner columns" } },
+      };
+    }
+  } else if (manifest.grouping === "regime") {
+    groupCodeCol = regimeCodeCol;
+    groupNameCol = regimeNameCol;
+    if (groupCodeCol === -1 || groupNameCol === -1) {
+      return {
+        ok: false,
+        error: { status: 400, code: "TRADE_CSV_INVALID", params: { line: 1, field: "regime", reason: "missing regime columns" } },
+      };
+    }
+  } else if (manifest.grouping === "region") {
+    groupCodeCol = regionCodeCol;
+    groupNameCol = regionNameCol;
+    if (groupCodeCol === -1 || groupNameCol === -1) {
+      return {
+        ok: false,
+        error: { status: 400, code: "TRADE_CSV_INVALID", params: { line: 1, field: "region", reason: "missing region columns" } },
+      };
+    }
+  }
+
+  const qty1Col = findCol(headers, QTY1_HEADERS);
+  const unit1Col = findCol(headers, UNIT1_HEADERS);
+  const qty2Col = findCol(headers, QTY2_HEADERS);
+  const unit2Col = findCol(headers, UNIT2_HEADERS);
+  const periodCol = findCol(headers, PERIOD_HEADERS);
+  const flowCol = findCol(headers, FLOW_HEADERS);
+
+  const byMonth = new Map<string, ParsedCustomsFactRow[]>();
+  for (const m of manifest.months) {
+    byMonth.set(m, []);
+  }
+
+  const dataRecords = rawRecords
+    .map((fields, index) => ({ fields, line: index + 1 }))
+    .slice(headerIndex + 1)
+    .filter((r) => !isBlank(r.fields));
+
+  if (dataRecords.length === 0) {
+    if (options?.allowHeaderOnlyEmpty || manifest.probeVerifiedZero) {
+      return { ok: true, encoding: decoded.encoding, headers, byMonth, totalRows: 0, summaryRowsSkipped: 0 };
+    }
+    return { ok: false, error: { status: 400, code: "EMPTY_CSV", params: {} } };
+  }
+
+  if (periodCol === -1 && manifest.months.length > 1) {
+    return {
+      ok: false,
+      error: { status: 400, code: "TRADE_CSV_INVALID", params: { line: 1, field: "month", reason: "multi-month CSV requires period header" } },
+    };
+  }
+
+  const maxRows = options?.maxRows ?? 100_000;
+  if (dataRecords.length > maxRows) {
+    return {
+      ok: false,
+      error: { status: 400, code: "ROW_LIMIT_EXCEEDED", params: { max: maxRows, actual: dataRecords.length } },
+    };
+  }
+
+  const allowedMonths = new Set(manifest.months);
+  const allowedHs8 = new Set(manifest.hs8.map((c) => c.trim()));
+  const declaredEmptyHs8 = new Set((manifest.emptyHs8 ?? []).map((c) => c.trim()));
+  const seenKeys = new Set<string>();
+  let totalRows = 0;
+  let summaryRowsSkipped = 0;
+
+  for (const rec of dataRecords) {
+    const get = (col: number) => (col >= 0 ? (rec.fields[col] ?? "").trim() : "");
+    const rawHs = get(hsCol);
+    const rawName = get(nameCol);
+
+    if ((!rawHs && isAggregateLabel(rawName)) || isAggregateLabel(rawHs) || isAggregateLabel(rawName)) {
+      summaryRowsSkipped += 1;
+      continue;
+    }
+
+    if (!/^\d{8}$/.test(rawHs)) {
+      return {
+        ok: false,
+        error: { status: 400, code: "TRADE_CSV_INVALID", params: { line: rec.line, field: "hs8", reason: `invalid hs8 '${rawHs}'` } },
+      };
+    }
+    if (!allowedHs8.has(rawHs)) {
+      return {
+        ok: false,
+        error: { status: 400, code: "TRADE_CSV_INVALID", params: { line: rec.line, field: "hs8", reason: `hs8 '${rawHs}' not in manifest` } },
+      };
+    }
+
+    const rowMonth = periodCol !== -1 ? normalizeCsvMonth(get(periodCol)) : manifest.months[0];
+    if (!rowMonth || !allowedMonths.has(rowMonth)) {
+      return {
+        ok: false,
+        error: { status: 400, code: "TRADE_CSV_INVALID", params: { line: rec.line, field: "month", reason: `row month '${get(periodCol)}' outside manifest months` } },
+      };
+    }
+
+    if (flowCol !== -1) {
+      const cellFlow = get(flowCol);
+      if (cellFlow) {
+        const normF = normalizeCsvFlow(cellFlow);
+        if (normF !== manifest.flow) {
+          return {
+            ok: false,
+            error: { status: 400, code: "TRADE_CSV_INVALID", params: { line: rec.line, field: "flow", reason: "flow mismatch with manifest" } },
+          };
+        }
+      }
+    }
+
+    let groupCode = "ALL";
+    let groupName = "全国";
+    if (manifest.grouping !== "product") {
+      const gc = get(groupCodeCol);
+      const gn = get(groupNameCol);
+      const isZeroWorld = (gc === "0" || gc === "00" || gc === "000") && (gn === "" || isAggregateLabel(gn));
+      if (isAggregateLabel(gc) || isAggregateLabel(gn) || isZeroWorld) {
+        summaryRowsSkipped += 1;
+        continue;
+      }
+      if (!gc || !gn) {
+        return {
+          ok: false,
+          error: { status: 400, code: "TRADE_CSV_INVALID", params: { line: rec.line, field: manifest.grouping, reason: "missing group code or name" } },
+        };
+      }
+      groupCode = gc;
+      groupName = gn;
+    } else {
+      for (const extraCol of [partnerCodeCol, partnerNameCol, regimeCodeCol, regimeNameCol, regionCodeCol, regionNameCol]) {
+        const extraVal = get(extraCol);
+        if (extraVal && !isAggregateLabel(extraVal)) {
+          return {
+            ok: false,
+            error: {
+              status: 400,
+              code: "TRADE_CSV_INVALID",
+              params: { line: rec.line, field: "grouping", reason: "product grouping cannot contain breakdown codes" },
+            },
+          };
+        }
+      }
+    }
+
+    if (!manifest.probeVerifiedZero && declaredEmptyHs8.has(rawHs)) {
+      return {
+        ok: false,
+        error: {
+          status: 400,
+          code: "TRADE_CSV_INVALID",
+          params: { line: rec.line, field: "emptyHs8", reason: `hs8 '${rawHs}' has detail row but listed in emptyHs8` },
+        },
+      };
+    }
+
+    const parsedUsd = parseUsdToScaled(get(usdCol));
+    if (!parsedUsd) {
+      return {
+        ok: false,
+        error: { status: 400, code: "TRADE_CSV_INVALID", params: { line: rec.line, field: "usd", reason: "invalid USD amount" } },
+      };
+    }
+
+    const q1 = parseOptionalQuantity(get(qty1Col));
+    if (!q1.ok) {
+      return {
+        ok: false,
+        error: { status: 400, code: "TRADE_CSV_INVALID", params: { line: rec.line, field: "qty1", reason: "invalid first quantity" } },
+      };
+    }
+    const q2 = parseOptionalQuantity(get(qty2Col));
+    if (!q2.ok) {
+      return {
+        ok: false,
+        error: { status: 400, code: "TRADE_CSV_INVALID", params: { line: rec.line, field: "qty2", reason: "invalid second quantity" } },
+      };
+    }
+
+    const bizKey = `${rowMonth}|${rawHs}|${groupCode}`;
+    if (seenKeys.has(bizKey)) {
+      return {
+        ok: false,
+        error: { status: 400, code: "TRADE_CSV_INVALID", params: { line: rec.line, field: "duplicate_key", reason: `duplicate (${rowMonth}, ${rawHs}, ${groupCode})` } },
+      };
+    }
+    seenKeys.add(bizKey);
+
+    byMonth.get(rowMonth)!.push({
+      line: rec.line,
+      hs8: rawHs,
+      itemName: rawName || rawHs,
+      groupCode,
+      groupName,
+      usdScaled: parsedUsd.scaled,
+      usdRaw: parsedUsd.normalized,
+      qty1: q1.value,
+      unit1: parseOptionalUnit(get(unit1Col)),
+      qty2: q2.value,
+      unit2: parseOptionalUnit(get(unit2Col)),
+    });
+    totalRows += 1;
+  }
+
+  if (totalRows === 0 && !options?.allowHeaderOnlyEmpty && !manifest.probeVerifiedZero) {
+    return { ok: false, error: { status: 400, code: "EMPTY_CSV", params: {} } };
+  }
+
+  return {
+    ok: true,
+    encoding: decoded.encoding,
+    headers,
+    byMonth,
+    totalRows,
     summaryRowsSkipped,
   };
 }
