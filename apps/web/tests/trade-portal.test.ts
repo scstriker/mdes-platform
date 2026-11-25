@@ -32,9 +32,11 @@ const SAMPLE_PUBLISHED: TradeOverviewPublished = {
   totals: {
     importUsd: 20_375_226,
     exportUsd: 89_723_246,
+    totalUsd: 110_098_472,
     balanceUsd: 69_348_020,
     importYoyPct: null,
     exportYoyPct: null,
+    totalYoyPct: null,
   },
   groupingTotals: {
     product: { importUsd: 20_375_226, exportUsd: 89_723_246 },
@@ -47,6 +49,28 @@ const SAMPLE_PUBLISHED: TradeOverviewPublished = {
     export: { cr1: 60, cr3: 100, cr5: 100, hhi: 5200, partnerCount: 2 },
   },
   trend: [],
+  annualTrend: [
+    {
+      period: "2024",
+      year: 2024,
+      coveredMonths: 12,
+      importUsd: 20_375_226,
+      exportUsd: 89_723_246,
+      totalUsd: 110_098_472,
+      balanceUsd: 69_348_020,
+      importYoyPct: null,
+      exportYoyPct: null,
+      totalYoyPct: null,
+      isPartial: false,
+    },
+  ],
+  narrativeSummary: {
+    headline: "2024 医疗器械进出口态势研判摘要",
+    scaleParagraph: "2024 年医疗器械进出口总额 1.1010 亿美元。",
+    multiYearParagraph: "当前发布 2024 单一年度序列。",
+    structureParagraph: "第一大品类为医用诊断装备。",
+    concentrationAlert: "进口 CR3 为 100.0%。",
+  },
   categories: [
     {
       categoryId: "cat-01",
@@ -92,8 +116,10 @@ const SAMPLE_PUBLISHED: TradeOverviewPublished = {
       exportYoyPct: null,
       importQty1: { value: 191_363_479, unit: "台" },
       importQty2: { value: 123_540, unit: "千克" },
+      importQty1YoyPct: null,
       exportQty1: { value: 167_167_363, unit: "台" },
       exportQty2: { value: 384_210, unit: "千克" },
+      exportQty1YoyPct: null,
       importConcentration: { cr1: 60, cr3: 100, cr5: 100, hhi: 5200, partnerCount: 2 },
       exportConcentration: { cr1: 60, cr3: 100, cr5: 100, hhi: 5200, partnerCount: 2 },
       topImportPartners: ["美国", "德国"],

@@ -14,6 +14,7 @@ import {
   validateTradeManifest,
   type NormalizedTradeManifest,
   type ParsedCustomsFactRow,
+  type TradeAnnualTrendPoint,
   type TradeBatchListItem,
   type TradeBulkImportResponse,
   type TradeCategoryStat,
@@ -27,6 +28,7 @@ import {
   type TradeHsItemStat,
   type TradeImportCoverage,
   type TradeImportResponse,
+  type TradeNarrativeSummary,
   type TradeOverviewEmpty,
   type TradeOverviewPublished,
   type TradeOverviewResponse,
@@ -1270,7 +1272,7 @@ async function attemptPublishAllReadyOnce(db: D1Database, dictVersion: string): 
   }
   const targetPeriods = [...targetPeriodsSet].sort();
 
-  const neededMonths = new Set<string>();
+  const neededMonths = new Set<string>(publishedMonths);
   for (const tp of targetPeriods) {
     const parsed = parseTradePeriod(tp)!;
     for (const m of parsed.months) neededMonths.add(m);
@@ -1304,6 +1306,17 @@ async function attemptPublishAllReadyOnce(db: D1Database, dictVersion: string): 
     factsByMonth.set(f.month, list);
   }
 
+  for (const m of publishedMonths) {
+    const yr = Number(m.slice(0, 4));
+    await getDict(yr);
+    await getDict(yr - 1);
+  }
+  const annualTrend = buildAnnualTrend({
+    publishedMonthSet,
+    factsByMonth,
+    dictByYear: dictCache,
+  });
+
   const snapshotsToWrite: Array<{ period: string; payload: TradeOverviewPublished }> = [];
   const derivedObsRows: Array<{
     indicator_id: string;
@@ -1325,6 +1338,7 @@ async function attemptPublishAllReadyOnce(db: D1Database, dictVersion: string): 
       period: tp,
       releaseId,
       availablePeriods,
+      annualTrend,
       publishedMonthSet,
       activeBatchesByMonth,
       batchMetaMap,
@@ -1702,8 +1716,8 @@ async function attemptPublishMonthOnce(
   const releaseId = crypto.randomUUID();
   const triggerBatchId = candidateBatches[candidateBatches.length - 1]?.batch_id ?? candidateIds[0];
 
-  // 收集计算全部受影响期间（及各自上年同期基期与年内趋势月份）所需的月份集合
-  const neededMonths = new Set<string>();
+  // 收集计算全部受影响期间（及各自上年同期基期、年内趋势与跨年趋势）所需的月份集合
+  const neededMonths = new Set<string>(publishedMonths);
   for (const tp of targetPeriods) {
     const parsed = parseTradePeriod(tp)!;
     for (const m of parsed.months) neededMonths.add(m);
@@ -1746,6 +1760,17 @@ async function attemptPublishMonthOnce(
     return dictCache.get(y)!;
   };
 
+  for (const m of publishedMonths) {
+    const yr = Number(m.slice(0, 4));
+    await getDict(yr);
+    await getDict(yr - 1);
+  }
+  const annualTrend = buildAnnualTrend({
+    publishedMonthSet,
+    factsByMonth,
+    dictByYear: dictCache,
+  });
+
   const snapshotsToWrite: Array<{ period: string; payload: TradeOverviewPublished }> = [];
   const derivedObsRows: Array<{
     indicator_id: string;
@@ -1767,6 +1792,7 @@ async function attemptPublishMonthOnce(
       period: tp,
       releaseId,
       availablePeriods,
+      annualTrend,
       publishedMonthSet,
       activeBatchesByMonth,
       batchMetaMap,
@@ -1968,6 +1994,10 @@ function snapshotReferencesMonth(
     }
   }
 
+  if (parsed.kind === "year") {
+    return true;
+  }
+
   return false;
 }
 
@@ -2018,11 +2048,221 @@ function finalizeQty(acc: QtyAccumulator): TradeQuantityStat {
   return { value: roundMetric(acc.sum, 4), unit: acc.unit };
 }
 
+function computeSameUnitQtyYoyPct(curr: TradeQuantityStat, prior: TradeQuantityStat | undefined): number | null {
+  if (!prior || curr.value === null || prior.value === null || prior.value <= 0) return null;
+  if (!curr.unit || !prior.unit || curr.unit === "MIXED" || prior.unit === "MIXED" || curr.unit !== prior.unit) {
+    return null;
+  }
+  return roundMetric(((curr.value - prior.value) / prior.value) * 100, 4);
+}
+
+function buildAnnualTrend(opts: {
+  publishedMonthSet: ReadonlySet<string>;
+  factsByMonth: ReadonlyMap<string, FactDbRow[]>;
+  dictByYear: ReadonlyMap<number, DictItemRow[]>;
+}): TradeAnnualTrendPoint[] {
+  const years = [...new Set([...opts.publishedMonthSet].map((m) => Number(m.slice(0, 4))))].sort((a, b) => a - b);
+  const out: TradeAnnualTrendPoint[] = [];
+
+  for (const yr of years) {
+    const yrMonths: string[] = [];
+    for (let mm = 1; mm <= 12; mm++) {
+      const mStr = `${yr}-${String(mm).padStart(2, "0")}`;
+      if (opts.publishedMonthSet.has(mStr)) yrMonths.push(mStr);
+    }
+    if (yrMonths.length === 0) continue;
+
+    const isFullYear = yrMonths.length === 12;
+    const isContiguousFromJan = yrMonths.every((m, idx) => Number(m.slice(5, 7)) === idx + 1);
+    const periodLabel = isFullYear
+      ? String(yr)
+      : isContiguousFromJan
+        ? `${yr}-YTD-${String(yrMonths.length).padStart(2, "0")}`
+        : yrMonths.length === 1
+          ? yrMonths[0]
+          : `${yr} (${yrMonths.length}M)`;
+
+    const yrDict = opts.dictByYear.get(yr) ?? [];
+    const prevYrDict = opts.dictByYear.get(yr - 1) ?? [];
+    const yrApplicableSet = new Set(yrDict.filter((d) => d.applicable === 1).map((d) => d.hs8));
+    const prevApplicableSet = new Set(prevYrDict.filter((d) => d.applicable === 1).map((d) => d.hs8));
+    const compSet = new Set([...yrApplicableSet].filter((c) => prevApplicableSet.has(c)));
+
+    let impScaled = 0n;
+    let expScaled = 0n;
+    let compImpScaled = 0n;
+    let compExpScaled = 0n;
+
+    for (const m of yrMonths) {
+      for (const f of opts.factsByMonth.get(m) ?? []) {
+        if (f.grouping !== "product" || !yrApplicableSet.has(f.hs8)) continue;
+        const val = BigInt(f.usd_scaled_str);
+        if (f.flow === "import") {
+          impScaled += val;
+          if (compSet.has(f.hs8)) compImpScaled += val;
+        } else {
+          expScaled += val;
+          if (compSet.has(f.hs8)) compExpScaled += val;
+        }
+      }
+    }
+
+    const priorMonths = yrMonths.map((m) => `${yr - 1}-${m.slice(5, 7)}`);
+    let pImpScaled: bigint | null = null;
+    let pExpScaled: bigint | null = null;
+    if (priorMonths.every((pm) => opts.publishedMonthSet.has(pm)) && compSet.size > 0) {
+      pImpScaled = 0n;
+      pExpScaled = 0n;
+      for (const pm of priorMonths) {
+        for (const pf of opts.factsByMonth.get(pm) ?? []) {
+          if (pf.grouping !== "product" || !compSet.has(pf.hs8)) continue;
+          const val = BigInt(pf.usd_scaled_str);
+          if (pf.flow === "import") pImpScaled += val;
+          else pExpScaled += val;
+        }
+      }
+    }
+
+    const totScaled = impScaled + expScaled;
+    const compTotScaled = compImpScaled + compExpScaled;
+    const pTotScaled = pImpScaled !== null && pExpScaled !== null ? pImpScaled + pExpScaled : null;
+
+    out.push({
+      period: periodLabel,
+      year: yr,
+      coveredMonths: yrMonths.length,
+      importUsd: scaledToUsdNumber(impScaled),
+      exportUsd: scaledToUsdNumber(expScaled),
+      totalUsd: scaledToUsdNumber(totScaled),
+      balanceUsd: scaledToUsdNumber(expScaled - impScaled),
+      importYoyPct: computeYoyPct(compImpScaled, pImpScaled),
+      exportYoyPct: computeYoyPct(compExpScaled, pExpScaled),
+      totalYoyPct: computeYoyPct(compTotScaled, pTotScaled),
+      isPartial: !isFullYear,
+    });
+  }
+
+  return out;
+}
+
+function buildTradeNarrativeSummary(input: {
+  period: string;
+  totals: TradeOverviewPublished["totals"];
+  hasFullPrior: boolean;
+  priorBalanceScaled: bigint | null;
+  totalBalanceScaled: bigint;
+  annualTrend: TradeAnnualTrendPoint[];
+  categories: TradeCategoryStat[];
+  partners: TradePartnerStat[];
+  regions: TradeRegionStat[];
+  regimes: TradeRegimeStat[];
+  concentration: TradeOverviewPublished["concentration"];
+}): TradeNarrativeSummary {
+  const fmtYi = (usd: number) => (usd / 100_000_000).toFixed(4);
+  const fmtYoyWord = (pct: number | null) => {
+    if (pct === null) return "暂无可比基期";
+    if (pct > 0) return `同比增长 ${pct.toFixed(2)}%`;
+    if (pct < 0) return `同比下降 ${Math.abs(pct).toFixed(2)}%`;
+    return "同比持平 (0.00%)";
+  };
+
+  const balWord = input.totals.balanceUsd >= 0 ? "贸易顺差" : "贸易逆差";
+  let balanceShiftClause = "";
+  if (input.hasFullPrior && input.priorBalanceScaled !== null) {
+    if (input.priorBalanceScaled < 0n && input.totalBalanceScaled > 0n) {
+      balanceShiftClause = "，贸易差额由上年同期逆差转为顺差";
+    } else if (input.priorBalanceScaled > 0n && input.totalBalanceScaled < 0n) {
+      balanceShiftClause = "，贸易差额由上年同期顺差转为逆差";
+    }
+  }
+
+  const scaleParagraph = input.hasFullPrior
+    ? `${input.period} 我国医疗器械进出口总额 ${fmtYi(input.totals.totalUsd)} 亿美元（${fmtYoyWord(input.totals.totalYoyPct)}），其中出口 ${fmtYi(input.totals.exportUsd)} 亿美元（${fmtYoyWord(input.totals.exportYoyPct)}），进口 ${fmtYi(input.totals.importUsd)} 亿美元（${fmtYoyWord(input.totals.importYoyPct)}），实现${balWord} ${fmtYi(Math.abs(input.totals.balanceUsd))} 亿美元${balanceShiftClause}。`
+    : `${input.period} 我国医疗器械进出口总额 ${fmtYi(input.totals.totalUsd)} 亿美元，其中出口 ${fmtYi(input.totals.exportUsd)} 亿美元、进口 ${fmtYi(input.totals.importUsd)} 亿美元，呈${balWord} ${fmtYi(Math.abs(input.totals.balanceUsd))} 亿美元；当前期间暂无完整上年同口径同期基期，同比留空。`;
+
+  const fullYears = input.annualTrend.filter((p) => !p.isPartial);
+  const lastPoint = input.annualTrend[input.annualTrend.length - 1];
+  const trailingPartial = lastPoint && lastPoint.isPartial ? lastPoint : null;
+  let multiYearParagraph = "";
+
+  if (fullYears.length >= 2) {
+    const first = fullYears[0];
+    const last = fullYears[fullYears.length - 1];
+    const gap = last.year - first.year;
+    const spanPct =
+      first.totalUsd > 0 ? roundMetric(((last.totalUsd - first.totalUsd) / first.totalUsd) * 100, 2) : null;
+    if (gap === 1) {
+      const word =
+        spanPct === null ? "持平" : spanPct >= 0 ? `同比增长 ${spanPct.toFixed(2)}%` : `同比下降 ${Math.abs(spanPct).toFixed(2)}%`;
+      multiYearParagraph = `年度对比显示，${first.year}—${last.year} 年完整年度进出口总额由 ${fmtYi(first.totalUsd)} 亿美元变化至 ${fmtYi(last.totalUsd)} 亿美元（${word}）。`;
+    } else {
+      const word =
+        spanPct === null ? "保持稳定" : spanPct >= 0 ? `区间增长 ${spanPct.toFixed(2)}%` : `区间下降 ${Math.abs(spanPct).toFixed(2)}%`;
+      multiYearParagraph = `跨年序列显示，${first.year}—${last.year} 年完整年度进出口总额由 ${fmtYi(first.totalUsd)} 亿美元演进至 ${fmtYi(last.totalUsd)} 亿美元，累计${word}。`;
+    }
+    if (trailingPartial) {
+      const pYoy =
+        trailingPartial.totalYoyPct !== null
+          ? `，较上年同窗口期${trailingPartial.totalYoyPct >= 0 ? `同比增长 ${trailingPartial.totalYoyPct.toFixed(2)}%` : `同比下降 ${Math.abs(trailingPartial.totalYoyPct).toFixed(2)}%`}`
+          : "";
+      multiYearParagraph += ` 最新 ${trailingPartial.period}（非完整年累计，覆盖 ${trailingPartial.coveredMonths} 个月）进出口总额达 ${fmtYi(trailingPartial.totalUsd)} 亿美元${pYoy}。`;
+    }
+  } else if (input.annualTrend.length === 1) {
+    const only = input.annualTrend[0];
+    multiYearParagraph = `当前库内已发布 ${only.period}${only.isPartial ? `（非完整年累计 ${only.coveredMonths} 个月）` : ""} 单一年度序列，进出口总额 ${fmtYi(only.totalUsd)} 亿美元。`;
+  } else {
+    multiYearParagraph = "跨年趋势序列待更多年度发布后自动生成。";
+  }
+
+  const sortedCats = [...input.categories].sort((a, b) => b.importUsd + b.exportUsd - (a.importUsd + a.exportUsd));
+  const topCat = sortedCats[0];
+  const topPartner = input.partners[0];
+  const topRegion = input.regions[0];
+  const topRegime = input.regimes[0];
+
+  const structParts: string[] = [];
+  if (topCat) {
+    structParts.push(`第一大品类为「${topCat.category}」（双边合计 ${fmtYi(topCat.importUsd + topCat.exportUsd)} 亿美元）`);
+  }
+  if (topPartner) {
+    structParts.push(`头号贸易伙伴为「${topPartner.partnerName}」（进口占比 ${topPartner.importSharePct?.toFixed(1) ?? "0.0"}%、出口占比 ${topPartner.exportSharePct?.toFixed(1) ?? "0.0"}%）`);
+  }
+  if (topRegion) {
+    structParts.push(`国内首位收发货人注册地为「${topRegion.regionName}」`);
+  }
+  if (topRegime) {
+    structParts.push(`主导贸易方式为「${topRegime.regimeName}」`);
+  }
+  const structureParagraph = structParts.length > 0 ? `结构分布上，${structParts.join("；")}。` : "当前期间无明细结构数据。";
+
+  const highImpCats = input.categories
+    .filter((c) => (c.importConcentration.cr3 ?? 0) >= 70)
+    .sort((a, b) => (b.importConcentration.cr3 ?? 0) - (a.importConcentration.cr3 ?? 0));
+  const impCr3Str = input.concentration.import.cr3 !== null ? `${input.concentration.import.cr3.toFixed(1)}%` : "暂无";
+  const expCr3Str = input.concentration.export.cr3 !== null ? `${input.concentration.export.cr3.toFixed(1)}%` : "暂无";
+  const concentrationAlert =
+    highImpCats.length > 0
+      ? `全行业进口伙伴 CR3 为 ${impCr3Str}、出口伙伴 CR3 为 ${expCr3Str}；其中 ${highImpCats
+          .slice(0, 3)
+          .map((c) => `${c.category}(进口CR3 ${c.importConcentration.cr3?.toFixed(1)}%)`)
+          .join("、")} 处于 CR3 ≥ 70% 高集中度区间，建议持续跟踪供应链多元化水平。`
+      : `全行业进口伙伴 CR3 为 ${impCr3Str}、出口伙伴 CR3 为 ${expCr3Str}，各一级类别进口 CR3 均低于 70% 高集中度警戒线。`;
+
+  return {
+    headline: `${input.period} 医疗器械进出口态势研判摘要`,
+    scaleParagraph,
+    multiYearParagraph,
+    structureParagraph,
+    concentrationAlert,
+  };
+}
+
 function buildPeriodSnapshot(ctx: {
   dictVersion: string;
   period: string;
   releaseId: string;
   availablePeriods: string[];
+  annualTrend: TradeAnnualTrendPoint[];
   publishedMonthSet: ReadonlySet<string>;
   activeBatchesByMonth: ReadonlyMap<string, string[]>;
   batchMetaMap: ReadonlyMap<string, BatchMetaRow>;
@@ -2171,26 +2411,46 @@ function buildPeriodSnapshot(ctx: {
   const priorCatExp = new Map<string, bigint>();
   const priorHsImp = new Map<string, bigint>();
   const priorHsExp = new Map<string, bigint>();
+  const priorHsQty = new Map<string, { imp1: QtyAccumulator; exp1: QtyAccumulator }>();
+  let priorTotalImpAllComparableOrDict = 0n;
+  let priorTotalExpAllComparableOrDict = 0n;
 
-  if (hasFullPrior && comparableHs8Set.size > 0) {
-    priorCompImpScaled = 0n;
-    priorCompExpScaled = 0n;
+  if (hasFullPrior) {
+    const priorAllApplicableSet = new Set(ctx.priorYearDict.filter((d) => d.applicable === 1).map((d) => d.hs8));
     for (const pm of priorParsed.months) {
       for (const f of ctx.factsByMonth.get(pm) ?? []) {
-        if (f.grouping !== "product" || !comparableHs8Set.has(f.hs8)) continue;
+        if (f.grouping !== "product") continue;
+        const val = BigInt(f.usd_scaled_str);
+        if (priorAllApplicableSet.has(f.hs8)) {
+          if (f.flow === "import") priorTotalImpAllComparableOrDict += val;
+          else priorTotalExpAllComparableOrDict += val;
+        }
+        if (!comparableHs8Set.has(f.hs8)) continue;
         const meta = hsMetaMap.get(f.hs8);
         if (!meta) continue;
-        const val = BigInt(f.usd_scaled_str);
+        if (priorCompImpScaled === null) priorCompImpScaled = 0n;
+        if (priorCompExpScaled === null) priorCompExpScaled = 0n;
+        let pq = priorHsQty.get(f.hs8);
+        if (!pq) {
+          pq = { imp1: createQtyAcc(), exp1: createQtyAcc() };
+          priorHsQty.set(f.hs8, pq);
+        }
         if (f.flow === "import") {
           priorCompImpScaled += val;
           priorCatImp.set(meta.category_id, (priorCatImp.get(meta.category_id) ?? 0n) + val);
           priorHsImp.set(f.hs8, (priorHsImp.get(f.hs8) ?? 0n) + val);
+          addQty(pq.imp1, f.qty1, f.unit1);
         } else {
           priorCompExpScaled += val;
           priorCatExp.set(meta.category_id, (priorCatExp.get(meta.category_id) ?? 0n) + val);
           priorHsExp.set(f.hs8, (priorHsExp.get(f.hs8) ?? 0n) + val);
+          addQty(pq.exp1, f.qty1, f.unit1);
         }
       }
+    }
+    if (comparableHs8Set.size > 0) {
+      priorCompImpScaled ??= 0n;
+      priorCompExpScaled ??= 0n;
     }
   }
 
@@ -2359,6 +2619,11 @@ function buildPeriodSnapshot(ctx: {
     const hImpMap = hsPartnerImp.get(item.hs8);
     const hExpMap = hsPartnerExp.get(item.hs8);
     const isComparable = hasFullPrior && comparableHs8Set.has(item.hs8);
+    const currImpQty1 = finalizeQty(q.imp1);
+    const currExpQty1 = finalizeQty(q.exp1);
+    const pq = priorHsQty.get(item.hs8);
+    const priorImpQty1 = pq ? finalizeQty(pq.imp1) : undefined;
+    const priorExpQty1 = pq ? finalizeQty(pq.exp1) : undefined;
     return {
       hs8: item.hs8,
       hs6: item.hs6,
@@ -2369,10 +2634,12 @@ function buildPeriodSnapshot(ctx: {
       balanceUsd: scaledToUsdNumber(exp - imp),
       importYoyPct: isComparable ? computeYoyPct(imp, priorHsImp.get(item.hs8) ?? 0n) : null,
       exportYoyPct: isComparable ? computeYoyPct(exp, priorHsExp.get(item.hs8) ?? 0n) : null,
-      importQty1: finalizeQty(q.imp1),
+      importQty1: currImpQty1,
       importQty2: finalizeQty(q.imp2),
-      exportQty1: finalizeQty(q.exp1),
+      importQty1YoyPct: isComparable ? computeSameUnitQtyYoyPct(currImpQty1, priorImpQty1) : null,
+      exportQty1: currExpQty1,
       exportQty2: finalizeQty(q.exp2),
+      exportQty1YoyPct: isComparable ? computeSameUnitQtyYoyPct(currExpQty1, priorExpQty1) : null,
       importConcentration: computeConcentration(
         hImpMap ? [...hImpMap.entries()].map(([partnerCode, v]) => ({ partnerCode, usdScaled: v.usd })) : [],
         imp,
@@ -2456,6 +2723,39 @@ function buildPeriodSnapshot(ctx: {
     },
   };
 
+  const totalScaled = totalImpScaled + totalExpScaled;
+  const compCurrTotalScaled = compCurrImpScaled + compCurrExpScaled;
+  const priorCompTotalScaled =
+    priorCompImpScaled !== null && priorCompExpScaled !== null ? priorCompImpScaled + priorCompExpScaled : null;
+
+  const totals: TradeOverviewPublished["totals"] = {
+    importUsd: scaledToUsdNumber(totalImpScaled),
+    exportUsd: scaledToUsdNumber(totalExpScaled),
+    totalUsd: scaledToUsdNumber(totalScaled),
+    balanceUsd: scaledToUsdNumber(totalBalanceScaled),
+    importYoyPct: hasFullPrior ? computeYoyPct(compCurrImpScaled, priorCompImpScaled) : null,
+    exportYoyPct: hasFullPrior ? computeYoyPct(compCurrExpScaled, priorCompExpScaled) : null,
+    totalYoyPct: hasFullPrior ? computeYoyPct(compCurrTotalScaled, priorCompTotalScaled) : null,
+  };
+
+  const priorBalanceScaled = hasFullPrior
+    ? priorTotalExpAllComparableOrDict - priorTotalImpAllComparableOrDict
+    : null;
+
+  const narrativeSummary = buildTradeNarrativeSummary({
+    period: ctx.period,
+    totals,
+    hasFullPrior,
+    priorBalanceScaled,
+    totalBalanceScaled,
+    annualTrend: ctx.annualTrend,
+    categories,
+    partners,
+    regions,
+    regimes,
+    concentration,
+  });
+
   return {
     status: "published",
     period: ctx.period,
@@ -2473,16 +2773,12 @@ function buildPeriodSnapshot(ctx: {
       notApplicableHs8Count: notApplicableCount,
     },
     sourceBatches,
-    totals: {
-      importUsd: scaledToUsdNumber(totalImpScaled),
-      exportUsd: scaledToUsdNumber(totalExpScaled),
-      balanceUsd: scaledToUsdNumber(totalBalanceScaled),
-      importYoyPct: hasFullPrior ? computeYoyPct(compCurrImpScaled, priorCompImpScaled) : null,
-      exportYoyPct: hasFullPrior ? computeYoyPct(compCurrExpScaled, priorCompExpScaled) : null,
-    },
+    totals,
     groupingTotals,
     concentration,
     trend,
+    annualTrend: ctx.annualTrend,
+    narrativeSummary,
     categories,
     partners,
     regimes,
@@ -2669,6 +2965,8 @@ export async function getTradeOverview(
       groupingTotals: null,
       concentration: null,
       trend: [],
+      annualTrend: [],
+      narrativeSummary: null,
       categories: [],
       partners: [],
       regimes: [],
