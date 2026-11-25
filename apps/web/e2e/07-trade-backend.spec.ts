@@ -210,10 +210,31 @@ test.describe.serial("G4 / AC-016：38号海关原件向导 → 贸易专题 / �
     await expect(metaBar).toContainText(publishedReleaseId);
 
     const kpiStrip = page.getByLabel("进出口贸易核心指标");
+    await expect(kpiStrip).toContainText("1.1010");
     await expect(kpiStrip).toContainText("0.8972");
     await expect(kpiStrip).toContainText("0.2038");
     await expect(kpiStrip).toContainText("+0.6935");
+    await expect(page.getByTestId("trade-narrative-summary")).toBeVisible();
+    await expect(page.locator("#fig-trade-category-donut")).toBeVisible();
+    await expect(page.locator("#fig-trade-structure-ranking")).toBeVisible();
     await expect(page.getByRole("tab", { name: /医疗器械品类结构 \(11类\)/ })).toBeVisible();
+
+    // 验证一键导出 A4 分析报告 HTML 与 Excel 口径双表统计汇总 CSV
+    const [reportDownload] = await Promise.all([
+      page.waitForEvent("download"),
+      page.getByTestId("btn-export-trade-report").click(),
+    ]);
+    const reportHtml = fs.readFileSync((await reportDownload.path())!, "utf8");
+    expect(reportHtml).toContain("中国医疗器械海关进出口与供应链集中度态势研判报告");
+    expect(reportHtml).toContain(publishedReleaseId);
+
+    const [dualCsvDownload] = await Promise.all([
+      page.waitForEvent("download"),
+      page.getByTestId("btn-export-trade-summary-csv").click(),
+    ]);
+    const dualCsvText = fs.readFileSync((await dualCsvDownload.path())!, "utf8");
+    expect(dualCsvText).toContain("进出口总额(亿美元)");
+    expect(dualCsvText).toContain("90181100");
 
     const trendFig = page.locator("#fig-trade-trend");
     const [csvDownload] = await Promise.all([

@@ -3,7 +3,7 @@
  * 本模块只经由 chart.tsx 动态加载，不进首屏包。
  */
 import * as echarts from "echarts/core";
-import { BarChart, LineChart } from "echarts/charts";
+import { BarChart, LineChart, PieChart } from "echarts/charts";
 import {
   AriaComponent,
   GridComponent,
@@ -14,7 +14,7 @@ import {
   TooltipComponent,
 } from "echarts/components";
 import { SVGRenderer } from "echarts/renderers";
-import type { BarSeriesOption, LineSeriesOption } from "echarts/charts";
+import type { BarSeriesOption, LineSeriesOption, PieSeriesOption } from "echarts/charts";
 import type {
   AriaComponentOption,
   GridComponentOption,
@@ -29,6 +29,7 @@ import type { ComposeOption } from "echarts/core";
 echarts.use([
   LineChart,
   BarChart,
+  PieChart,
   GridComponent,
   TooltipComponent,
   LegendComponent,
@@ -42,6 +43,7 @@ echarts.use([
 export type ChartOption = ComposeOption<
   | LineSeriesOption
   | BarSeriesOption
+  | PieSeriesOption
   | GridComponentOption
   | TooltipComponentOption
   | LegendComponentOption
