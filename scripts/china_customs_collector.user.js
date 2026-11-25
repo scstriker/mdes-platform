@@ -345,17 +345,72 @@
     return new TextEncoder().encode(csvText);
   }
 
+  const SHA256_K = new Uint32Array([
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+  ]);
+
+  function pureJsSha256Hex(view) {
+    const len = view.byteLength;
+    const bitHi = Math.floor((len * 8) / 0x100000000);
+    const bitLo = (len * 8) >>> 0;
+    const padLen = ((len + 9 + 63) & ~63);
+    const padded = new Uint8Array(padLen);
+    padded.set(view);
+    padded[len] = 0x80;
+    const dv = new DataView(padded.buffer);
+    dv.setUint32(padLen - 8, bitHi, false);
+    dv.setUint32(padLen - 4, bitLo, false);
+
+    let h0 = 0x6a09e667, h1 = 0xbb67ae85, h2 = 0x3c6ef372, h3 = 0xa54ff53a;
+    let h4 = 0x510e527f, h5 = 0x9b05688c, h6 = 0x1f83d9ab, h7 = 0x5be0cd19;
+    const w = new Uint32Array(64);
+    const rotr = (x, n) => (x >>> n) | (x << (32 - n));
+
+    for (let off = 0; off < padLen; off += 64) {
+      for (let i = 0; i < 16; i++) w[i] = dv.getUint32(off + i * 4, false);
+      for (let i = 16; i < 64; i++) {
+        const s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >>> 3);
+        const s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >>> 10);
+        w[i] = (w[i - 16] + s0 + w[i - 7] + s1) >>> 0;
+      }
+      let a = h0, b = h1, c = h2, d = h3, e = h4, f = h5, g = h6, h = h7;
+      for (let i = 0; i < 64; i++) {
+        const S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+        const ch = (e & f) ^ (~e & g);
+        const temp1 = (h + S1 + ch + SHA256_K[i] + w[i]) >>> 0;
+        const S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+        const maj = (a & b) ^ (a & c) ^ (b & c);
+        const temp2 = (S0 + maj) >>> 0;
+        h = g; g = f; f = e; e = (d + temp1) >>> 0;
+        d = c; c = b; b = a; a = (temp1 + temp2) >>> 0;
+      }
+      h0 = (h0 + a) >>> 0; h1 = (h1 + b) >>> 0; h2 = (h2 + c) >>> 0; h3 = (h3 + d) >>> 0;
+      h4 = (h4 + e) >>> 0; h5 = (h5 + f) >>> 0; h6 = (h6 + g) >>> 0; h7 = (h7 + h) >>> 0;
+    }
+    return [h0, h1, h2, h3, h4, h5, h6, h7].map((x) => x.toString(16).padStart(8, "0")).join("");
+  }
+
   async function computeSha256Hex(rawBufferOrBytes) {
     const view =
       rawBufferOrBytes instanceof Uint8Array
         ? rawBufferOrBytes
         : new Uint8Array(rawBufferOrBytes);
-    const copy = new Uint8Array(view.byteLength);
-    copy.set(view);
-    const digest = await crypto.subtle.digest("SHA-256", copy);
-    return Array.from(new Uint8Array(digest))
-      .map((b) => b.toString(16).padStart(2, "0"))
-      .join("");
+    if (typeof crypto !== "undefined" && crypto && crypto.subtle && typeof crypto.subtle.digest === "function") {
+      const copy = new Uint8Array(view.byteLength);
+      copy.set(view);
+      const digest = await crypto.subtle.digest("SHA-256", copy);
+      return Array.from(new Uint8Array(digest))
+        .map((b) => b.toString(16).padStart(2, "0"))
+        .join("");
+    }
+    return pureJsSha256Hex(view);
   }
 
   function bytesToBase64(bytes) {
@@ -444,10 +499,46 @@
     return normalized;
   }
 
-  function defaultStateCandidatesForYear(year) {
-    if (year >= 2025) return [1, 3, 2];
-    if (year === 2024) return [3, 2, 1];
-    return [2, 3, 1];
+  function readPortalTimeAnchors() {
+    let startAnchor = "202504";
+    let endAnchor = "202610";
+    try {
+      if (typeof document !== "undefined" && document) {
+        const ifr = document.querySelector("iframe");
+        const doc = (ifr && ifr.contentDocument) || document;
+        const sEl = doc.getElementById("currentStartTime");
+        const eEl = doc.getElementById("currentEndTime");
+        if (sEl && /^\d{6}$/.test(String(sEl.value || "").trim())) startAnchor = String(sEl.value).trim();
+        if (eEl && /^\d{6}$/.test(String(eEl.value || "").trim())) endAnchor = String(eEl.value).trim();
+      }
+    } catch (_) {}
+    return { currentStartTime: startAnchor, currentEndTime: endAnchor };
+  }
+
+  function getQueryFrameFetch() {
+    try {
+      if (typeof document !== "undefined" && document) {
+        const ifr = document.querySelector("iframe");
+        if (ifr && ifr.contentWindow && typeof ifr.contentWindow.fetch === "function") {
+          return ifr.contentWindow.fetch.bind(ifr.contentWindow);
+        }
+      }
+    } catch (_) {}
+    return fetch;
+  }
+
+  function computeOfficialSelectTableState(year, startMonth, endMonth, currentStartTime = "202504", currentEndTime = "202610") {
+    const selectStartTime = `${year}${String(startMonth).padStart(2, "0")}`;
+    const selectEndTime = `${year}${String(endMonth).padStart(2, "0")}`;
+    if (selectStartTime >= currentStartTime && currentEndTime >= selectEndTime) return 1;
+    if (currentStartTime > selectEndTime) return 2;
+    return 3;
+  }
+
+  function defaultStateCandidatesForYear(year, startMonth = 1, endMonth = 12) {
+    const { currentStartTime, currentEndTime } = readPortalTimeAnchors();
+    const primary = computeOfficialSelectTableState(year, startMonth, endMonth, currentStartTime, currentEndTime);
+    return [primary, ...[1, 2, 3].filter((x) => x !== primary)];
   }
 
   function buildAnnualMonthlyParams({
@@ -459,10 +550,16 @@
     grouping,
     hs8,
     currency = "usd",
-    selectTableState = 3,
-    currentStartTime = "202408",
+    selectTableState = null,
+    currentStartTime = null,
     forListCheck = false
   }) {
+    const anchors = readPortalTimeAnchors();
+    const effCurrentStartTime = currentStartTime || anchors.currentStartTime;
+    const effState =
+      selectTableState !== null && selectTableState !== undefined
+        ? selectTableState
+        : computeOfficialSelectTableState(year, startMonth, endMonth, effCurrentStartTime, anchors.currentEndTime);
     if (!Number.isInteger(year) || year < 2000 || year > 2100) {
       throw new Error(`非法统计年份: ${String(year)}`);
     }
@@ -511,8 +608,8 @@
     }
 
     entries.push(["orderType", "CODE ASC DEFAULT"]);
-    entries.push(["selectTableState", String(selectTableState)]);
-    entries.push(["currentStartTime", String(currentStartTime)]);
+    entries.push(["selectTableState", String(effState)]);
+    entries.push(["currentStartTime", String(effCurrentStartTime)]);
 
     return new URLSearchParams(entries);
   }
@@ -843,7 +940,8 @@
     maxDelayMs = DEFAULT_MAX_INTERVAL_MS,
     skipPoliteWaitForUnitTest = false
   }) {
-    const candidates = stateCandidates || defaultStateCandidatesForYear(year);
+    const candidates = stateCandidates || defaultStateCandidatesForYear(year, startMonth, endMonth);
+    const activeFetch = getQueryFrameFetch();
     for (const state of candidates) {
       const params = buildAnnualMonthlyParams({
         year,
@@ -862,15 +960,20 @@
       const singleProbe = await withSerialFlightLock(
         { minDelayMs, maxDelayMs, skipPoliteWaitForUnitTest },
         async () => {
-          const res = await fetch("/queryData/getQueryDataListByWhere", {
-            method: "POST",
-            credentials: "include",
-            headers: {
-              "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-              "X-Requested-With": "XMLHttpRequest"
-            },
-            body: params
-          });
+          let res;
+          try {
+            res = await activeFetch("/queryData/getQueryDataListByWhere", {
+              method: "POST",
+              credentials: "include",
+              headers: {
+                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                "X-Requested-With": "XMLHttpRequest"
+              },
+              body: params
+            });
+          } catch (netErr) {
+            return { halt: true, status: 0, reason: `fetch_failed:${String(netErr && netErr.message ? netErr.message : netErr)}` };
+          }
           if (res.status === 412 || res.status === 403 || res.status === 429) {
             return { halt: true, status: res.status, reason: `http_${res.status}` };
           }
@@ -878,6 +981,9 @@
             return { halt: false, ok: false, status: res.status };
           }
           const text = await res.text();
+          if (text.length === 0) {
+            return { halt: true, status: res.status, reason: "captcha_session_gate_required" };
+          }
           const total = extractTotalFromListResponseText(text);
           if (total !== null) {
             return { halt: false, ok: true, state, total };
@@ -950,7 +1056,8 @@
     return withSerialFlightLock(
       { minDelayMs, maxDelayMs, skipPoliteWaitForUnitTest },
       async () => {
-        const res = await fetch("/queryData/downloadQueryData", {
+        const activeFetch = getQueryFrameFetch();
+        const res = await activeFetch("/queryData/downloadQueryData", {
           method: "POST",
           credentials: "include",
           headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -968,6 +1075,16 @@
 
         const rawBuffer = await res.arrayBuffer();
         const sha256 = await computeSha256Hex(rawBuffer);
+        if (rawBuffer.byteLength === 0) {
+          return {
+            ok: false,
+            status: res.status,
+            reason: "captcha_session_gate_required",
+            circuitBreakRequired: true,
+            byteLength: 0,
+            sha256
+          };
+        }
         const inspection = inspectRawCustomsBytes(rawBuffer, hs8);
 
         if (!inspection.ok) {
@@ -1046,6 +1163,7 @@
     validateDelayConfig,
     verifyDictionary: verifyEmbeddedDictionary,
     checkSessionReady: probeSessionHealth,
+    computeOfficialSelectTableState,
     buildAnnualMonthlyParams,
     buildCustomsQueryParams,
     buildManifest,

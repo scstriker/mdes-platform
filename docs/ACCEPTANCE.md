@@ -143,3 +143,35 @@ AC-013 至 AC-017 均为**待开发验收**。金额对账使用中国海关原�
 对账只取样表八位商品代码与字典的交集。共有 37 个税号，按 H 列逐项核对 2024 年进口，合计应为 17,410,795,225 美元。按 N 列核对 36 个有出口额的税号，合计应为 13,792,423,197 美元。`90222190` 的 N126 为空，标为样表无出口对账值。全国行、类别小计行及“汇总表”的万美元列均在此次比较范围之外。
 
 **验证方式** 为 164 码出具按月、流向、四种分组分别记录的覆盖清单，列出各税号的样表值、采集值和差额。对已有对照值要求逐项一致；遇官方修订，保存两个来源版本及差异依据，再标记对账结论。默认回填至最新公布的完整月份，每月都须有覆盖记录，年份内标为不适用的税号随清单附当年目录依据。
+
+### AC-018 — 油猴套件 v4.0 字典强校验与低频单飞串行桥接
+
+**关联需求** FR-010。
+
+顶层 `docs/china_customs_suite.user.js` 与 `scripts/china_customs_collector.user.js` 内嵌 `202601` 正式字典 164 项医疗器械 HS8（启动时 SHA-256 校验 `ab8e97496fbc9500877f02adc61ab214788f79234b9cb1f565a98f77a683a59b`），锁定 USD 美元与四分组（含 `TRADE_CO_PORT` 收发货人注册地），暴露 `__CUSTOMS_SUITE_BRIDGE__`。并发重入请求立即抛 `ERR_CONCURRENT_REQUEST_FORBIDDEN`，间隔配置低于 `2.5s` 抛 `LOW_FREQUENCY_VIOLATION`；`collect_customs_5y.py` 在预检行数 `>= 9,000` 时自动二分时间窗，遇 HTML 验证页或 HTTP `412/429` 立即熔断并保存 `_checkpoint.json`。
+
+**验证方式** `packages/shared/tests/customs-suite-v4.test.ts` 与 `scripts/harness/tests/test_serial_collector.py` 自动化测试。
+
+### AC-019 — 2022–2026 历年税号适用性、多月原件拆解与单次批量发布
+
+**关联需求** FR-010。
+
+`0007_trade_hs_2022_2026_applicability.sql` 将 `90189080`（手术机器人）在 `2022` 年标为当年不适用（`163` 项适用码，`2023–2026` 为 `164` 项）。`POST /api/trade/import-bulk`（`deferPublish=true`）将 `monthFlag="1"` 多月 CSV 按 `数据年月` 拆解暂存且共享母文件 `sourceSha256`，不提前改写线上 `releaseId`；`POST /api/trade/publish` 单次原子发布 5 年多期快照，且 `GET /api/trade/overview` 维持主键单行命中（`rows_read = 1`）。
+
+**验证方式** `apps/api/tests/trade-g7-multiyear-bulk.test.ts` 自动化集成测试。
+
+### AC-020 — 跨年趋势、同单位数量同比与确定性态势研判摘要
+
+**关联需求** FR-011。
+
+`GET /api/trade/overview` 返回 `totals.{totalUsd, totalYoyPct}`、跨年序列 `annualTrend`（非完整年度标记 `isPartial: true` 并按上年同窗口期计算同比）、`hsItems[].{importQty1YoyPct, exportQty1YoyPct}`（异构计量单位返回 `null`），以及严格区分相邻期“同比”与跨多年“区间增长/下降”的 `narrativeSummary`。
+
+**验证方式** `apps/api/tests/trade-g8-analytics-summary.test.ts` 自动化集成测试。
+
+### AC-021 — 门户四维图表矩阵与一键导出 A4 报告 / 年度汇总 CSV
+
+**关联需求** FR-011。
+
+`/trade` 渲染 5 栏核心 KPI（含进出口总额）、研判摘要卡片、2×2 四维 ECharts 6 SVG 图表矩阵（跨年/月度走势及年份筛选、11 大类构成环形饼图、伙伴/国内省市/贸易方式 Top 10 横向条形图、一级类别 CR3 警戒条形图）、HS8 数量同比展示，支持一键下载内嵌矢量图的 A4 分析报告 HTML 与对齐样表的双表统计汇总 CSV，并通过 `style-rules.test.ts` 及浅色/深色双主题 WCAG 2.1 AA 无障碍检查。
+
+**验证方式** `apps/web/tests/trade-g9-visualizations-report.test.tsx` 与 `apps/web/e2e/07-trade-backend.spec.ts` 端到端测试。

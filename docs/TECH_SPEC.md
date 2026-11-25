@@ -73,10 +73,10 @@ Agent 默认按 TechStack：TypeScript + Pi Agent，经 HTTP/MCP 调本 API；**
 
 | 环节 | 输入、职责与输出 |
 | --- | --- |
-| 本机采集 | 在海关官网按单月、单流向、单分组查询一组 HS8，直接选择美元。保存原始 CSV 字节和配套查询清单。独立导出全国、伙伴、贸易方式、注册地四组。旧脚本可复用查询选项与编码识别；月份和流向来自本次查询。 |
-| 管理端导入 | 38 号向导选择原件与清单，原件在本机按哈希归档。Worker 重新计算摘要，校验字典、表头、分组及金额单位；文件级错误带原因，数据行错误给出行号。通过校验的批次按块写入 D1，返回覆盖与发布状态。 |
-| 汇总与发布 | 以商品全国金额计算进口、出口和差额。按伙伴计算份额和集中度，按贸易方式、注册地计算各自的结构。分组内汇总可与商品全国合计独立对账。按年和月份保留发布覆盖，历史修订触发受影响期间和同比重算。 |
-| 门户读取 | Worker 获取已发布期间快照。专题、38 号详情、贸易搜索和图表导出共用该版本，后台观测值通过同版 TRD 派生行追溯。金额、图轴、期间、图注及导出数据由接口驱动，保留现有 ECharts 组件和搜索导航。 |
+| 本机采集 | 在海关官网通过 `china_customs_suite.user.js` v4.0 与 `scripts/harness/collect_customs_5y.py`（基于 `browser-harness` 单持久 CDP 连接）低频单飞串行查询（`MAX_INFLIGHT = 1`，`3.5s–6.5s` 抖动 + 分组/跨年冷却），锁定 USD 与 `202601` 164 码字典，支持 `monthFlag="1"` 年度分月原字节经本地 IPC 零弹窗落盘及超 9,000 行自动二分时间窗。 |
+| 管理端导入 | 支持 38 号单批向导（`POST /api/trade/import`）与历史回填批量拆解入口（`POST /api/trade/import-bulk`，默认 `deferPublish=true`）及 CLI 工具 `scripts/import-customs-archive.mjs`。Worker 核验字典、历年适用性（`0007` 迁移）、表头与美元精度，按块写入候选表。 |
+| 汇总与发布 | 支持单月自动发布或 `POST /api/trade/publish` 单次向量化全周期发布。一次性计算进出口总额、跨年序列 `annualTrend`、同单位第一数量同比与确定性研判摘要 `narrativeSummary`，以 `trade_release` 乐观锁切换多期快照。 |
+| 门户读取 | Worker 主键单行读取 `trade_current_snapshot`（`rows_read = 1`）。`/trade` 渲染 5 栏核心 KPI、研判摘要卡片、2×2 四维 ECharts 6 SVG 图表矩阵（跨年/月度走势、11 类构成环形图、伙伴/国内省市/贸易方式 Top 10、一级类别 CR3 警戒图），并由 `@mdes/shared/src/trade-report.ts` 生成 A4 打印报告与双表汇总 CSV。 |
 
 ### 发布与运行
 

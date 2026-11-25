@@ -214,4 +214,81 @@ describe("G7 / AC-019：2022–2026 历年税号适用性、monthFlag=1 多月�
     },
     60_000,
   );
+
+  it(
+    "当单次发布跨越超 15 万条 trade_fact 明细行时，不触发 V8 调用栈溢出或 D1 单次查询体积上限并精准完成对账发布",
+    async () => {
+      // 10 个月份 × 100 个税号 × 150 个真实伙伴国 = 150,000 条伙伴明细（超过 V8 push(...results) 12.5 万参数栈上限，同时伙伴基数保持真实 <=240 国）
+      const dictVer = "TEST-5Y-LARGE";
+      const HS_COUNT = 100;
+      const PARTNER_COUNT = 150;
+      const MONTHS = Array.from({ length: 10 }, (_, idx) => `2024-${String(idx + 1).padStart(2, "0")}`);
+      const hsCodes = Array.from({ length: HS_COUNT }, (_, idx) => `9018${String(1000 + idx)}`);
+      const hsJson = JSON.stringify(hsCodes);
+      const perHsMonthlyUsd = PARTNER_COUNT * 10;
+      const now = "2026-11-25T00:00:00.000Z";
+
+      const dictValues = hsCodes
+        .map((code, idx) => `('${dictVer}', '${code}', '${code.slice(0, 6)}', '器械${idx + 1}', 'cat-01', '医用诊断装备', 1, ${idx + 1})`)
+        .join(",\n");
+
+      await h.sql([
+        `INSERT INTO trade_dict_meta (dict_version, source_filename, source_sha256, hs8_count, hs6_count, category_count, scope_mode)
+         VALUES ('${dictVer}', 'large.csv', '${"f".repeat(64)}', ${HS_COUNT}, ${HS_COUNT}, 1, 'pilot')`,
+        `INSERT INTO trade_hs_dict (dict_version, hs8, hs6, item_name, category_id, category_name, category_order, seq_no) VALUES ${dictValues}`,
+      ]);
+
+      const metaStmts: string[] = [];
+      for (const month of MONTHS) {
+        const specs = [
+          { flow: "import", grouping: "product", rows: HS_COUNT },
+          { flow: "import", grouping: "partner", rows: HS_COUNT * PARTNER_COUNT },
+          { flow: "import", grouping: "regime", rows: HS_COUNT },
+          { flow: "import", grouping: "region", rows: HS_COUNT },
+          { flow: "export", grouping: "product", rows: HS_COUNT },
+          { flow: "export", grouping: "partner", rows: HS_COUNT },
+          { flow: "export", grouping: "regime", rows: HS_COUNT },
+          { flow: "export", grouping: "region", rows: HS_COUNT },
+        ] as const;
+
+        for (const sp of specs) {
+          const bid = `large-${month}-${sp.flow}-${sp.grouping}`;
+          const scopeKey = `${dictVer}|${month}|${sp.flow}|${sp.grouping}|ALL`;
+          metaStmts.push(
+            `INSERT INTO import_batch (id, filename, status, row_ok, row_err, errors_json, created_at) VALUES ('${bid}', '${bid}.csv', 'completed', ${sp.rows}, 0, '[]', '${now}')`,
+            `INSERT INTO trade_import_batch (batch_id, dict_version, month, flow, currency, grouping, scope_key, hs8_json, empty_hs8_json, received_hs8_json, confirmed_empty_hs8_json, missing_hs8_json, filename, source_sha256, evidence_sha256s_json, row_count, publish_state, superseded_by, created_at)
+             VALUES ('${bid}', '${dictVer}', '${month}', '${sp.flow}', 'USD', '${sp.grouping}', '${scopeKey}', '${hsJson}', '[]', '${hsJson}', '[]', '[]', '${bid}.csv', '${"a".repeat(64)}', '[]', ${sp.rows}, 'staged', NULL, '${now}')`,
+            `INSERT INTO trade_hs_coverage (batch_id, dict_version, month, flow, grouping, hs8, status, evidence_sha256)
+             SELECT '${bid}', '${dictVer}', '${month}', '${sp.flow}', '${sp.grouping}', hs8, 'received', '${"a".repeat(64)}'
+             FROM trade_hs_dict WHERE dict_version = '${dictVer}'`,
+          );
+          if (sp.flow === "import" && sp.grouping === "partner") {
+            metaStmts.push(
+              `WITH RECURSIVE p(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM p WHERE n < ${PARTNER_COUNT})
+               INSERT INTO trade_fact (batch_id, dict_version, month, flow, grouping, hs8, item_name, group_code, group_name, usd_scaled, usd_raw, qty1, unit1, qty2, unit2)
+               SELECT '${bid}', '${dictVer}', '${month}', 'import', 'partner', d.hs8, d.item_name, 'P' || p.n, '伙伴' || p.n, 100000, '10', 1, '台', null, null
+               FROM trade_hs_dict d CROSS JOIN p WHERE d.dict_version = '${dictVer}'`,
+            );
+          } else {
+            metaStmts.push(
+              `INSERT INTO trade_fact (batch_id, dict_version, month, flow, grouping, hs8, item_name, group_code, group_name, usd_scaled, usd_raw, qty1, unit1, qty2, unit2)
+               SELECT '${bid}', '${dictVer}', '${month}', '${sp.flow}', '${sp.grouping}', hs8, item_name, '502', '美国', ${perHsMonthlyUsd * 10000}, '${perHsMonthlyUsd}', ${PARTNER_COUNT}, '台', null, null
+               FROM trade_hs_dict WHERE dict_version = '${dictVer}'`,
+            );
+          }
+        }
+      }
+      await h.sql(metaStmts);
+
+      const pubRes = await h.post("/api/trade/publish", { dictVersion: dictVer });
+      expect(pubRes.status).toBe(200);
+      const pubBody = (await pubRes.json()) as { published: boolean; publishedMonths: string[] };
+      expect(pubBody.published).toBe(true);
+      expect(pubBody.publishedMonths).toHaveLength(10);
+
+      const ov = await (await h.request(`/api/trade/overview?dictVersion=${dictVer}&period=2024-YTD-10`)).json();
+      expect((ov as { totals: { importUsd: number } }).totals.importUsd).toBe(HS_COUNT * perHsMonthlyUsd * 10);
+    },
+    60_000,
+  );
 });
