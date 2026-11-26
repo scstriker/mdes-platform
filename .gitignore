@@ -14,3 +14,4 @@ dist-e2e/
 __pycache__/
 *.py[cod]
 data/customs-raw/
+data/customs-raw-pilot/

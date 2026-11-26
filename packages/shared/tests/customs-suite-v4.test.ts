@@ -1,8 +1,10 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import vm from "node:vm";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
+import { validateTradeBulkManifest, validateTradeManifest } from "../src/trade";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const REPO_DOCS_SUITE_PATH = path.resolve(here, "../../../docs/china_customs_suite.user.js");
@@ -316,6 +318,344 @@ describe("G6 / AC-018：china_customs_suite.user.js v4.0 医疗器械 164 码字
       expect(dlRes.ok).toBe(false);
       expect(dlRes.reason).toBe("captcha_session_gate_required");
       expect(dlRes.circuitBreakRequired).toBe(true);
+    }
+  });
+
+  it("[P2-12] 生产探测在首个 selectTableState 未命中继续试探时，连续请求间严格执行限速等待并准确返回 requestCount", async () => {
+    const sleepCalls: number[] = [];
+    let fetchCalls = 0;
+    const mockFetch: typeof fetch = async () => {
+      fetchCalls += 1;
+      if (fetchCalls === 1) {
+        return new Response("", { status: 500 });
+      }
+      return new Response(JSON.stringify({ total: 2 }), { status: 200 });
+    };
+
+    const code = fs.readFileSync(TOP_SUITE_PATH, "utf8");
+    const sandbox: Record<string, unknown> = {
+      TextEncoder,
+      TextDecoder,
+      URLSearchParams,
+      Uint8Array,
+      Uint32Array,
+      DataView,
+      ArrayBuffer,
+      crypto: globalThis.crypto,
+      Buffer,
+      setTimeout: (fn: () => void, ms?: number) => {
+        sleepCalls.push(ms ?? 0);
+        fn();
+        return 0;
+      },
+      clearTimeout,
+      console,
+      btoa: (str: string) => Buffer.from(str, "binary").toString("base64"),
+      atob: (b64: string) => Buffer.from(b64, "base64").toString("binary"),
+      fetch: mockFetch,
+    };
+    sandbox.globalThis = sandbox;
+    vm.createContext(sandbox);
+    vm.runInContext(code, sandbox, { filename: "china_customs_suite.user.js" });
+
+    const bridge = sandbox.__CUSTOMS_SUITE_BRIDGE__ as {
+      probeCount: (opts: {
+        year: number;
+        startMonth: number;
+        endMonth: number;
+        monthFlag: "" | "1";
+        flow: "import" | "export";
+        grouping: "product";
+        hs8: string[];
+        stateCandidates: number[];
+        minDelayMs: number;
+        maxDelayMs: number;
+      }) => Promise<{ ok: boolean; state: number; total: number; requestCount: number }>;
+    };
+
+    const res = await bridge.probeCount({
+      year: 2024,
+      startMonth: 1,
+      endMonth: 1,
+      monthFlag: "1",
+      flow: "import",
+      grouping: "product",
+      hs8: ["90181100"],
+      stateCandidates: [2, 1, 3],
+      minDelayMs: 3500,
+      maxDelayMs: 3500,
+    });
+
+    expect(res.ok).toBe(true);
+    expect(res.state).toBe(1);
+    expect(res.requestCount).toBe(2);
+    expect(fetchCalls).toBe(2);
+    // 第 2 次实际请求前必须等待 >= 3500ms（非 0ms 连发）
+    expect(sleepCalls.some((ms) => ms >= 3400)).toBe(true);
+  });
+
+  it("[P2-13] scripts/china_customs_collector.user.js 与 docs/china_customs_suite.user.js 均保留手动采集面板并生成可导入清单", async () => {
+    for (const scriptPath of [TOP_SUITE_PATH, COLLECTOR_COPY_PATH]) {
+      const code = fs.readFileSync(scriptPath, "utf8");
+      const downloads: Array<{ filename: string; text: string }> = [];
+      const blobToText = new Map<string, string>();
+      let blobSeq = 0;
+
+      const elementsById = new Map<string, Record<string, unknown>>();
+      const makeEl = (tag: string): Record<string, unknown> => {
+        const listeners = new Map<string, Array<(e?: unknown) => unknown>>();
+        const classSet = new Set<string>();
+        let innerHtmlVal = "";
+        const el: Record<string, unknown> = {
+          tagName: tag.toUpperCase(),
+          id: "",
+          value: "",
+          disabled: false,
+          style: {},
+          classList: {
+            toggle(c: string) {
+              if (classSet.has(c)) classSet.delete(c);
+              else classSet.add(c);
+            },
+            contains(c: string) {
+              return classSet.has(c);
+            },
+          },
+          children: [] as unknown[],
+          appendChild(child: Record<string, unknown>) {
+            (this.children as unknown[]).push(child);
+            if (child.id) elementsById.set(String(child.id), child);
+            return child;
+          },
+          remove() {},
+          addEventListener(ev: string, fn: (e?: unknown) => unknown) {
+            const arr = listeners.get(ev) ?? [];
+            arr.push(fn);
+            listeners.set(ev, arr);
+          },
+          async click() {
+            if (tag === "a" && typeof this.download === "string" && typeof this.href === "string") {
+              downloads.push({ filename: this.download, text: blobToText.get(this.href) ?? "" });
+            }
+            for (const fn of listeners.get("click") ?? []) {
+              await fn({ target: this });
+            }
+          },
+        };
+        Object.defineProperty(el, "innerHTML", {
+          get: () => innerHtmlVal,
+          set: (v: string) => {
+            innerHtmlVal = v;
+            const idRegex = /id="([^"]+)"/g;
+            for (const m of v.matchAll(idRegex)) {
+              if (!elementsById.has(m[1])) {
+                const sub = makeEl("div");
+                sub.id = m[1];
+                if (m[1] === "inp-year") sub.value = "2024";
+                if (m[1] === "inp-m-start") sub.value = "1";
+                if (m[1] === "inp-m-end") sub.value = "2";
+                if (m[1] === "sel-month-flag") sub.value = "1";
+                if (m[1] === "sel-ietype") sub.value = "import";
+                if (m[1] === "sel-grouping") sub.value = "product";
+                if (m[1] === "sel-batch") sub.value = "PILOT";
+                elementsById.set(m[1], sub);
+              }
+            }
+          },
+        });
+        return el;
+      };
+
+      const head = makeEl("head");
+      const body = makeEl("body");
+      const fakeDoc = {
+        readyState: "complete",
+        head,
+        body,
+        createElement: (tag: string) => makeEl(tag),
+        getElementById: (id: string) => elementsById.get(id) ?? null,
+        querySelector: () => null,
+        querySelectorAll: () => [],
+      };
+
+      class FakeBlob {
+        content: string;
+        constructor(parts: unknown[]) {
+          this.content = parts
+            .map((p) => (p instanceof Uint8Array ? Buffer.from(p).toString("utf8") : String(p)))
+            .join("");
+        }
+      }
+
+      const csvBody =
+        "数据年月,商品编码,商品名称,第一数量,第一计量单位,第二数量,第二计量单位,美元\r\n" +
+        "202401,90181100,心电图记录仪,10,台,5,千克,1000\r\n" +
+        "202402,90181100,心电图记录仪,12,台,6,千克,1200\r\n";
+
+      const mockFetch: typeof fetch = async (input) => {
+        const url = String(input);
+        if (url.includes("getQueryDataListByWhere")) {
+          return new Response(JSON.stringify({ total: 2 }), { status: 200 });
+        }
+        return new Response(new TextEncoder().encode(csvBody), { status: 200 });
+      };
+
+      const fakeWindow: Record<string, unknown> = {};
+      fakeWindow.top = fakeWindow;
+      fakeWindow.self = fakeWindow;
+
+      const sandbox: Record<string, unknown> = {
+        window: fakeWindow,
+        document: fakeDoc,
+        Blob: FakeBlob,
+        URL: {
+          createObjectURL: (b: FakeBlob) => {
+            const key = `blob:test/${++blobSeq}`;
+            blobToText.set(key, b.content);
+            return key;
+          },
+          revokeObjectURL: () => {},
+        },
+        TextEncoder,
+        TextDecoder,
+        URLSearchParams,
+        Uint8Array,
+        Uint32Array,
+        DataView,
+        ArrayBuffer,
+        crypto: globalThis.crypto,
+        Buffer,
+        alert: () => {},
+        setTimeout: (fn: () => void) => {
+          fn();
+          return 0;
+        },
+        clearTimeout,
+        console,
+        btoa: (str: string) => Buffer.from(str, "binary").toString("base64"),
+        atob: (b64: string) => Buffer.from(b64, "base64").toString("binary"),
+        fetch: mockFetch,
+      };
+      sandbox.globalThis = sandbox;
+      vm.createContext(sandbox);
+      vm.runInContext(code, sandbox, { filename: path.basename(scriptPath) });
+
+      // 等待 async initSuiteV4UI 完成字典校验并绑定事件监听器
+      await new Promise((resolve) => setTimeout(resolve, 25));
+
+      // 断言：挂载了手动采集面板与启动按钮
+      expect(elementsById.has("customs-suite-panel")).toBe(true);
+      const startBtn = elementsById.get("btn-start-suite") as { click: () => Promise<void> };
+      expect(startBtn).toBeDefined();
+
+      // 触发手动采集：必须同时下载 .raw.csv 与配套可导入 .manifest.json（及 .meta.json）
+      await startBtn.click();
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      const csvDl = downloads.find((d) => d.filename.endsWith(".raw.csv"));
+      const manifestDl = downloads.find((d) => d.filename.endsWith(".manifest.json"));
+      const metaDl = downloads.find((d) => d.filename.endsWith(".meta.json"));
+      expect(csvDl).toBeDefined();
+      expect(manifestDl).toBeDefined();
+      expect(metaDl).toBeDefined();
+
+      // stem 必须一致以便 scripts/import-customs-archive.mjs 自动配对导入
+      expect(csvDl!.filename.replace(/\.raw\.csv$/, "")).toBe(manifestDl!.filename.replace(/\.manifest\.json$/, ""));
+      const parsedManifest = JSON.parse(manifestDl!.text) as Record<string, unknown>;
+      const checked = validateTradeBulkManifest(parsedManifest, {
+        knownDictVersions: new Set(["202601"]),
+        dictHs8Set: new Set(["90181100"]),
+      });
+      expect(checked.ok).toBe(true);
+      if (checked.ok) {
+        expect(checked.value.months).toEqual(["2024-01", "2024-02"]);
+        expect(checked.value.probeVerifiedZero).toBe(true);
+      }
+    }
+  });
+
+  it('[P2-11] validateTradeManifest / validateTradeBulkManifest 严格校验 probeVerifiedZero 布尔类型，拒绝字符串 "false"', () => {
+    const baseSingle = {
+      dictVersion: "202601",
+      month: "2024-01",
+      flow: "import",
+      currency: "USD",
+      grouping: "product",
+      hs8: ["90181100"],
+      emptyHs8: [],
+    };
+    expect(validateTradeManifest({ ...baseSingle, probeVerifiedZero: "false" }).ok).toBe(false);
+    expect(validateTradeManifest({ ...baseSingle, probeVerifiedZero: 1 }).ok).toBe(false);
+    const okFalse = validateTradeManifest({ ...baseSingle, probeVerifiedZero: false });
+    expect(okFalse.ok && okFalse.value.probeVerifiedZero).toBe(false);
+    const okTrue = validateTradeManifest({ ...baseSingle, probeVerifiedZero: true });
+    expect(okTrue.ok && okTrue.value.probeVerifiedZero).toBe(true);
+
+    const baseBulk = {
+      dictVersion: "202601",
+      months: ["2024-01"],
+      flow: "import",
+      currency: "USD",
+      grouping: "product",
+      hs8: ["90181100"],
+    };
+    expect(validateTradeBulkManifest({ ...baseBulk, probeVerifiedZero: "false" }).ok).toBe(false);
+    expect(validateTradeBulkManifest({ ...baseBulk, probeVerifiedZero: "true" }).ok).toBe(false);
+    const bulkTrue = validateTradeBulkManifest({ ...baseBulk, probeVerifiedZero: true });
+    expect(bulkTrue.ok && bulkTrue.value.probeVerifiedZero).toBe(true);
+  });
+
+  it("[P1-4] import-customs-archive 遇试点与正式 G01 共存同目录时自动跳过被覆盖的试点清单，避免 409 阻断导入", async () => {
+    const importerHref = pathToFileURL(path.resolve(here, "../../../scripts/import-customs-archive.mjs")).href;
+    const importerMod = (await import(importerHref)) as {
+      selectImportableManifestEntries: (
+        files: string[],
+        opts?: { dictVersion?: string; includePilot?: boolean },
+      ) => { selected: Array<{ mfPath: string }>; skippedPilot: Array<{ mfPath: string }> };
+    };
+
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "mdes-archive-p14-"));
+    try {
+      const pilotDir = path.join(tmpDir, "2024", "import", "product", "PILOT-90181100", "r01");
+      const formalDir = path.join(tmpDir, "2024", "import", "product", "G01", "r01");
+      fs.mkdirSync(pilotDir, { recursive: true });
+      fs.mkdirSync(formalDir, { recursive: true });
+
+      const pilotMf = path.join(pilotDir, "customs_202601_2024_01-12_import_product_PILOT-90181100_r01.manifest.json");
+      const formalMf = path.join(formalDir, "customs_202601_2024_01-12_import_product_G01_r01.manifest.json");
+      fs.writeFileSync(
+        pilotMf,
+        JSON.stringify({
+          dictVersion: "202601",
+          months: ["2024-01"],
+          flow: "import",
+          currency: "USD",
+          grouping: "product",
+          hs8: ["90181100"],
+        }),
+      );
+      fs.writeFileSync(
+        formalMf,
+        JSON.stringify({
+          dictVersion: "202601",
+          months: ["2024-01"],
+          flow: "import",
+          currency: "USD",
+          grouping: "product",
+          hs8: ["84231000", "90181100"],
+        }),
+      );
+
+      // 混合目录：跳过被 G01 覆盖的 PILOT-90181100
+      const mixed = importerMod.selectImportableManifestEntries([pilotMf, formalMf]);
+      expect(mixed.selected.map((x) => x.mfPath)).toEqual([formalMf]);
+      expect(mixed.skippedPilot.map((x) => x.mfPath)).toEqual([pilotMf]);
+
+      // 独立试点目录：无正式批次覆盖时正常保留导入
+      const pilotOnly = importerMod.selectImportableManifestEntries([pilotMf]);
+      expect(pilotOnly.selected.map((x) => x.mfPath)).toEqual([pilotMf]);
+      expect(pilotOnly.skippedPilot).toHaveLength(0);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   });
 });

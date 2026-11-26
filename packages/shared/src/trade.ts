@@ -295,6 +295,17 @@ export function validateTradeManifest(
   }
   const emptyHs8 = [...emptySet].sort();
 
+  if (obj.probeVerifiedZero !== undefined && typeof obj.probeVerifiedZero !== "boolean") {
+    return {
+      ok: false,
+      error: {
+        status: 400,
+        code: "TRADE_MANIFEST_INVALID",
+        params: { field: "probeVerifiedZero", reason: "must be boolean" },
+      },
+    };
+  }
+
   return {
     ok: true,
     value: {
@@ -306,7 +317,7 @@ export function validateTradeManifest(
       grouping,
       hs8,
       emptyHs8,
-      probeVerifiedZero: Boolean(obj.probeVerifiedZero),
+      probeVerifiedZero: obj.probeVerifiedZero === true,
       scopeKey: buildTradeScopeKey({ dictVersion, month, flow, currency: "USD", grouping, hs8 }),
     },
   };
@@ -427,6 +438,17 @@ export function validateTradeBulkManifest(
     emptySet.add(code);
   }
 
+  if (obj.probeVerifiedZero !== undefined && typeof obj.probeVerifiedZero !== "boolean") {
+    return {
+      ok: false,
+      error: {
+        status: 400,
+        code: "TRADE_MANIFEST_INVALID",
+        params: { field: "probeVerifiedZero", reason: "must be boolean" },
+      },
+    };
+  }
+
   return {
     ok: true,
     value: {
@@ -437,7 +459,7 @@ export function validateTradeBulkManifest(
       grouping,
       hs8,
       emptyHs8: [...emptySet].sort(),
-      probeVerifiedZero: Boolean(obj.probeVerifiedZero),
+      probeVerifiedZero: obj.probeVerifiedZero === true,
     },
   };
 }
@@ -921,8 +943,10 @@ export function parseMultiMonthCustomsCsvBytes(
     .slice(headerIndex + 1)
     .filter((r) => !isBlank(r.fields));
 
+  const probeVerifiedZero = manifest.probeVerifiedZero === true;
+
   if (dataRecords.length === 0) {
-    if (options?.allowHeaderOnlyEmpty || manifest.probeVerifiedZero) {
+    if (options?.allowHeaderOnlyEmpty || probeVerifiedZero) {
       return { ok: true, encoding: decoded.encoding, headers, byMonth, totalRows: 0, summaryRowsSkipped: 0 };
     }
     return { ok: false, error: { status: 400, code: "EMPTY_CSV", params: {} } };
@@ -1028,7 +1052,7 @@ export function parseMultiMonthCustomsCsvBytes(
       }
     }
 
-    if (!manifest.probeVerifiedZero && declaredEmptyHs8.has(rawHs)) {
+    if (!probeVerifiedZero && declaredEmptyHs8.has(rawHs)) {
       return {
         ok: false,
         error: {
@@ -1087,7 +1111,7 @@ export function parseMultiMonthCustomsCsvBytes(
     totalRows += 1;
   }
 
-  if (totalRows === 0 && !options?.allowHeaderOnlyEmpty && !manifest.probeVerifiedZero) {
+  if (totalRows === 0 && !options?.allowHeaderOnlyEmpty && !probeVerifiedZero) {
     return { ok: false, error: { status: 400, code: "EMPTY_CSV", params: {} } };
   }
 

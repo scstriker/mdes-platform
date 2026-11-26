@@ -90,12 +90,25 @@ export function tradeRoutes(app: Hono<AppEnv>) {
   app.post("/api/trade/import-bulk", async (c) => {
     const parsed = await readTradeMultipart(c);
     const deferPublish = parseBoolField(parsed.deferPublishField, true);
+    const parseOptPositiveInt = (raw: string | undefined): number | undefined => {
+      if (!raw) return undefined;
+      const n = Number.parseInt(raw, 10);
+      return Number.isFinite(n) && n > 0 ? n : undefined;
+    };
+    const hooksEnabled = c.env.ENABLE_TEST_HOOKS === "1";
     const result = await importTradeBulkBatch(c.get("db"), {
       rawManifest: parsed.rawManifest,
       file: parsed.file,
       emptyEvidences: parsed.emptyEvidences,
       maxRows: c.get("importMaxRows"),
       deferPublish,
+      failAfterMonthIndex: hooksEnabled
+        ? parseOptPositiveInt(c.req.header("x-test-fail-bulk-after-month"))
+        : undefined,
+      failDuringOversizedMonth: hooksEnabled && c.req.header("x-test-fail-bulk-oversized-month") === "1",
+      maxBatchStmtsOverride: hooksEnabled
+        ? parseOptPositiveInt(c.req.header("x-test-bulk-max-stmts"))
+        : undefined,
     });
     return c.json(result);
   });
@@ -109,7 +122,23 @@ export function tradeRoutes(app: Hono<AppEnv>) {
         dictVersion = body.dictVersion.trim();
       }
     }
-    const result = await publishAllReadyTradeMonths(c.get("db"), dictVersion);
+    const hooksEnabled = c.env.ENABLE_TEST_HOOKS === "1";
+    const rawFailStage = hooksEnabled ? c.req.header("x-test-fail-publish-stage-after") : undefined;
+    const failAfterStageBatch =
+      rawFailStage && Number.isFinite(Number.parseInt(rawFailStage, 10)) && Number.parseInt(rawFailStage, 10) > 0
+        ? Number.parseInt(rawFailStage, 10)
+        : undefined;
+    const rawStageThreshold = hooksEnabled ? c.req.header("x-test-publish-stage-threshold") : undefined;
+    const stageThresholdOverride =
+      rawStageThreshold &&
+      Number.isFinite(Number.parseInt(rawStageThreshold, 10)) &&
+      Number.parseInt(rawStageThreshold, 10) >= 0
+        ? Number.parseInt(rawStageThreshold, 10)
+        : undefined;
+    const result = await publishAllReadyTradeMonths(c.get("db"), dictVersion, {
+      failAfterStageBatch,
+      stageThresholdOverride,
+    });
     return c.json(result);
   });
 

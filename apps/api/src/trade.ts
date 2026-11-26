@@ -1,8 +1,11 @@
 import {
+  buildMultiYearNarrativeParagraph,
+  buildTradeNarrativeSummary,
   buildTradeScopeKey,
   computeConcentration,
   computeYoyPct,
   isPngBytes,
+  normalizeTradeOverviewSnapshot,
   parseCustomsCsvBytes,
   parseMultiMonthCustomsCsvBytes,
   parseTradePeriod,
@@ -28,7 +31,6 @@ import {
   type TradeHsItemStat,
   type TradeImportCoverage,
   type TradeImportResponse,
-  type TradeNarrativeSummary,
   type TradeOverviewEmpty,
   type TradeOverviewPublished,
   type TradeOverviewResponse,
@@ -77,7 +79,23 @@ export type ImportTradeBulkOptions = {
   emptyEvidences: TradeFileInput[];
   maxRows: number;
   deferPublish?: boolean;
+  /** 测试钩子：在提交完第 N 个自然月后模拟中断，验证已提交月份保留且未完成月份可重传补齐 */
+  failAfterMonthIndex?: number;
+  /** 测试钩子：在超大单月分块写入明细中途抛出失败，验证残缺月份不会被误判为幂等重放 */
+  failDuringOversizedMonth?: boolean;
+  /** 测试钩子：覆写单次 db.batch 语句上限（默认 200），用于单测验证超大单月两阶段原子写入 */
+  maxBatchStmtsOverride?: number;
 };
+
+export type PublishTradeMonthsOptions = {
+  /** 测试钩子：在暂存第 N 批快照后抛出异常，验证大批量发布失败不影响可见版本且重试可完整补齐 */
+  failAfterStageBatch?: number;
+  /** 测试钩子：覆写启用暂存表发布的期间数阈值（默认 30） */
+  stageThresholdOverride?: number;
+};
+
+const DEFAULT_MAX_STAGING_BATCH_STMTS = 200;
+const DEFAULT_PUBLISH_STAGE_THRESHOLD = 30;
 
 const ID_QUERY_CHUNK_SIZE = 200;
 const MAX_PUBLISH_CAS_RETRIES = 8;
@@ -200,7 +218,7 @@ type BatchMetaRow = {
   source_sha256: string;
   evidence_sha256s_json: string;
   row_count: number;
-  publish_state: "staged" | "published";
+  publish_state: "ingesting" | "staged" | "published";
   superseded_by: string | null;
 };
 
@@ -304,6 +322,315 @@ const INSERT_RECON_CHUNK = `
     status = excluded.status,
     checked_at = excluded.checked_at
 `;
+
+const INSERT_STAGED_OBS_CHUNK = `
+  INSERT INTO trade_publish_staged_observation (
+    staging_id, seq, indicator_id, period, geo, dims, value_num, value_text, unit, batch_id, object_ref, created_at
+  )
+  SELECT
+    ?1,
+    CAST(json_extract(value, '$.seq') AS INTEGER),
+    json_extract(value, '$.indicator_id'),
+    json_extract(value, '$.period'),
+    json_extract(value, '$.geo'),
+    json_extract(value, '$.dims'),
+    json_extract(value, '$.value_num'),
+    json_extract(value, '$.value_text'),
+    json_extract(value, '$.unit'),
+    ?2,
+    json_extract(value, '$.object_ref'),
+    ?3
+  FROM json_each(?4)
+`;
+
+async function isBatchFactsComplete(db: D1Database, batch: BatchMetaRow): Promise<boolean> {
+  if (batch.publish_state !== "staged" && batch.publish_state !== "published") {
+    return false;
+  }
+  const expectedHs8Count = (JSON.parse(batch.hs8_json) as string[]).length;
+  const counts = await db
+    .prepare(
+      `SELECT
+         (SELECT COUNT(*) FROM trade_fact WHERE batch_id = ?1) AS fact_cnt,
+         (SELECT COUNT(*) FROM trade_hs_coverage WHERE batch_id = ?1) AS cov_cnt`,
+    )
+    .bind(batch.batch_id)
+    .first<{ fact_cnt: number; cov_cnt: number }>();
+  return Number(counts?.fact_cnt ?? -1) === batch.row_count && Number(counts?.cov_cnt ?? -1) === expectedHs8Count;
+}
+
+type MonthStagingCommitPlan = {
+  batchId: string;
+  initIngestingStmts: D1PreparedStatement[];
+  detailStmts: D1PreparedStatement[];
+  finalizeStmts: D1PreparedStatement[];
+  allAtomicStmts: D1PreparedStatement[];
+};
+
+async function commitStagedMonthBatch(
+  db: D1Database,
+  plan: MonthStagingCommitPlan,
+  opts?: { maxBatchStmts?: number; failDuringOversizedMonth?: boolean },
+): Promise<void> {
+  const maxStmts = opts?.maxBatchStmts ?? DEFAULT_MAX_STAGING_BATCH_STMTS;
+  if (plan.allAtomicStmts.length <= maxStmts) {
+    await db.batch(plan.allAtomicStmts);
+    return;
+  }
+
+  // 超大单月（超过单次 db.batch 语句上限）：先以 ingesting 状态隔离写入明细，全部落盘后再原子转正为 staged
+  await db.batch(plan.initIngestingStmts);
+  const chunkLimit = Math.max(1, maxStmts - 10);
+  try {
+    for (let i = 0; i < plan.detailStmts.length; i += chunkLimit) {
+      await db.batch(plan.detailStmts.slice(i, i + chunkLimit));
+      if (opts?.failDuringOversizedMonth && i === 0) {
+        throw new Error("simulated failure during oversized month detail staging");
+      }
+    }
+    await db.batch(plan.finalizeStmts);
+  } catch (err) {
+    await db
+      .prepare("DELETE FROM import_batch WHERE id = ?1")
+      .bind(plan.batchId)
+      .run()
+      .catch(() => {});
+    throw err;
+  }
+}
+
+async function cleanupPublishStaging(db: D1Database, stagingId: string): Promise<void> {
+  try {
+    await db.batch([
+      db.prepare("DELETE FROM trade_publish_staged_observation WHERE staging_id = ?1").bind(stagingId),
+      db.prepare("DELETE FROM trade_publish_staged_snapshot WHERE staging_id = ?1").bind(stagingId),
+    ]);
+  } catch {
+    // best-effort cleanup; staging_id is isolated per UUID
+  }
+}
+
+type DerivedObsPayloadRow = {
+  indicator_id: string;
+  period: string;
+  geo: string;
+  dims: string;
+  value_num: number | null;
+  value_text: string | null;
+  unit: string;
+  object_ref: string;
+};
+
+async function commitPublishReleaseAtomically(
+  db: D1Database,
+  params: {
+    dictVersion: string;
+    releaseId: string;
+    latestMonth: string;
+    availablePeriods: string[];
+    annualTrend: TradeAnnualTrendPoint[];
+    triggerBatchId: string;
+    now: string;
+    headerStmts: D1PreparedStatement[];
+    snapshotsToWrite: Array<{ period: string; payload: TradeOverviewPublished }>;
+    derivedObsRows: DerivedObsPayloadRow[];
+    failAfterStageBatch?: number;
+    stageThresholdOverride?: number;
+  },
+): Promise<void> {
+  const {
+    dictVersion,
+    releaseId,
+    latestMonth,
+    availablePeriods,
+    annualTrend,
+    triggerBatchId,
+    now,
+    headerStmts,
+    snapshotsToWrite,
+    derivedObsRows,
+    failAfterStageBatch,
+    stageThresholdOverride,
+  } = params;
+
+  const availablePeriodsJson = JSON.stringify(availablePeriods);
+  const annualTrendJson = JSON.stringify(annualTrend);
+  const multiYearParagraph = buildMultiYearNarrativeParagraph(annualTrend);
+  const stageThreshold = stageThresholdOverride ?? DEFAULT_PUBLISH_STAGE_THRESHOLD;
+
+  const syncUntouchedSnapshotsStmt = db
+    .prepare(
+      `UPDATE trade_current_snapshot
+       SET is_latest_month = CASE WHEN period = ?2 THEN 1 ELSE 0 END,
+           available_periods_json = ?3,
+           payload_json = CASE
+             WHEN release_id != ?1 THEN
+               CASE
+                 WHEN json_type(payload_json, '$.narrativeSummary') = 'object' THEN
+                   json_set(
+                     payload_json,
+                     '$.availablePeriods', json(?3),
+                     '$.annualTrend', json(?4),
+                     '$.narrativeSummary.multiYearParagraph', ?5
+                   )
+                 ELSE
+                   json_set(
+                     payload_json,
+                     '$.availablePeriods', json(?3),
+                     '$.annualTrend', json(?4)
+                   )
+               END
+             ELSE payload_json
+           END
+       WHERE dict_version = ?6`,
+    )
+    .bind(releaseId, latestMonth, availablePeriodsJson, annualTrendJson, multiYearParagraph, dictVersion);
+
+  if (snapshotsToWrite.length <= stageThreshold && derivedObsRows.length <= CHUNK_SIZE * 20) {
+    const publishStmts: D1PreparedStatement[] = [...headerStmts];
+    for (const { period, payload } of snapshotsToWrite) {
+      const payloadStr = JSON.stringify(payload);
+      const batchesStr = JSON.stringify(payload.sourceBatches);
+      publishStmts.push(
+        db
+          .prepare(
+            `INSERT INTO trade_period_snapshot (snapshot_id, dict_version, period, release_id, source_batches_json, payload_json, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)`,
+          )
+          .bind(crypto.randomUUID(), dictVersion, period, releaseId, batchesStr, payloadStr, now),
+        db
+          .prepare(
+            `INSERT INTO trade_current_snapshot (dict_version, period, is_latest_month, release_id, available_periods_json, payload_json, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(dict_version, period) DO UPDATE SET
+               is_latest_month = excluded.is_latest_month,
+               release_id = excluded.release_id,
+               available_periods_json = excluded.available_periods_json,
+               payload_json = excluded.payload_json,
+               updated_at = excluded.updated_at`,
+          )
+          .bind(
+            dictVersion,
+            period,
+            period === latestMonth ? 1 : 0,
+            releaseId,
+            availablePeriodsJson,
+            payloadStr,
+            now,
+          ),
+        db.prepare("DELETE FROM observation WHERE object_ref = ?1").bind(`trade_snapshot:${dictVersion}:${period}`),
+      );
+    }
+    publishStmts.push(syncUntouchedSnapshotsStmt);
+    for (let i = 0; i < derivedObsRows.length; i += CHUNK_SIZE) {
+      publishStmts.push(
+        db
+          .prepare(INSERT_DERIVED_OBS_CHUNK)
+          .bind(triggerBatchId, now, JSON.stringify(derivedObsRows.slice(i, i + CHUNK_SIZE))),
+      );
+    }
+    await db.batch(publishStmts);
+    return;
+  }
+
+  // 大批量发布：先将全部快照与派生观测值分批暂存至隔离暂存表（对读取端完全不可见），再单次原子事务切换可见版本
+  const stagingId = releaseId;
+  try {
+    let stageBatchNo = 0;
+    for (let i = 0; i < snapshotsToWrite.length; i += 10) {
+      const slice = snapshotsToWrite.slice(i, i + 10);
+      const stmts = slice.map(({ period, payload }) =>
+        db
+          .prepare(
+            `INSERT INTO trade_publish_staged_snapshot (
+               staging_id, dict_version, period, source_batches_json, payload_json, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)`,
+          )
+          .bind(stagingId, dictVersion, period, JSON.stringify(payload.sourceBatches), JSON.stringify(payload), now),
+      );
+      await db.batch(stmts);
+      stageBatchNo += 1;
+      if (failAfterStageBatch !== undefined && stageBatchNo >= failAfterStageBatch) {
+        throw new Error(`simulated failure after staging snapshot chunk #${stageBatchNo}`);
+      }
+    }
+
+    const stagedObsStmts: D1PreparedStatement[] = [];
+    for (let i = 0; i < derivedObsRows.length; i += CHUNK_SIZE) {
+      const chunk = derivedObsRows.slice(i, i + CHUNK_SIZE).map((r, offset) => ({
+        seq: i + offset,
+        ...r,
+      }));
+      stagedObsStmts.push(
+        db.prepare(INSERT_STAGED_OBS_CHUNK).bind(stagingId, triggerBatchId, now, JSON.stringify(chunk)),
+      );
+    }
+    for (let i = 0; i < stagedObsStmts.length; i += 50) {
+      await db.batch(stagedObsStmts.slice(i, i + 50));
+    }
+
+    // 单次原子事务：仅传极小控制参数，由 SQLite 内部完成全量快照、观测值与版本头切换，绝不产生半发布态
+    const switchStmts: D1PreparedStatement[] = [
+      ...headerStmts,
+      db
+        .prepare(
+          `INSERT INTO trade_period_snapshot (snapshot_id, dict_version, period, release_id, source_batches_json, payload_json, created_at)
+           SELECT staging_id || ':' || period, dict_version, period, ?1, source_batches_json, payload_json, created_at
+           FROM trade_publish_staged_snapshot
+           WHERE staging_id = ?2`,
+        )
+        .bind(releaseId, stagingId),
+      db
+        .prepare(
+          `INSERT INTO trade_current_snapshot (dict_version, period, is_latest_month, release_id, available_periods_json, payload_json, updated_at)
+           SELECT
+             dict_version,
+             period,
+             CASE WHEN period = ?2 THEN 1 ELSE 0 END,
+             ?1,
+             ?3,
+             payload_json,
+             created_at
+           FROM trade_publish_staged_snapshot
+           WHERE staging_id = ?4
+           ON CONFLICT(dict_version, period) DO UPDATE SET
+             is_latest_month = excluded.is_latest_month,
+             release_id = excluded.release_id,
+             available_periods_json = excluded.available_periods_json,
+             payload_json = excluded.payload_json,
+             updated_at = excluded.updated_at`,
+        )
+        .bind(releaseId, latestMonth, availablePeriodsJson, stagingId),
+      syncUntouchedSnapshotsStmt,
+      db
+        .prepare(
+          `DELETE FROM observation
+           WHERE object_ref IN (
+             SELECT 'trade_snapshot:' || dict_version || ':' || period
+             FROM trade_publish_staged_snapshot
+             WHERE staging_id = ?1
+           )`,
+        )
+        .bind(stagingId),
+      db
+        .prepare(
+          `INSERT INTO observation (indicator_id, period, geo, dims, value_num, value_text, unit, batch_id, object_ref, created_at)
+           SELECT indicator_id, period, geo, dims, value_num, value_text, unit, batch_id, object_ref, created_at
+           FROM trade_publish_staged_observation
+           WHERE staging_id = ?1
+           ORDER BY seq ASC`,
+        )
+        .bind(stagingId),
+      db.prepare("DELETE FROM trade_publish_staged_observation WHERE staging_id = ?1").bind(stagingId),
+      db.prepare("DELETE FROM trade_publish_staged_snapshot WHERE staging_id = ?1").bind(stagingId),
+    ];
+
+    await db.batch(switchStmts);
+  } catch (err) {
+    await cleanupPublishStaging(db, stagingId);
+    throw err;
+  }
+}
 
 async function loadDictForYear(db: D1Database, dictVersion: string, year: number): Promise<DictItemRow[]> {
   const { results } = await db
@@ -448,19 +775,23 @@ export async function importTradeBatch(
   const emptyHs8Json = JSON.stringify(manifest.emptyHs8);
   const evidenceJson = JSON.stringify(evidenceSha256s);
 
-  // 1. 检查相同范围、相同原件、相同覆盖与证据的幂等重放（含历史已替代批次重放）
-  const existingReplay = await db
+  // 1. 检查相同范围、相同原件、相同覆盖与证据的幂等重放（仅匹配已完整写入的 staged/published 批次）
+  const existingReplayRow = await db
     .prepare(
       `SELECT * FROM trade_import_batch
        WHERE scope_key = ?1
          AND source_sha256 = ?2
          AND empty_hs8_json = ?3
          AND evidence_sha256s_json = ?4
-       ORDER BY created_at DESC
+         AND publish_state IN ('staged', 'published')
+       ORDER BY created_at DESC, rowid DESC
        LIMIT 1`,
     )
     .bind(manifest.scopeKey, sourceSha256, emptyHs8Json, evidenceJson)
     .first<BatchMetaRow>();
+
+  const existingReplay =
+    existingReplayRow && (await isBatchFactsComplete(db, existingReplayRow)) ? existingReplayRow : null;
 
   if (existingReplay) {
     // 若该批次已被后续新修订替代（superseded_by 非空），或已成功发布，或请求显式延迟发布：直接返回原批次
@@ -479,7 +810,7 @@ export async function importTradeBatch(
           confirmedEmpty: JSON.parse(existingReplay.confirmed_empty_hs8_json) as string[],
           missing: JSON.parse(existingReplay.missing_hs8_json) as string[],
         },
-        status: existingReplay.publish_state,
+        status: existingReplay.publish_state === "published" ? "published" : "staged",
         releaseId: currentSnap?.release_id ?? null,
         replayed: true,
       };
@@ -512,7 +843,8 @@ export async function importTradeBatch(
     .prepare(
       `SELECT batch_id, scope_key, hs8_json
        FROM trade_import_batch
-       WHERE dict_version = ?1 AND month = ?2 AND flow = ?3 AND grouping = ?4 AND superseded_by IS NULL`,
+       WHERE dict_version = ?1 AND month = ?2 AND flow = ?3 AND grouping = ?4
+         AND superseded_by IS NULL AND publish_state IN ('staged', 'published')`,
     )
     .bind(manifest.dictVersion, manifest.month, manifest.flow, manifest.grouping)
     .all<{ batch_id: string; scope_key: string; hs8_json: string }>();
@@ -534,55 +866,13 @@ export async function importTradeBatch(
     }
   }
 
-  // 3. 单事务分块写入候选批次、税号覆盖记录及月度事实（暂不动已发布指针）
+  // 3. 按月原子写入候选批次、税号覆盖记录及月度事实（超大单月自动切换 ingesting->staged 两阶段安全写入）
   const batchId = crypto.randomUUID();
   const createdAt = new Date().toISOString();
-  const stagingStmts: D1PreparedStatement[] = [
-    db
-      .prepare(
-        `INSERT INTO import_batch (id, filename, status, row_ok, row_err, errors_json, created_at)
-         VALUES (?1, ?2, 'completed', ?3, 0, '[]', ?4)`,
-      )
-      .bind(batchId, filename, rows.length, createdAt),
-    db
-      .prepare(
-        `INSERT INTO trade_import_batch (
-           batch_id, dict_version, month, flow, currency, grouping, scope_key,
-           hs8_json, empty_hs8_json, received_hs8_json, confirmed_empty_hs8_json, missing_hs8_json,
-           filename, source_sha256, evidence_sha256s_json, row_count, publish_state, superseded_by, created_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, 'staged', NULL, ?17)`,
-      )
-      .bind(
-        batchId,
-        manifest.dictVersion,
-        manifest.month,
-        manifest.flow,
-        manifest.currency,
-        manifest.grouping,
-        manifest.scopeKey,
-        JSON.stringify(manifest.hs8),
-        emptyHs8Json,
-        JSON.stringify(coverage.received),
-        JSON.stringify(coverage.confirmedEmpty),
-        JSON.stringify(coverage.missing),
-        filename,
-        sourceSha256,
-        evidenceJson,
-        rows.length,
-        createdAt,
-      ),
-  ];
-
-  if (prevSameScopeBatchId) {
-    stagingStmts.push(
-      db
-        .prepare("UPDATE trade_import_batch SET superseded_by = ?1 WHERE batch_id = ?2")
-        .bind(batchId, prevSameScopeBatchId),
-    );
-  }
+  const detailStmts: D1PreparedStatement[] = [];
 
   for (const evItem of evidenceCoverageList) {
-    stagingStmts.push(
+    detailStmts.push(
       db
         .prepare(
           `INSERT INTO trade_batch_evidence (id, batch_id, filename, sha256, byte_length, covered_hs8_json, created_at)
@@ -612,7 +902,7 @@ export async function importTradeBatch(
 
   for (let i = 0; i < coverageRecords.length; i += CHUNK_SIZE) {
     const chunk = coverageRecords.slice(i, i + CHUNK_SIZE);
-    stagingStmts.push(
+    detailStmts.push(
       db
         .prepare(INSERT_COVERAGE_CHUNK)
         .bind(batchId, manifest.dictVersion, manifest.month, manifest.flow, manifest.grouping, JSON.stringify(chunk)),
@@ -632,14 +922,72 @@ export async function importTradeBatch(
       qty2: r.qty2,
       unit2: r.unit2,
     }));
-    stagingStmts.push(
+    detailStmts.push(
       db
         .prepare(INSERT_FACT_CHUNK)
         .bind(batchId, manifest.dictVersion, manifest.month, manifest.flow, manifest.grouping, JSON.stringify(chunk)),
     );
   }
 
-  await db.batch(stagingStmts);
+  const buildHeaderStmts = (importStatus: "completed" | "ingesting", publishState: "staged" | "ingesting", supersededBy: string | null) => [
+    db
+      .prepare(
+        `INSERT INTO import_batch (id, filename, status, row_ok, row_err, errors_json, created_at)
+         VALUES (?1, ?2, ?3, ?4, 0, '[]', ?5)`,
+      )
+      .bind(batchId, filename, importStatus, rows.length, createdAt),
+    db
+      .prepare(
+        `INSERT INTO trade_import_batch (
+           batch_id, dict_version, month, flow, currency, grouping, scope_key,
+           hs8_json, empty_hs8_json, received_hs8_json, confirmed_empty_hs8_json, missing_hs8_json,
+           filename, source_sha256, evidence_sha256s_json, row_count, publish_state, superseded_by, created_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)`,
+      )
+      .bind(
+        batchId,
+        manifest.dictVersion,
+        manifest.month,
+        manifest.flow,
+        manifest.currency,
+        manifest.grouping,
+        manifest.scopeKey,
+        JSON.stringify(manifest.hs8),
+        emptyHs8Json,
+        JSON.stringify(coverage.received),
+        JSON.stringify(coverage.confirmedEmpty),
+        JSON.stringify(coverage.missing),
+        filename,
+        sourceSha256,
+        evidenceJson,
+        rows.length,
+        publishState,
+        supersededBy,
+        createdAt,
+      ),
+  ];
+
+  const supersedeStmts = prevSameScopeBatchId
+    ? [
+        db
+          .prepare("UPDATE trade_import_batch SET superseded_by = ?1 WHERE batch_id = ?2")
+          .bind(batchId, prevSameScopeBatchId),
+      ]
+    : [];
+
+  await commitStagedMonthBatch(db, {
+    batchId,
+    initIngestingStmts: buildHeaderStmts("ingesting", "ingesting", "__INGESTING__"),
+    detailStmts,
+    finalizeStmts: [
+      db.prepare("UPDATE import_batch SET status = 'completed' WHERE id = ?1").bind(batchId),
+      db
+        .prepare("UPDATE trade_import_batch SET publish_state = 'staged', superseded_by = NULL WHERE batch_id = ?1")
+        .bind(batchId),
+      ...supersedeStmts,
+    ],
+    allAtomicStmts: [...buildHeaderStmts("completed", "staged", null), ...supersedeStmts, ...detailStmts],
+  });
 
   if (options.deferPublish) {
     const currentSnap = await db
@@ -770,7 +1118,7 @@ export async function importTradeBulkBatch(
   let totalRowCount = 0;
   const createdAt = new Date().toISOString();
   const evidenceJson = JSON.stringify(evidenceSha256s);
-  const stagingStmts: D1PreparedStatement[] = [];
+  const monthPlans: MonthStagingCommitPlan[] = [];
 
   for (const month of bulkManifest.months) {
     const year = Number(month.slice(0, 4));
@@ -809,7 +1157,7 @@ export async function importTradeBulkBatch(
         confirmedEmpty: monthHs8.filter((c) => assigned.provenEmptySet.has(c)),
         missing: monthHs8.filter((c) => !assigned.provenEmptySet.has(c)),
       };
-    } else if (bulkManifest.probeVerifiedZero) {
+    } else if (bulkManifest.probeVerifiedZero === true) {
       coverage = {
         received: monthHs8.filter((c) => receivedSet.has(c)),
         confirmedEmpty: monthHs8.filter((c) => !receivedSet.has(c)),
@@ -843,21 +1191,22 @@ export async function importTradeBulkBatch(
     const monthEmptyHs8 = coverage.confirmedEmpty;
     const emptyHs8Json = JSON.stringify(monthEmptyHs8);
 
-    const existingReplay = await db
+    const existingReplayRow = await db
       .prepare(
         `SELECT * FROM trade_import_batch
          WHERE scope_key = ?1
            AND source_sha256 = ?2
            AND empty_hs8_json = ?3
            AND evidence_sha256s_json = ?4
-         ORDER BY created_at DESC
+           AND publish_state IN ('staged', 'published')
+         ORDER BY created_at DESC, rowid DESC
          LIMIT 1`,
       )
       .bind(scopeKey, sourceSha256, emptyHs8Json, evidenceJson)
       .first<BatchMetaRow>();
 
-    if (existingReplay) {
-      batchIds.push(existingReplay.batch_id);
+    if (existingReplayRow && (await isBatchFactsComplete(db, existingReplayRow))) {
+      batchIds.push(existingReplayRow.batch_id);
       continue;
     }
 
@@ -865,7 +1214,8 @@ export async function importTradeBulkBatch(
       .prepare(
         `SELECT batch_id, scope_key, hs8_json
          FROM trade_import_batch
-         WHERE dict_version = ?1 AND month = ?2 AND flow = ?3 AND grouping = ?4 AND superseded_by IS NULL`,
+         WHERE dict_version = ?1 AND month = ?2 AND flow = ?3 AND grouping = ?4
+           AND superseded_by IS NULL AND publish_state IN ('staged', 'published')`,
       )
       .bind(bulkManifest.dictVersion, month, bulkManifest.flow, bulkManifest.grouping)
       .all<{ batch_id: string; scope_key: string; hs8_json: string }>();
@@ -890,52 +1240,9 @@ export async function importTradeBulkBatch(
     const batchId = crypto.randomUUID();
     batchIds.push(batchId);
 
-    stagingStmts.push(
-      db
-        .prepare(
-          `INSERT INTO import_batch (id, filename, status, row_ok, row_err, errors_json, created_at)
-           VALUES (?1, ?2, 'completed', ?3, 0, '[]', ?4)`,
-        )
-        .bind(batchId, filename, monthRows.length, createdAt),
-      db
-        .prepare(
-          `INSERT INTO trade_import_batch (
-             batch_id, dict_version, month, flow, currency, grouping, scope_key,
-             hs8_json, empty_hs8_json, received_hs8_json, confirmed_empty_hs8_json, missing_hs8_json,
-             filename, source_sha256, evidence_sha256s_json, row_count, publish_state, superseded_by, created_at
-           ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, 'staged', NULL, ?17)`,
-        )
-        .bind(
-          batchId,
-          bulkManifest.dictVersion,
-          month,
-          bulkManifest.flow,
-          "USD",
-          bulkManifest.grouping,
-          scopeKey,
-          JSON.stringify(monthHs8),
-          emptyHs8Json,
-          JSON.stringify(coverage.received),
-          JSON.stringify(coverage.confirmedEmpty),
-          JSON.stringify(coverage.missing),
-          filename,
-          sourceSha256,
-          evidenceJson,
-          monthRows.length,
-          createdAt,
-        ),
-    );
-
-    if (prevSameScopeBatchId) {
-      stagingStmts.push(
-        db
-          .prepare("UPDATE trade_import_batch SET superseded_by = ?1 WHERE batch_id = ?2")
-          .bind(batchId, prevSameScopeBatchId),
-      );
-    }
-
+    const detailStmts: D1PreparedStatement[] = [];
     for (const evItem of evidenceCoverageList) {
-      stagingStmts.push(
+      detailStmts.push(
         db
           .prepare(
             `INSERT INTO trade_batch_evidence (id, batch_id, filename, sha256, byte_length, covered_hs8_json, created_at)
@@ -963,7 +1270,7 @@ export async function importTradeBulkBatch(
       ...coverage.missing.map((hs8) => ({ hs8, status: "missing", evidenceSha256: null })),
     ];
     for (let i = 0; i < coverageRecords.length; i += CHUNK_SIZE) {
-      stagingStmts.push(
+      detailStmts.push(
         db
           .prepare(INSERT_COVERAGE_CHUNK)
           .bind(
@@ -990,16 +1297,85 @@ export async function importTradeBulkBatch(
         qty2: r.qty2,
         unit2: r.unit2,
       }));
-      stagingStmts.push(
+      detailStmts.push(
         db
           .prepare(INSERT_FACT_CHUNK)
-          .bind(bulkManifest.dictVersion === "" ? batchId : batchId, bulkManifest.dictVersion, month, bulkManifest.flow, bulkManifest.grouping, JSON.stringify(chunk)),
+          .bind(batchId, bulkManifest.dictVersion, month, bulkManifest.flow, bulkManifest.grouping, JSON.stringify(chunk)),
       );
     }
+
+    const buildHeaderStmts = (importStatus: "completed" | "ingesting", publishState: "staged" | "ingesting", supersededBy: string | null) => [
+      db
+        .prepare(
+          `INSERT INTO import_batch (id, filename, status, row_ok, row_err, errors_json, created_at)
+           VALUES (?1, ?2, ?3, ?4, 0, '[]', ?5)`,
+        )
+        .bind(batchId, filename, importStatus, monthRows.length, createdAt),
+      db
+        .prepare(
+          `INSERT INTO trade_import_batch (
+             batch_id, dict_version, month, flow, currency, grouping, scope_key,
+             hs8_json, empty_hs8_json, received_hs8_json, confirmed_empty_hs8_json, missing_hs8_json,
+             filename, source_sha256, evidence_sha256s_json, row_count, publish_state, superseded_by, created_at
+           ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)`,
+        )
+        .bind(
+          batchId,
+          bulkManifest.dictVersion,
+          month,
+          bulkManifest.flow,
+          "USD",
+          bulkManifest.grouping,
+          scopeKey,
+          JSON.stringify(monthHs8),
+          emptyHs8Json,
+          JSON.stringify(coverage.received),
+          JSON.stringify(coverage.confirmedEmpty),
+          JSON.stringify(coverage.missing),
+          filename,
+          sourceSha256,
+          evidenceJson,
+          monthRows.length,
+          publishState,
+          supersededBy,
+          createdAt,
+        ),
+    ];
+
+    const supersedeStmts = prevSameScopeBatchId
+      ? [
+          db
+            .prepare("UPDATE trade_import_batch SET superseded_by = ?1 WHERE batch_id = ?2")
+            .bind(batchId, prevSameScopeBatchId),
+        ]
+      : [];
+
+    monthPlans.push({
+      batchId,
+      initIngestingStmts: buildHeaderStmts("ingesting", "ingesting", "__INGESTING__"),
+      detailStmts,
+      finalizeStmts: [
+        db.prepare("UPDATE import_batch SET status = 'completed' WHERE id = ?1").bind(batchId),
+        db
+          .prepare("UPDATE trade_import_batch SET publish_state = 'staged', superseded_by = NULL WHERE batch_id = ?1")
+          .bind(batchId),
+        ...supersedeStmts,
+      ],
+      allAtomicStmts: [...buildHeaderStmts("completed", "staged", null), ...supersedeStmts, ...detailStmts],
+    });
   }
 
-  for (let i = 0; i < stagingStmts.length; i += 200) {
-    await db.batch(stagingStmts.slice(i, i + 200));
+  // 按月独立原子提交：确保单月批次头与全部事实明细同成同败，绝不出现“有头无明细”的残缺月份
+  let committedMonths = 0;
+  for (const plan of monthPlans) {
+    await commitStagedMonthBatch(db, plan, {
+      maxBatchStmts: options.maxBatchStmtsOverride,
+      failDuringOversizedMonth: options.failDuringOversizedMonth,
+    });
+    committedMonths += 1;
+    if (options.failAfterMonthIndex !== undefined && committedMonths >= options.failAfterMonthIndex) {
+      throw new Error(`simulated failure after committing bulk month #${committedMonths}`);
+    }
   }
 
   if (deferPublish) {
@@ -1037,6 +1413,7 @@ export async function importTradeBulkBatch(
 export async function publishAllReadyTradeMonths(
   db: D1Database,
   rawDictVersion?: string | null,
+  opts?: PublishTradeMonthsOptions,
 ): Promise<TradePublishResponse> {
   const dictVersion = rawDictVersion?.trim() || DEFAULT_DICT_VERSION;
   const dictMeta = await db
@@ -1050,7 +1427,7 @@ export async function publishAllReadyTradeMonths(
   return withDictPublishLock(dictVersion, async () => {
     for (let attempt = 0; attempt < MAX_PUBLISH_CAS_RETRIES; attempt++) {
       try {
-        return await attemptPublishAllReadyOnce(db, dictVersion);
+        return await attemptPublishAllReadyOnce(db, dictVersion, opts);
       } catch (err) {
         if (isTradeReleaseCasConflict(err) && attempt + 1 < MAX_PUBLISH_CAS_RETRIES) {
           continue;
@@ -1062,7 +1439,11 @@ export async function publishAllReadyTradeMonths(
   });
 }
 
-async function attemptPublishAllReadyOnce(db: D1Database, dictVersion: string): Promise<TradePublishResponse> {
+async function attemptPublishAllReadyOnce(
+  db: D1Database,
+  dictVersion: string,
+  opts?: PublishTradeMonthsOptions,
+): Promise<TradePublishResponse> {
   const prevRelease = await db
     .prepare(
       `SELECT release_id, COALESCE(version_seq, 0) AS version_seq, published_months_json, available_periods_json
@@ -1094,7 +1475,7 @@ async function attemptPublishAllReadyOnce(db: D1Database, dictVersion: string): 
   const { results: allCandidates } = await db
     .prepare(
       `SELECT * FROM trade_import_batch
-       WHERE dict_version = ?1 AND superseded_by IS NULL
+       WHERE dict_version = ?1 AND superseded_by IS NULL AND publish_state IN ('staged', 'published')
        ORDER BY month ASC, flow ASC, grouping ASC, scope_key ASC`,
     )
     .bind(dictVersion)
@@ -1395,90 +1776,20 @@ async function attemptPublishAllReadyOnce(db: D1Database, dictVersion: string): 
     );
   }
 
-  const buildSnapStmts = (slice: Array<{ period: string; payload: TradeOverviewPublished }>) => {
-    const stmts: D1PreparedStatement[] = [];
-    for (const { period, payload } of slice) {
-      const payloadStr = JSON.stringify(payload);
-      const batchesStr = JSON.stringify(payload.sourceBatches);
-      stmts.push(
-        db
-          .prepare(
-            `INSERT INTO trade_period_snapshot (snapshot_id, dict_version, period, release_id, source_batches_json, payload_json, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)`,
-          )
-          .bind(crypto.randomUUID(), dictVersion, period, releaseId, batchesStr, payloadStr, now),
-        db
-          .prepare(
-            `INSERT INTO trade_current_snapshot (dict_version, period, is_latest_month, release_id, available_periods_json, payload_json, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-             ON CONFLICT(dict_version, period) DO UPDATE SET
-               is_latest_month = excluded.is_latest_month,
-               release_id = excluded.release_id,
-               available_periods_json = excluded.available_periods_json,
-               payload_json = excluded.payload_json,
-               updated_at = excluded.updated_at`,
-          )
-          .bind(
-            dictVersion,
-            period,
-            period === latestMonth ? 1 : 0,
-            releaseId,
-            JSON.stringify(availablePeriods),
-            payloadStr,
-            now,
-          ),
-        db
-          .prepare("DELETE FROM observation WHERE object_ref = ?1")
-          .bind(`trade_snapshot:${dictVersion}:${period}`),
-      );
-    }
-    return stmts;
-  };
-
-  if (snapshotsToWrite.length <= 30) {
-    const publishStmts = [
-      ...headerStmts,
-      ...buildSnapStmts(snapshotsToWrite),
-      db
-        .prepare(
-          `UPDATE trade_current_snapshot
-           SET is_latest_month = CASE WHEN period = ?2 THEN 1 ELSE 0 END,
-               available_periods_json = ?3
-           WHERE dict_version = ?1`,
-        )
-        .bind(dictVersion, latestMonth, JSON.stringify(availablePeriods)),
-    ];
-    for (let i = 0; i < derivedObsRows.length; i += CHUNK_SIZE) {
-      publishStmts.push(
-        db.prepare(INSERT_DERIVED_OBS_CHUNK).bind(triggerBatchId, now, JSON.stringify(derivedObsRows.slice(i, i + CHUNK_SIZE))),
-      );
-    }
-    await db.batch(publishStmts);
-  } else {
-    // 大跨度多年批量发布：先提交 CAS 版本头，再按 10 个期间一批安全写入快照（兼顾远程 D1 单次 RPC 体积上限）
-    await db.batch(headerStmts);
-    for (let i = 0; i < snapshotsToWrite.length; i += 10) {
-      await db.batch(buildSnapStmts(snapshotsToWrite.slice(i, i + 10)));
-    }
-    const tailStmts: D1PreparedStatement[] = [
-      db
-        .prepare(
-          `UPDATE trade_current_snapshot
-           SET is_latest_month = CASE WHEN period = ?2 THEN 1 ELSE 0 END,
-               available_periods_json = ?3
-           WHERE dict_version = ?1`,
-        )
-        .bind(dictVersion, latestMonth, JSON.stringify(availablePeriods)),
-    ];
-    for (let i = 0; i < derivedObsRows.length; i += CHUNK_SIZE) {
-      tailStmts.push(
-        db.prepare(INSERT_DERIVED_OBS_CHUNK).bind(triggerBatchId, now, JSON.stringify(derivedObsRows.slice(i, i + CHUNK_SIZE))),
-      );
-    }
-    for (let i = 0; i < tailStmts.length; i += 100) {
-      await db.batch(tailStmts.slice(i, i + 100));
-    }
-  }
+  await commitPublishReleaseAtomically(db, {
+    dictVersion,
+    releaseId,
+    latestMonth,
+    availablePeriods,
+    annualTrend,
+    triggerBatchId,
+    now,
+    headerStmts,
+    snapshotsToWrite,
+    derivedObsRows,
+    failAfterStageBatch: opts?.failAfterStageBatch,
+    stageThresholdOverride: opts?.stageThresholdOverride,
+  });
 
   return {
     dictVersion,
@@ -1629,7 +1940,7 @@ async function attemptPublishMonthOnce(
   const { results: candidateBatches } = await db
     .prepare(
       `SELECT * FROM trade_import_batch
-       WHERE dict_version = ?1 AND month = ?2 AND superseded_by IS NULL
+       WHERE dict_version = ?1 AND month = ?2 AND superseded_by IS NULL AND publish_state IN ('staged', 'published')
        ORDER BY flow ASC, grouping ASC, scope_key ASC`,
     )
     .bind(dictVersion, month)
@@ -1863,8 +2174,8 @@ async function attemptPublishMonthOnce(
       .run();
   }
 
-  // 组装一次短 D1 原子发布事务（首条 trade_release 利用 UNIQUE(dict_version, version_seq) 做 CAS 乐观锁保护）
-  const publishStmts: D1PreparedStatement[] = [
+  // 组装发布头语句（首条 trade_release 利用 UNIQUE(dict_version, version_seq) 做 CAS 乐观锁保护）
+  const headerStmts: D1PreparedStatement[] = [
     ...reconStmts,
     db
       .prepare(
@@ -1893,7 +2204,7 @@ async function attemptPublishMonthOnce(
       batchId: b.batch_id,
     }));
     const idChunk = scopeChunk.map((s) => s.batchId);
-    publishStmts.push(
+    headerStmts.push(
       db
         .prepare(
           `INSERT INTO trade_active_scope (scope_key, dict_version, month, flow, grouping, batch_id, release_id, updated_at)
@@ -1917,60 +2228,18 @@ async function attemptPublishMonthOnce(
     );
   }
 
-  for (const { period, payload } of snapshotsToWrite) {
-    const payloadStr = JSON.stringify(payload);
-    const batchesStr = JSON.stringify(payload.sourceBatches);
-    publishStmts.push(
-      db
-        .prepare(
-          `INSERT INTO trade_period_snapshot (snapshot_id, dict_version, period, release_id, source_batches_json, payload_json, created_at)
-           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)`,
-        )
-        .bind(crypto.randomUUID(), dictVersion, period, releaseId, batchesStr, payloadStr, now),
-      db
-        .prepare(
-          `INSERT INTO trade_current_snapshot (dict_version, period, is_latest_month, release_id, available_periods_json, payload_json, updated_at)
-           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-           ON CONFLICT(dict_version, period) DO UPDATE SET
-             is_latest_month = excluded.is_latest_month,
-             release_id = excluded.release_id,
-             available_periods_json = excluded.available_periods_json,
-             payload_json = excluded.payload_json,
-             updated_at = excluded.updated_at`,
-        )
-        .bind(
-          dictVersion,
-          period,
-          period === latestMonth ? 1 : 0,
-          releaseId,
-          JSON.stringify(availablePeriods),
-          payloadStr,
-          now,
-        ),
-      db
-        .prepare("DELETE FROM observation WHERE object_ref = ?1")
-        .bind(`trade_snapshot:${dictVersion}:${period}`),
-    );
-  }
-
-  // 同步同一字典下其余已发布期间的 latest_month 标记与可用期间索引
-  publishStmts.push(
-    db
-      .prepare(
-        `UPDATE trade_current_snapshot
-         SET is_latest_month = CASE WHEN period = ?2 THEN 1 ELSE 0 END,
-             available_periods_json = ?3
-         WHERE dict_version = ?1`,
-      )
-      .bind(dictVersion, latestMonth, JSON.stringify(availablePeriods)),
-  );
-
-  for (let i = 0; i < derivedObsRows.length; i += CHUNK_SIZE) {
-    const chunk = derivedObsRows.slice(i, i + CHUNK_SIZE);
-    publishStmts.push(db.prepare(INSERT_DERIVED_OBS_CHUNK).bind(triggerBatchId, now, JSON.stringify(chunk)));
-  }
-
-  await db.batch(publishStmts);
+  await commitPublishReleaseAtomically(db, {
+    dictVersion,
+    releaseId,
+    latestMonth,
+    availablePeriods,
+    annualTrend,
+    triggerBatchId,
+    now,
+    headerStmts,
+    snapshotsToWrite,
+    derivedObsRows,
+  });
 
   return { published: true, releaseId, reconciliationNote: null };
 }
@@ -2031,10 +2300,6 @@ function snapshotReferencesMonth(
     if (priorTrendMonth === targetMonth && publishedMonthSet.has(priorTrendMonth)) {
       return true;
     }
-  }
-
-  if (parsed.kind === "year") {
-    return true;
   }
 
   return false;
@@ -2182,118 +2447,6 @@ function buildAnnualTrend(opts: {
   }
 
   return out;
-}
-
-function buildTradeNarrativeSummary(input: {
-  period: string;
-  totals: TradeOverviewPublished["totals"];
-  hasFullPrior: boolean;
-  priorBalanceScaled: bigint | null;
-  totalBalanceScaled: bigint;
-  annualTrend: TradeAnnualTrendPoint[];
-  categories: TradeCategoryStat[];
-  partners: TradePartnerStat[];
-  regions: TradeRegionStat[];
-  regimes: TradeRegimeStat[];
-  concentration: TradeOverviewPublished["concentration"];
-}): TradeNarrativeSummary {
-  const fmtYi = (usd: number) => (usd / 100_000_000).toFixed(4);
-  const fmtYoyWord = (pct: number | null) => {
-    if (pct === null) return "暂无可比基期";
-    if (pct > 0) return `同比增长 ${pct.toFixed(2)}%`;
-    if (pct < 0) return `同比下降 ${Math.abs(pct).toFixed(2)}%`;
-    return "同比持平 (0.00%)";
-  };
-
-  const balWord = input.totals.balanceUsd >= 0 ? "贸易顺差" : "贸易逆差";
-  let balanceShiftClause = "";
-  if (input.hasFullPrior && input.priorBalanceScaled !== null) {
-    if (input.priorBalanceScaled < 0n && input.totalBalanceScaled > 0n) {
-      balanceShiftClause = "，贸易差额由上年同期逆差转为顺差";
-    } else if (input.priorBalanceScaled > 0n && input.totalBalanceScaled < 0n) {
-      balanceShiftClause = "，贸易差额由上年同期顺差转为逆差";
-    }
-  }
-
-  const scaleParagraph = input.hasFullPrior
-    ? `${input.period} 我国医疗器械进出口总额 ${fmtYi(input.totals.totalUsd)} 亿美元（${fmtYoyWord(input.totals.totalYoyPct)}），其中出口 ${fmtYi(input.totals.exportUsd)} 亿美元（${fmtYoyWord(input.totals.exportYoyPct)}），进口 ${fmtYi(input.totals.importUsd)} 亿美元（${fmtYoyWord(input.totals.importYoyPct)}），实现${balWord} ${fmtYi(Math.abs(input.totals.balanceUsd))} 亿美元${balanceShiftClause}。`
-    : `${input.period} 我国医疗器械进出口总额 ${fmtYi(input.totals.totalUsd)} 亿美元，其中出口 ${fmtYi(input.totals.exportUsd)} 亿美元、进口 ${fmtYi(input.totals.importUsd)} 亿美元，呈${balWord} ${fmtYi(Math.abs(input.totals.balanceUsd))} 亿美元；当前期间暂无完整上年同口径同期基期，同比留空。`;
-
-  const fullYears = input.annualTrend.filter((p) => !p.isPartial);
-  const lastPoint = input.annualTrend[input.annualTrend.length - 1];
-  const trailingPartial = lastPoint && lastPoint.isPartial ? lastPoint : null;
-  let multiYearParagraph = "";
-
-  if (fullYears.length >= 2) {
-    const first = fullYears[0];
-    const last = fullYears[fullYears.length - 1];
-    const gap = last.year - first.year;
-    const spanPct =
-      first.totalUsd > 0 ? roundMetric(((last.totalUsd - first.totalUsd) / first.totalUsd) * 100, 2) : null;
-    if (gap === 1) {
-      const word =
-        spanPct === null ? "持平" : spanPct >= 0 ? `同比增长 ${spanPct.toFixed(2)}%` : `同比下降 ${Math.abs(spanPct).toFixed(2)}%`;
-      multiYearParagraph = `年度对比显示，${first.year}—${last.year} 年完整年度进出口总额由 ${fmtYi(first.totalUsd)} 亿美元变化至 ${fmtYi(last.totalUsd)} 亿美元（${word}）。`;
-    } else {
-      const word =
-        spanPct === null ? "保持稳定" : spanPct >= 0 ? `区间增长 ${spanPct.toFixed(2)}%` : `区间下降 ${Math.abs(spanPct).toFixed(2)}%`;
-      multiYearParagraph = `跨年序列显示，${first.year}—${last.year} 年完整年度进出口总额由 ${fmtYi(first.totalUsd)} 亿美元演进至 ${fmtYi(last.totalUsd)} 亿美元，累计${word}。`;
-    }
-    if (trailingPartial) {
-      const pYoy =
-        trailingPartial.totalYoyPct !== null
-          ? `，较上年同窗口期${trailingPartial.totalYoyPct >= 0 ? `同比增长 ${trailingPartial.totalYoyPct.toFixed(2)}%` : `同比下降 ${Math.abs(trailingPartial.totalYoyPct).toFixed(2)}%`}`
-          : "";
-      multiYearParagraph += ` 最新 ${trailingPartial.period}（非完整年累计，覆盖 ${trailingPartial.coveredMonths} 个月）进出口总额达 ${fmtYi(trailingPartial.totalUsd)} 亿美元${pYoy}。`;
-    }
-  } else if (input.annualTrend.length === 1) {
-    const only = input.annualTrend[0];
-    multiYearParagraph = `当前库内已发布 ${only.period}${only.isPartial ? `（非完整年累计 ${only.coveredMonths} 个月）` : ""} 单一年度序列，进出口总额 ${fmtYi(only.totalUsd)} 亿美元。`;
-  } else {
-    multiYearParagraph = "跨年趋势序列待更多年度发布后自动生成。";
-  }
-
-  const sortedCats = [...input.categories].sort((a, b) => b.importUsd + b.exportUsd - (a.importUsd + a.exportUsd));
-  const topCat = sortedCats[0];
-  const topPartner = input.partners[0];
-  const topRegion = input.regions[0];
-  const topRegime = input.regimes[0];
-
-  const structParts: string[] = [];
-  if (topCat) {
-    structParts.push(`第一大品类为「${topCat.category}」（双边合计 ${fmtYi(topCat.importUsd + topCat.exportUsd)} 亿美元）`);
-  }
-  if (topPartner) {
-    structParts.push(`头号贸易伙伴为「${topPartner.partnerName}」（进口占比 ${topPartner.importSharePct?.toFixed(1) ?? "0.0"}%、出口占比 ${topPartner.exportSharePct?.toFixed(1) ?? "0.0"}%）`);
-  }
-  if (topRegion) {
-    structParts.push(`国内首位收发货人注册地为「${topRegion.regionName}」`);
-  }
-  if (topRegime) {
-    structParts.push(`主导贸易方式为「${topRegime.regimeName}」`);
-  }
-  const structureParagraph = structParts.length > 0 ? `结构分布上，${structParts.join("；")}。` : "当前期间无明细结构数据。";
-
-  const highImpCats = input.categories
-    .filter((c) => (c.importConcentration.cr3 ?? 0) >= 70)
-    .sort((a, b) => (b.importConcentration.cr3 ?? 0) - (a.importConcentration.cr3 ?? 0));
-  const impCr3Str = input.concentration.import.cr3 !== null ? `${input.concentration.import.cr3.toFixed(1)}%` : "暂无";
-  const expCr3Str = input.concentration.export.cr3 !== null ? `${input.concentration.export.cr3.toFixed(1)}%` : "暂无";
-  const concentrationAlert =
-    highImpCats.length > 0
-      ? `全行业进口伙伴 CR3 为 ${impCr3Str}、出口伙伴 CR3 为 ${expCr3Str}；其中 ${highImpCats
-          .slice(0, 3)
-          .map((c) => `${c.category}(进口CR3 ${c.importConcentration.cr3?.toFixed(1)}%)`)
-          .join("、")} 处于 CR3 ≥ 70% 高集中度区间，建议持续跟踪供应链多元化水平。`
-      : `全行业进口伙伴 CR3 为 ${impCr3Str}、出口伙伴 CR3 为 ${expCr3Str}，各一级类别进口 CR3 均低于 70% 高集中度警戒线。`;
-
-  return {
-    headline: `${input.period} 医疗器械进出口态势研判摘要`,
-    scaleParagraph,
-    multiYearParagraph,
-    structureParagraph,
-    concentrationAlert,
-  };
 }
 
 function buildPeriodSnapshot(ctx: {
@@ -2975,7 +3128,7 @@ export async function getTradeOverview(
     }
     const payload = JSON.parse(row.payload_json) as TradeOverviewPublished;
     payload.availablePeriods = JSON.parse(row.available_periods_json) as string[];
-    return payload;
+    return normalizeTradeOverviewSnapshot(payload);
   }
 
   // 未指定期间：通过部分唯一索引定位最新已发布月份快照
@@ -3017,7 +3170,7 @@ export async function getTradeOverview(
 
   const payload = JSON.parse(latestRow.payload_json) as TradeOverviewPublished;
   payload.availablePeriods = JSON.parse(latestRow.available_periods_json) as string[];
-  return payload;
+  return normalizeTradeOverviewSnapshot(payload);
 }
 
 export async function getTradePeriodsMeta(db: D1Database, rawDictVersion?: string | null) {
@@ -3059,7 +3212,7 @@ export async function listTradeBatches(
   filters: { dictVersion?: string | null; month?: string | null; flow?: string | null; grouping?: string | null },
 ): Promise<{ items: TradeBatchListItem[] }> {
   const dictVersion = filters.dictVersion?.trim() || DEFAULT_DICT_VERSION;
-  const clauses = ["dict_version = ?1"];
+  const clauses = ["dict_version = ?1", "publish_state IN ('staged', 'published')"];
   const params: unknown[] = [dictVersion];
 
   if (filters.month?.trim()) {
@@ -3099,7 +3252,7 @@ export async function listTradeBatches(
       sourceSha256: r.source_sha256,
       evidenceSha256s: JSON.parse(r.evidence_sha256s_json) as string[],
       rowCount: r.row_count,
-      publishState: r.publish_state,
+      publishState: r.publish_state === "published" ? "published" : "staged",
       supersededBy: r.superseded_by,
       coverage: {
         received: JSON.parse(r.received_hs8_json) as string[],
@@ -3233,7 +3386,8 @@ export async function getTradeCoverageMatrix(
        WHERE b.dict_version = ?1
          AND b.month >= ?2
          AND b.month <= ?3
-         AND b.superseded_by IS NULL`,
+         AND b.superseded_by IS NULL
+         AND b.publish_state IN ('staged', 'published')`,
     )
     .bind(dictVersion, fromMonth, toMonth)
     .all<{
