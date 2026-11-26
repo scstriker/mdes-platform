@@ -109,6 +109,8 @@ export async function startHarness({ maxRows = 5000, withDb = true, migrate = tr
     queryWithMeta,
     reset: async () => {
       await sql([
+        "delete from trade_publish_staged_observation",
+        "delete from trade_publish_staged_snapshot",
         "delete from trade_current_snapshot",
         "delete from trade_period_snapshot",
         "delete from trade_release",

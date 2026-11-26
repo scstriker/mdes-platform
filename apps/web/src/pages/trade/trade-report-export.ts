@@ -1,29 +1,119 @@
 import {
   buildTradeReportHtml,
   buildTradeSummaryDualTableCsv,
+  normalizeTradeOverviewSnapshot,
+  type TradeFlow,
   type TradeOverviewPublished,
   type TradeReportEmbeddedCharts,
 } from "@mdes/shared";
+import type { ChartOption } from "@/lib/charts/echarts";
+import { readChartTheme, type ChartTheme } from "@/lib/charts/theme";
 import { downloadText } from "@/lib/download";
+import {
+  buildCategoryDonutOption,
+  buildCr3ChartOption,
+  buildStructureRankingOption,
+  buildTrendChartOption,
+  type StructureRankingDimension,
+  type TrendGranularity,
+} from "./trade-chart-options";
 
-function readFigureSvg(figureId: string): string | undefined {
-  if (typeof document === "undefined") return undefined;
-  const svgEl = document.querySelector(`#${figureId} [data-slot="figure-canvas"] svg`);
-  return svgEl ? svgEl.outerHTML : undefined;
+export type TradeReportExportOptions = {
+  flow?: TradeFlow;
+  rankingDimension?: StructureRankingDimension;
+  trendMode?: TrendGranularity;
+  startYear?: number;
+  endYear?: number;
+  theme?: ChartTheme;
+};
+
+const FALLBACK_EXPORT_THEME: ChartTheme = {
+  series: ["var(--chart-1)", "var(--chart-2)", "var(--chart-3)", "var(--chart-4)", "var(--chart-5)"],
+  emphasis: "var(--chart-3)",
+  brandNavy: "var(--brand-navy)",
+  brandSky: "var(--brand-sky)",
+  brandRed: "var(--brand-red)",
+  infoBg: "var(--info-bg)",
+  surfaceSunken: "var(--surface-sunken)",
+  ink: "var(--ink)",
+  muted: "var(--ink-muted)",
+  border: "var(--border)",
+  borderStrong: "var(--border-strong)",
+  surface: "var(--surface-raised)",
+  fontFamily: "sans-serif",
+};
+
+function resolveExportTheme(explicit?: ChartTheme): ChartTheme {
+  if (explicit) return explicit;
+  if (typeof document !== "undefined" && document.documentElement) {
+    const cssTheme = readChartTheme(document.documentElement);
+    if (cssTheme.ink && cssTheme.series[0]) {
+      return cssTheme;
+    }
+  }
+  return FALLBACK_EXPORT_THEME;
 }
 
-export function collectRenderedTradeFigureSvgs(): TradeReportEmbeddedCharts {
+/**
+ * 直接基于已发布快照离屏渲染四张矢量 SVG 图表（不依赖当前 DOM 是否因搜索筛选或“数据表”视图切换而卸载图表）。
+ */
+export async function renderTradeReportChartsFromSnapshot(
+  rawSnap: TradeOverviewPublished,
+  options: TradeReportExportOptions = {},
+): Promise<TradeReportEmbeddedCharts> {
+  const snap = normalizeTradeOverviewSnapshot(rawSnap);
+  const flow: TradeFlow = options.flow === "export" ? "export" : "import";
+  const rankingDimension: StructureRankingDimension = options.rankingDimension ?? "partners";
+  const years = (snap.annualTrend ?? []).map((p) => p.year);
+  const defaultStart = years[0] ?? Number(snap.period.slice(0, 4));
+  const defaultEnd = years[years.length - 1] ?? defaultStart;
+  const startYear = options.startYear ?? defaultStart;
+  const endYear = options.endYear ?? defaultEnd;
+  const trendMode: TrendGranularity = options.trendMode ?? ((snap.annualTrend?.length ?? 0) >= 2 ? "annual" : "monthly");
+  const theme = resolveExportTheme(options.theme);
+
+  const { echarts } = await import("@/lib/charts/echarts");
+
+  const renderSvg = (opt: ChartOption, width: number, height: number): string => {
+    const chart = echarts.init(null, null, {
+      renderer: "svg",
+      ssr: true,
+      width,
+      height,
+      locale: "ZH",
+    });
+    try {
+      chart.setOption({ ...opt, animation: false });
+      return chart.renderToSVGString();
+    } finally {
+      chart.dispose();
+    }
+  };
+
   return {
-    trendSvg: readFigureSvg("fig-trade-trend"),
-    categorySvg: readFigureSvg("fig-trade-category-donut"),
-    rankingSvg: readFigureSvg("fig-trade-structure-ranking"),
-    cr3Svg: readFigureSvg("fig-trade-concentration"),
+    trendSvg: renderSvg(buildTrendChartOption(theme, snap, { trendMode, startYear, endYear }), 520, 292),
+    categorySvg: renderSvg(buildCategoryDonutOption(theme, snap.categories, flow), 520, 292),
+    rankingSvg: renderSvg(buildStructureRankingOption(theme, snap, rankingDimension, flow), 520, 316),
+    cr3Svg: renderSvg(buildCr3ChartOption(theme, snap.categories, flow), 520, 316),
   };
 }
 
-export function exportTradeReportHtml(snap: TradeOverviewPublished) {
-  const charts = collectRenderedTradeFigureSvgs();
-  const html = buildTradeReportHtml(snap, charts);
+export async function generateTradeReportHtmlFromSnapshot(
+  rawSnap: TradeOverviewPublished,
+  options: TradeReportExportOptions = {},
+): Promise<string> {
+  const snap = normalizeTradeOverviewSnapshot(rawSnap);
+  const flow: TradeFlow = options.flow === "export" ? "export" : "import";
+  const rankingDimension: StructureRankingDimension = options.rankingDimension ?? "partners";
+  const charts = await renderTradeReportChartsFromSnapshot(snap, { ...options, flow, rankingDimension });
+  return buildTradeReportHtml(snap, charts, { flow, rankingDimension });
+}
+
+export async function exportTradeReportHtml(
+  snap: TradeOverviewPublished,
+  options: TradeReportExportOptions = {},
+): Promise<void> {
+  const html = await generateTradeReportHtmlFromSnapshot(snap, options);
   downloadText(`mdes-trade-report-${snap.period}.html`, html, "text/html;charset=utf-8");
 }
 

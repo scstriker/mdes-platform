@@ -639,8 +639,23 @@
     });
   }
 
-  function buildManifest({ month, flow, grouping, hs8, emptyHs8 = [], probeVerifiedZero = false }) {
-    parseSingleNaturalMonth(month);
+  function buildManifest({ month, months, flow, grouping, hs8, emptyHs8 = [], probeVerifiedZero = false }) {
+    let normalizedMonths = [];
+    if (Array.isArray(months) && months.length > 0) {
+      const seenMonths = new Set();
+      for (const m of months) {
+        parseSingleNaturalMonth(m);
+        if (!seenMonths.has(m)) {
+          seenMonths.add(m);
+          normalizedMonths.push(m);
+        }
+      }
+      normalizedMonths.sort();
+    } else {
+      parseSingleNaturalMonth(month);
+      normalizedMonths = [month];
+    }
+    const primaryMonth = month ? (parseSingleNaturalMonth(month), month) : normalizedMonths[0];
     if (!FLOW_SPECS[flow]) throw new Error(`非法流向: ${String(flow)}`);
     if (!GROUPING_SPECS[grouping]) throw new Error(`非法分组: ${String(grouping)}`);
     const validHs8 = validateHs8Batch(hs8);
@@ -655,14 +670,15 @@
     }
     const out = {
       dictVersion: DICT_VERSION,
-      month,
+      month: primaryMonth,
+      ...(Array.isArray(months) && months.length > 0 ? { months: normalizedMonths } : {}),
       flow,
       currency: "USD",
       grouping,
       hs8: validHs8,
       emptyHs8: validEmpty
     };
-    if (probeVerifiedZero) {
+    if (probeVerifiedZero === true) {
       out.probeVerifiedZero = true;
     }
     return out;
@@ -946,6 +962,7 @@
   }) {
     const candidates = stateCandidates || defaultStateCandidatesForYear(year, startMonth, endMonth);
     const activeFetch = getQueryFrameFetch();
+    let requestCount = 0;
     for (const state of candidates) {
       const params = buildAnnualMonthlyParams({
         year,
@@ -964,6 +981,7 @@
       const singleProbe = await withSerialFlightLock(
         { minDelayMs, maxDelayMs, skipPoliteWaitForUnitTest },
         async () => {
+          requestCount += 1;
           let res;
           try {
             res = await activeFetch("/queryData/getQueryDataListByWhere", {
@@ -1010,7 +1028,8 @@
           total: null,
           isHtmlBlocked: true,
           circuitBreakRequired: true,
-          reason: singleProbe.reason
+          reason: singleProbe.reason,
+          requestCount
         };
       }
       if (singleProbe.ok) {
@@ -1019,7 +1038,8 @@
           state: singleProbe.state,
           total: singleProbe.total,
           isHtmlBlocked: false,
-          circuitBreakRequired: false
+          circuitBreakRequired: false,
+          requestCount
         };
       }
     }
@@ -1029,7 +1049,8 @@
       total: null,
       isHtmlBlocked: false,
       circuitBreakRequired: false,
-      reason: "no_state_matched"
+      reason: "no_state_matched",
+      requestCount
     };
   }
 
@@ -1175,6 +1196,7 @@
     verifyDictionary: verifyEmbeddedDictionary,
     checkSessionReady: probeSessionHealth,
     computeOfficialSelectTableState,
+    getStateCandidates: defaultStateCandidatesForYear,
     buildAnnualMonthlyParams,
     buildCustomsQueryParams,
     buildManifest,
@@ -1219,6 +1241,10 @@
   window.__CUSTOMS_SUITE_BRIDGE__ = SUITE_BRIDGE_API;
 
   if (window.top !== window.self) {
+    return;
+  }
+
+  if (window.__MDES_HARNESS_HEADLESS_UI__) {
     return;
   }
 
@@ -1468,7 +1494,34 @@
     txtCustom.addEventListener("input", refreshPreview);
     refreshPreview();
 
+    let lastCooldownReqMark = serialFlightState.completedRequestsInRun;
+
+    async function maybeCooldownByActualRequests() {
+      const completed = serialFlightState.completedRequestsInRun;
+      if (completed > lastCooldownReqMark && completed - lastCooldownReqMark >= BATCH_COOLDOWN_EVERY) {
+        lastCooldownReqMark = completed;
+        const rest = randomJitterMs(BATCH_COOLDOWN_MIN_MS, BATCH_COOLDOWN_MAX_MS);
+        appendLog(`⏳ 已累计 ${completed} 次实际请求，进入阶段呼吸冷却 ${(rest / 1000).toFixed(1)}s...`, "#93c5fd");
+        await sleep(rest);
+      }
+    }
+
+    async function downloadTextFile(text, filename, mime = "application/json;charset=utf-8") {
+      triggerBlobDownload(new Blob([text], { type: mime }), filename);
+      await sleep(120);
+    }
+
     async function collectWindowRecursive({ year, sMonth, eMonth, monthFlag, flow, grouping, batchKey, hs8 }) {
+      const monthsCovered = Array.from(
+        { length: eMonth - sMonth + 1 },
+        (_, i) => `${year}-${String(sMonth + i).padStart(2, "0")}`
+      );
+      const rangeTag =
+        monthFlag === "1"
+          ? `${year}_${String(sMonth).padStart(2, "0")}-${String(eMonth).padStart(2, "0")}`
+          : `${year}-${String(sMonth).padStart(2, "0")}`;
+      const stem = `customs_${DICT_VERSION}_${rangeTag}_${flow}_${grouping}_${batchKey}_r01`;
+
       const probe = await probeOfficialCountAndState({
         year,
         startMonth: sMonth,
@@ -1478,22 +1531,72 @@
         grouping,
         hs8
       });
+      await maybeCooldownByActualRequests();
+
       if (probe.circuitBreakRequired) {
         throw new Error(`触发合规风控熔断 (${probe.reason})：已立即停止后续请求，请在页面核验会话状态后再续采`);
       }
-      if (probe.ok && probe.total === 0) {
-        appendLog(`○ [${year} ${sMonth}-${eMonth}月 ${flow}/${grouping}/${batchKey}] 官网预检确认 0 条记录`, "#fcd34d");
-        return;
-      }
-      if (probe.ok && probe.total >= MAX_SAFE_EXPORT_ROWS && sMonth < eMonth) {
-        const mid = Math.floor((sMonth + eMonth) / 2);
-        appendLog(`↪ 预检 ${probe.total} 行 >= ${MAX_SAFE_EXPORT_ROWS}，自动二分时间窗为 ${sMonth}-${mid}月 与 ${mid + 1}-${eMonth}月`, "#93c5fd");
-        await collectWindowRecursive({ year, sMonth, eMonth: mid, monthFlag, flow, grouping, batchKey, hs8 });
-        await collectWindowRecursive({ year, sMonth: mid + 1, eMonth, monthFlag, flow, grouping, batchKey, hs8 });
+      if (!probe.ok) {
+        appendLog(
+          `✗ [${year} ${sMonth}-${eMonth}月 ${flow}/${grouping}/${batchKey}] 官网预检未成功 (${probe.reason})，留待补采`,
+          "#fca5a5"
+        );
         return;
       }
 
-      const state = probe.ok ? probe.state : defaultStateCandidatesForYear(year)[0];
+      if (probe.total === 0) {
+        const emptyManifest = buildManifest({
+          month: monthsCovered[0],
+          months: monthsCovered,
+          flow,
+          grouping,
+          hs8,
+          emptyHs8: [...hs8],
+          probeVerifiedZero: true
+        });
+        const emptyMeta = {
+          dictVersion: DICT_VERSION,
+          monthRange: `${monthsCovered[0]}..${monthsCovered[monthsCovered.length - 1]}`,
+          months: monthsCovered,
+          flow,
+          grouping,
+          batchKey,
+          officialTotal: 0,
+          requiredEmptyPngFilename: `${stem}.empty.png`,
+          collectedAt: new Date().toISOString()
+        };
+        await downloadTextFile(`${JSON.stringify(emptyManifest, null, 2)}\n`, `${stem}.manifest.json`);
+        await downloadTextFile(`${JSON.stringify(emptyMeta, null, 2)}\n`, `${stem}.meta.json`);
+        appendLog(
+          `○ [${year} ${sMonth}-${eMonth}月 ${flow}/${grouping}/${batchKey}] 官网预检确认 0 条记录，已保存 ${stem}.manifest.json；请另存查询结果页截图为 ${stem}.empty.png 放入同目录供归档导入！`,
+          "#fcd34d"
+        );
+        return;
+      }
+
+      if (probe.total >= MAX_SAFE_EXPORT_ROWS) {
+        if (sMonth < eMonth) {
+          const mid = Math.floor((sMonth + eMonth) / 2);
+          appendLog(
+            `↪ 预检 ${probe.total} 行 >= ${MAX_SAFE_EXPORT_ROWS}，自动二分时间窗为 ${sMonth}-${mid}月 与 ${mid + 1}-${eMonth}月`,
+            "#93c5fd"
+          );
+          await collectWindowRecursive({ year, sMonth, eMonth: mid, monthFlag, flow, grouping, batchKey, hs8 });
+          await collectWindowRecursive({ year, sMonth: mid + 1, eMonth, monthFlag, flow, grouping, batchKey, hs8 });
+          return;
+        }
+        if (hs8.length > 1) {
+          const half = Math.floor(hs8.length / 2);
+          appendLog(
+            `↪ 单月预检 ${probe.total} 行 >= ${MAX_SAFE_EXPORT_ROWS}，自动二分税号组为 ${batchKey}A / ${batchKey}B`,
+            "#93c5fd"
+          );
+          await collectWindowRecursive({ year, sMonth, eMonth, monthFlag, flow, grouping, batchKey: `${batchKey}A`, hs8: hs8.slice(0, half) });
+          await collectWindowRecursive({ year, sMonth, eMonth, monthFlag, flow, grouping, batchKey: `${batchKey}B`, hs8: hs8.slice(half) });
+          return;
+        }
+      }
+
       const exp = await fetchRawExportBase64({
         year,
         startMonth: sMonth,
@@ -1502,25 +1605,64 @@
         flow,
         grouping,
         hs8,
-        selectTableState: state
+        selectTableState: probe.state
       });
+      await maybeCooldownByActualRequests();
+
       if (!exp.ok) {
         if (exp.circuitBreakRequired) {
           throw new Error(`导出响应触发合规熔断 (${exp.reason})：已立即停止，绝不盲目重试`);
         }
-        appendLog(`✗ [${year} ${sMonth}-${eMonth}月 ${flow}/${grouping}/${batchKey}] 未取得数据 (${exp.reason})`, "#fca5a5");
+        appendLog(`✗ [${year} ${sMonth}-${eMonth}月 ${flow}/${grouping}/${batchKey}] 未取得数据 (${exp.reason})，留待补采`, "#fca5a5");
         return;
       }
 
-      const rangeTag =
-        monthFlag === "1"
-          ? `${year}_${String(sMonth).padStart(2, "0")}-${String(eMonth).padStart(2, "0")}_m1`
-          : `${year}-${String(sMonth).padStart(2, "0")}`;
-      const stem = `customs_${DICT_VERSION}_${rangeTag}_${flow}_${grouping}_${batchKey}_r01`;
+      const allowedMonthSet = new Set(monthsCovered);
+      const outOfRangeMonths = (exp.inspection.observedMonths || []).filter((m) => !allowedMonthSet.has(m));
+      const missingMonthCol = monthsCovered.length > 1 && !exp.inspection.hasMonthColumn;
+      const unexpectedHs8 = exp.inspection.unexpectedHs8 || [];
+      const rowCountMatched = exp.inspection.detailRowCount === probe.total;
+
+      if (!rowCountMatched || unexpectedHs8.length > 0 || outOfRangeMonths.length > 0 || missingMonthCol) {
+        appendLog(
+          `⚠ [${year} ${sMonth}-${eMonth}月 ${flow}/${grouping}/${batchKey}] 导出核验不一致 (导出 ${exp.inspection.detailRowCount} 行 != 预检 ${probe.total} 行，越界税号=${unexpectedHs8.length}，越界月份=${outOfRangeMonths.length})，拒绝确认零值并留待补采！`,
+          "#fca5a5"
+        );
+        return;
+      }
+
       const rawBytes = Uint8Array.from(atob(exp.base64), (c) => c.charCodeAt(0));
+      const manifestObj = buildManifest({
+        month: monthsCovered[0],
+        months: monthsCovered,
+        flow,
+        grouping,
+        hs8,
+        emptyHs8: exp.inspection.unreturnedHs8 || [],
+        probeVerifiedZero: true
+      });
+      const metaObj = {
+        dictVersion: DICT_VERSION,
+        monthRange: `${monthsCovered[0]}..${monthsCovered[monthsCovered.length - 1]}`,
+        months: monthsCovered,
+        flow,
+        grouping,
+        batchKey,
+        officialProbeTotal: probe.total,
+        selectTableState: probe.state,
+        savedCsvFilename: `${stem}.raw.csv`,
+        sha256: exp.sha256,
+        byteLength: exp.byteLength,
+        inspection: exp.inspection,
+        collectedAt: new Date().toISOString()
+      };
+
       triggerBlobDownload(new Blob([rawBytes], { type: "application/octet-stream" }), `${stem}.raw.csv`);
+      await sleep(120);
+      await downloadTextFile(`${JSON.stringify(manifestObj, null, 2)}\n`, `${stem}.manifest.json`);
+      await downloadTextFile(`${JSON.stringify(metaObj, null, 2)}\n`, `${stem}.meta.json`);
       appendLog(
-        `✓ 已保存 ${stem}.raw.csv (${exp.inspection.detailRowCount} 行 | USD=${exp.inspection.usdDetailSum} | SHA256=${exp.sha256.slice(0, 10)}…)`,
+        `✓ 已保存 ${stem}.raw.csv + ${stem}.manifest.json + ${stem}.meta.json (${exp.inspection.detailRowCount} 行 | USD=${exp.inspection.usdDetailSum} | SHA256=${exp.sha256.slice(0, 10)}…)`,
         "#86efac"
       );
     }
@@ -1546,7 +1688,7 @@
       const groupings = grpSetting === "all_4" ? [...ORDERED_GROUPINGS] : [grpSetting];
 
       btnStart.disabled = true;
-      let opCounter = 0;
+      lastCooldownReqMark = serialFlightState.completedRequestsInRun;
       try {
         for (const b of batches) {
           for (const flow of flows) {
@@ -1563,12 +1705,6 @@
                     batchKey: b.batchKey,
                     hs8: b.hs8
                   });
-                  opCounter++;
-                  if (opCounter % BATCH_COOLDOWN_EVERY === 0) {
-                    const rest = randomJitterMs(BATCH_COOLDOWN_MIN_MS, BATCH_COOLDOWN_MAX_MS);
-                    appendLog(`⏳ 阶段呼吸冷却 ${(rest / 1000).toFixed(1)}s...`, "#93c5fd");
-                    await sleep(rest);
-                  }
                 }
               } else {
                 await collectWindowRecursive({
@@ -1581,17 +1717,11 @@
                   batchKey: b.batchKey,
                   hs8: b.hs8
                 });
-                opCounter++;
-                if (opCounter % BATCH_COOLDOWN_EVERY === 0) {
-                  const rest = randomJitterMs(BATCH_COOLDOWN_MIN_MS, BATCH_COOLDOWN_MAX_MS);
-                  appendLog(`⏳ 阶段呼吸冷却 ${(rest / 1000).toFixed(1)}s...`, "#93c5fd");
-                  await sleep(rest);
-                }
               }
             }
           }
         }
-        appendLog("✅ 本轮低频合规串行采集完成。", "#86efac");
+        appendLog("✅ 本轮低频合规串行采集完成（已配对生成 .raw.csv 与 .manifest.json，可直接归档导入）。", "#86efac");
       } catch (err) {
         appendLog(`⛔ ${err instanceof Error ? err.message : String(err)}`, "#fca5a5");
       } finally {

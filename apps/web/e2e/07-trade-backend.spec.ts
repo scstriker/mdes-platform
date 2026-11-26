@@ -219,7 +219,7 @@ test.describe.serial("G4 / AC-016：38号海关原件向导 → 贸易专题 / �
     await expect(page.locator("#fig-trade-structure-ranking")).toBeVisible();
     await expect(page.getByRole("tab", { name: /医疗器械品类结构 \(11类\)/ })).toBeVisible();
 
-    // 验证一键导出 A4 分析报告 HTML 与 Excel 口径双表统计汇总 CSV
+    // 验证一键导出 A4 分析报告 HTML（含全部 4 张 SVG）与 Excel 口径双表统计汇总 CSV
     const [reportDownload] = await Promise.all([
       page.waitForEvent("download"),
       page.getByTestId("btn-export-trade-report").click(),
@@ -227,6 +227,19 @@ test.describe.serial("G4 / AC-016：38号海关原件向导 → 贸易专题 / �
     const reportHtml = fs.readFileSync((await reportDownload.path())!, "utf8");
     expect(reportHtml).toContain("中国医疗器械海关进出口与供应链集中度态势研判报告");
     expect(reportHtml).toContain(publishedReleaseId);
+    expect((reportHtml.match(/<svg\b/g) ?? []).length).toBe(4);
+
+    // 验证输入搜索词卸载全部图表后，导出 A4 报告仍能基于快照生成全部 4 张矢量 SVG 图
+    await page.locator("#trade-local-filter").fill("90181100");
+    await expect(page.locator("#fig-trade-trend")).toHaveCount(0);
+    const [filteredReportDownload] = await Promise.all([
+      page.waitForEvent("download"),
+      page.getByTestId("btn-export-trade-report").click(),
+    ]);
+    const filteredReportHtml = fs.readFileSync((await filteredReportDownload.path())!, "utf8");
+    expect((filteredReportHtml.match(/<svg\b/g) ?? []).length).toBe(4);
+    await page.locator("#trade-local-filter").fill("");
+    await expect(page.locator("#fig-trade-trend")).toBeVisible();
 
     const [dualCsvDownload] = await Promise.all([
       page.waitForEvent("download"),

@@ -26,6 +26,7 @@ function parseArgs(argv) {
     apiUrl: "",
     dictVersion: "202601",
     persistDir: path.join(API_ROOT, ".wrangler", "state"),
+    includePilot: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -36,8 +37,84 @@ function parseArgs(argv) {
       opts.target = "http";
     } else if (a === "--dict-version" && argv[i + 1]) opts.dictVersion = argv[++i];
     else if (a === "--persist-dir" && argv[i + 1]) opts.persistDir = path.resolve(argv[++i]);
+    else if (a === "--include-pilot") opts.includePilot = true;
   }
   return opts;
+}
+
+export function isPilotManifestPath(filePath) {
+  const norm = filePath.replace(/\\/g, "/");
+  const segments = norm.split("/");
+  const base = path.basename(filePath);
+  return segments.some((seg) => /^PILOT-/i.test(seg)) || /_PILOT-/i.test(base);
+}
+
+/**
+ * 防御性去重：若同一归档目录下同时存在试点批次（PILOT-*）与正式分组批次（如 G01），
+ * 且试点税号范围已被同字典、同月、同流向、同分组的正式批次覆盖，则跳过被覆盖的试点清单，
+ * 避免向后端重复提交重叠范围而触发 409 TRADE_SCOPE_CONFLICT；若目录内仅有试点清单则正常导入。
+ */
+export function selectImportableManifestEntries(manifestFiles, { dictVersion = "202601", includePilot = false } = {}) {
+  const loaded = [];
+  for (const mfPath of manifestFiles) {
+    const rawManifestText = fs.readFileSync(mfPath, "utf8");
+    const manifestObj = JSON.parse(rawManifestText);
+    if (dictVersion && manifestObj.dictVersion !== dictVersion) {
+      continue;
+    }
+    const months = Array.isArray(manifestObj.months)
+      ? manifestObj.months
+      : typeof manifestObj.month === "string" && manifestObj.month
+        ? [manifestObj.month]
+        : [];
+    const hs8 = Array.isArray(manifestObj.hs8) ? manifestObj.hs8.map((c) => String(c).trim()) : [];
+    loaded.push({
+      mfPath,
+      rawManifestText,
+      manifestObj,
+      months,
+      hs8,
+      isPilot: isPilotManifestPath(mfPath),
+    });
+  }
+
+  if (includePilot) {
+    return { selected: loaded, skippedPilot: [] };
+  }
+
+  const formalScopeHs8 = new Map();
+  for (const item of loaded) {
+    if (item.isPilot) continue;
+    for (const m of item.months) {
+      const key = `${item.manifestObj.dictVersion}|${m}|${item.manifestObj.flow}|${item.manifestObj.grouping}`;
+      let set = formalScopeHs8.get(key);
+      if (!set) {
+        set = new Set();
+        formalScopeHs8.set(key, set);
+      }
+      for (const code of item.hs8) set.add(code);
+    }
+  }
+
+  const selected = [];
+  const skippedPilot = [];
+  for (const item of loaded) {
+    if (!item.isPilot) {
+      selected.push(item);
+      continue;
+    }
+    const overlapsFormal = item.months.some((m) => {
+      const key = `${item.manifestObj.dictVersion}|${m}|${item.manifestObj.flow}|${item.manifestObj.grouping}`;
+      const formalSet = formalScopeHs8.get(key);
+      return Boolean(formalSet && item.hs8.some((code) => formalSet.has(code)));
+    });
+    if (overlapsFormal) {
+      skippedPilot.push(item);
+    } else {
+      selected.push(item);
+    }
+  }
+  return { selected, skippedPilot };
 }
 
 function collectManifestFiles(dir) {
@@ -176,22 +253,32 @@ async function main() {
     process.exit(1);
   }
 
+  const { selected: entriesToImport, skippedPilot } = selectImportableManifestEntries(manifestFiles, {
+    dictVersion: opts.dictVersion,
+    includePilot: opts.includePilot,
+  });
+  if (skippedPilot.length > 0) {
+    console.warn(
+      `[import-archive] 检测到 ${skippedPilot.length} 个试点清单与正式批次范围重叠，已自动跳过（请将试点归档置于独立目录 data/customs-raw-pilot/）。`,
+    );
+  }
+  if (entriesToImport.length === 0) {
+    console.error(`[import-archive] 未在 ${opts.archiveDir} 下发现匹配 dictVersion=${opts.dictVersion} 的可导入批次。`);
+    process.exit(1);
+  }
+
   const client =
     opts.target === "http" ? createHttpClient(opts.apiUrl) : await createLocalD1Client(opts.persistDir);
 
   try {
-    console.log(`[import-archive] 共发现 ${manifestFiles.length} 个采集批次，开始 deferPublish=true 批量暂存...`);
+    console.log(`[import-archive] 共发现 ${entriesToImport.length} 个可导入采集批次，开始 deferPublish=true 批量暂存...`);
     let totalRows = 0;
     let importedCount = 0;
 
-    for (const mfPath of manifestFiles) {
+    for (const entry of entriesToImport) {
+      const { mfPath, rawManifestText } = entry;
       const dir = path.dirname(mfPath);
       const stem = path.basename(mfPath, ".manifest.json");
-      const rawManifestText = fs.readFileSync(mfPath, "utf8");
-      const manifestObj = JSON.parse(rawManifestText);
-      if (opts.dictVersion && manifestObj.dictVersion !== opts.dictVersion) {
-        continue;
-      }
 
       const csvPath = path.join(dir, `${stem}.raw.csv`);
       const pngPath = path.join(dir, `${stem}.empty.png`);
@@ -263,7 +350,12 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  console.error(err instanceof Error ? err.stack || err.message : String(err));
-  process.exit(1);
-});
+const isDirectRun =
+  typeof process.argv[1] === "string" && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url));
+
+if (isDirectRun) {
+  main().catch((err) => {
+    console.error(err instanceof Error ? err.stack || err.message : String(err));
+    process.exit(1);
+  });
+}

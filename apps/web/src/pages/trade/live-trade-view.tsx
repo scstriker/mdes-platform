@@ -2,8 +2,8 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router";
 import { IconArrowRight, IconFileSpreadsheet, IconFileText } from "@tabler/icons-react";
 import {
+  getTopStructureRankingByFlow,
   matchesQuery,
-  type TradeAnnualTrendPoint,
   type TradeCategoryStat,
   type TradeFlow,
   type TradeHsItemStat,
@@ -17,25 +17,34 @@ import { DataTable, formatNumber, Tag, TextLink, type DataTableColumn } from "@/
 import { PageVisualBanner } from "@/components/layout/page-visual-banner";
 import { StatistaFigure, type StatistaTableColumn } from "@/components/layout/statista-figure";
 import type { ChartOption } from "@/lib/charts/echarts";
-import {
-  baseOption,
-  statistaHorizontalBarOption,
-  statistaTrendWithPartialOption,
-  type ChartTheme,
-} from "@/lib/charts/theme";
+import type { ChartTheme } from "@/lib/charts/theme";
 import {
   formatBalanceYi,
   formatQtyStat,
   formatSharePct,
   formatUsdToYi,
   formatYoyPct,
-  usdToYiNumber,
 } from "@/lib/trade-format";
 import { cn } from "@/lib/utils";
+import {
+  buildCategoryDonutOption,
+  buildCr3ChartOption,
+  buildCr3RankingItems,
+  buildStructureRankingOption,
+  buildTrendChartOption,
+  filterAnnualTrendByYearRange,
+  type StructureRankingDimension,
+  type TrendGranularity,
+} from "./trade-chart-options";
 import { exportTradeReportHtml, exportTradeSummaryDualCsv } from "./trade-report-export";
 
-type TrendGranularity = "annual" | "monthly";
-export type StructureRankingDimension = "partners" | "regions" | "regimes";
+export {
+  buildCategoryDonutOption,
+  buildStructureRankingOption,
+  filterAnnualTrendByYearRange,
+  type StructureRankingDimension,
+};
+
 type LiveTradeTab = "categories" | "hs" | "partners" | "regimes" | "regions";
 const VALID_LIVE_TABS: readonly LiveTradeTab[] = ["categories", "hs", "partners", "regimes", "regions"];
 
@@ -44,145 +53,6 @@ function parseLiveTab(raw: string | null): LiveTradeTab {
     return raw as LiveTradeTab;
   }
   return "categories";
-}
-
-export function filterAnnualTrendByYearRange(
-  points: readonly TradeAnnualTrendPoint[],
-  startYear: number,
-  endYear: number,
-): TradeAnnualTrendPoint[] {
-  const lo = Math.min(startYear, endYear);
-  const hi = Math.max(startYear, endYear);
-  return points.filter((p) => p.year >= lo && p.year <= hi);
-}
-
-export function buildCategoryDonutOption(
-  t: ChartTheme,
-  categories: readonly TradeCategoryStat[],
-  flow: TradeFlow,
-): ChartOption {
-  const palette = [...t.series, t.brandNavy, t.brandSky, t.emphasis];
-  const sorted = [...categories]
-    .map((c) => ({
-      name: c.category,
-      usd: flow === "export" ? c.exportUsd : c.importUsd,
-    }))
-    .filter((c) => c.usd > 0)
-    .sort((a, b) => b.usd - a.usd);
-
-  const data =
-    sorted.length > 0
-      ? sorted.map((item, idx) => ({
-          name: item.name,
-          value: usdToYiNumber(item.usd, 4),
-          itemStyle: {
-            color: palette[idx % palette.length],
-            borderColor: t.surface,
-            borderWidth: 1.5,
-          },
-        }))
-      : [
-          {
-            name: "暂无数据",
-            value: 0,
-            itemStyle: { color: t.border, borderColor: t.surface, borderWidth: 1 },
-          },
-        ];
-
-  return {
-    color: palette,
-    textStyle: { fontFamily: t.fontFamily, color: t.ink },
-    animationDuration: 200,
-    aria: { enabled: true, decal: { show: false } },
-    tooltip: {
-      trigger: "item",
-      backgroundColor: t.surface,
-      borderColor: t.border,
-      borderWidth: 1,
-      padding: [8, 12],
-      textStyle: { color: t.ink, fontSize: 13, fontFamily: t.fontFamily },
-      extraCssText: "box-shadow:none;border-radius:0;",
-      formatter: "{b}：<b>{c}</b> 亿美元（{d}%）",
-    },
-    legend: {
-      show: false,
-    },
-    series: [
-      {
-        name: flow === "export" ? "出口品类构成(亿美元)" : "进口品类构成(亿美元)",
-        type: "pie",
-        radius: ["44%", "72%"],
-        center: ["50%", "52%"],
-        avoidLabelOverlap: true,
-        label: {
-          show: true,
-          color: t.ink,
-          fontSize: 12,
-          fontFamily: t.fontFamily,
-          formatter: "{b} {d}%",
-        },
-        labelLine: {
-          show: true,
-          length: 10,
-          length2: 8,
-          lineStyle: { color: t.borderStrong },
-        },
-        labelLayout: { hideOverlap: true },
-        data,
-      },
-    ],
-  };
-}
-
-export function buildStructureRankingOption(
-  t: ChartTheme,
-  snap: TradeOverviewPublished,
-  dimension: StructureRankingDimension,
-  flow: TradeFlow,
-): ChartOption {
-  const rawItems =
-    dimension === "partners"
-      ? snap.partners.map((p) => ({
-          name: p.partnerName,
-          usd: flow === "export" ? p.exportUsd : p.importUsd,
-          share: flow === "export" ? p.exportSharePct : p.importSharePct,
-        }))
-      : dimension === "regions"
-        ? snap.regions.map((r) => ({
-            name: r.regionName,
-            usd: flow === "export" ? r.exportUsd : r.importUsd,
-            share: flow === "export" ? r.exportSharePct : r.importSharePct,
-          }))
-        : snap.regimes.map((rg) => ({
-            name: rg.regimeName,
-            usd: flow === "export" ? rg.exportUsd : rg.importUsd,
-            share: flow === "export" ? rg.exportSharePct : rg.importSharePct,
-          }));
-
-  const top = rawItems
-    .filter((i) => i.usd > 0)
-    .sort((a, b) => b.usd - a.usd)
-    .slice(0, 10);
-
-  if (top.length === 0) {
-    return {
-      ...baseOption(t, 1),
-      ...statistaHorizontalBarOption(t, {
-        categories: ["暂无记录"],
-        values: [0],
-        labels: ["0.0000 亿"],
-        rightPadding: 96,
-      }),
-    };
-  }
-
-  return statistaHorizontalBarOption(t, {
-    categories: top.map((i) => i.name),
-    values: top.map((i) => usdToYiNumber(i.usd, 4)),
-    labels: top.map((i) => `${formatUsdToYi(i.usd, 4)} 亿 (${formatSharePct(i.share)})`),
-    highlightTopN: 3,
-    rightPadding: 132,
-  });
 }
 
 export function LiveTradeView({ snap }: { snap: TradeOverviewPublished }) {
@@ -408,50 +278,20 @@ export function LiveTradeView({ snap }: { snap: TradeOverviewPublished }) {
   ];
 
   const rankingRows = useMemo(() => {
-    if (rankingDim === "partners") {
-      return snap.partners.slice(0, 10).map((p) => ({
-        name: `${p.partnerName} (${p.partnerCode})`,
-        importYi: formatUsdToYi(p.importUsd, 4),
-        importShare: formatSharePct(p.importSharePct),
-        exportYi: formatUsdToYi(p.exportUsd, 4),
-        exportShare: formatSharePct(p.exportSharePct),
-      }));
-    }
-    if (rankingDim === "regions") {
-      return snap.regions.slice(0, 10).map((r) => ({
-        name: `${r.regionName} (${r.regionCode})`,
-        importYi: formatUsdToYi(r.importUsd, 4),
-        importShare: formatSharePct(r.importSharePct),
-        exportYi: formatUsdToYi(r.exportUsd, 4),
-        exportShare: formatSharePct(r.exportSharePct),
-      }));
-    }
-    return snap.regimes.slice(0, 10).map((rg) => ({
-      name: `${rg.regimeName} (${rg.regimeCode})`,
-      importYi: formatUsdToYi(rg.importUsd, 4),
-      importShare: formatSharePct(rg.importSharePct),
-      exportYi: formatUsdToYi(rg.exportUsd, 4),
-      exportShare: formatSharePct(rg.exportSharePct),
+    const ranked = getTopStructureRankingByFlow(snap, rankingDim, selectedFlow, 10);
+    return ranked.map((item) => ({
+      name: `${item.name} (${item.code})`,
+      importYi: formatUsdToYi(item.importUsd, 4),
+      importShare: formatSharePct(item.importSharePct),
+      exportYi: formatUsdToYi(item.exportUsd, 4),
+      exportShare: formatSharePct(item.exportSharePct),
     }));
-  }, [rankingDim, snap.partners, snap.regimes, snap.regions]);
+  }, [rankingDim, selectedFlow, snap]);
 
-  const cr3RankingItems = useMemo(() => {
-    return snap.categories
-      .map((c) => {
-        const conc = selectedFlow === "export" ? c.exportConcentration : c.importConcentration;
-        const tops = selectedFlow === "export" ? c.topExportPartners : c.topImportPartners;
-        return {
-          name: c.category,
-          tier: "一级类别",
-          cr3: conc.cr3 ?? 0,
-          cr3Text: formatSharePct(conc.cr3),
-          hhi: conc.hhi ?? "暂无数据",
-          topPartners: tops.join(" / ") || "暂无数据",
-        };
-      })
-      .sort((a, b) => b.cr3 - a.cr3)
-      .slice(0, 11);
-  }, [selectedFlow, snap.categories]);
+  const cr3RankingItems = useMemo(
+    () => buildCr3RankingItems(snap.categories, selectedFlow),
+    [selectedFlow, snap.categories],
+  );
 
   const cr3Columns: readonly StatistaTableColumn[] = [
     { key: "name", title: "医疗器械一级类别", align: "left" },
@@ -461,76 +301,8 @@ export function LiveTradeView({ snap }: { snap: TradeOverviewPublished }) {
   ];
 
   const trendOption = useCallback(
-    (t: ChartTheme): ChartOption => {
-      if (trendMode === "annual" && filteredAnnualPoints.length > 0) {
-        const lastPt = filteredAnnualPoints[filteredAnnualPoints.length - 1];
-        return statistaTrendWithPartialOption(t, {
-          periods: filteredAnnualPoints.map((p) => p.period),
-          lastIsPartial: Boolean(lastPt?.isPartial),
-          partialLabel: "非完整年累计",
-          series: [
-            {
-              name: "出口额(亿美元)",
-              values: filteredAnnualPoints.map((p) => usdToYiNumber(p.exportUsd, 4)),
-              colorIndex: 0,
-              showLabels: true,
-            },
-            {
-              name: "进口额(亿美元)",
-              values: filteredAnnualPoints.map((p) => usdToYiNumber(p.importUsd, 4)),
-              colorIndex: 1,
-              showLabels: false,
-            },
-            {
-              name: "差额(亿美元)",
-              values: filteredAnnualPoints.map((p) => usdToYiNumber(p.balanceUsd, 4)),
-              colorIndex: 2,
-              showLabels: false,
-            },
-          ],
-        });
-      }
-
-      const pts =
-        snap.trend.length > 0
-          ? snap.trend
-          : [
-              {
-                period: snap.period,
-                importUsd: snap.totals.importUsd,
-                exportUsd: snap.totals.exportUsd,
-                balanceUsd: snap.totals.balanceUsd,
-                importYoyPct: snap.totals.importYoyPct,
-                exportYoyPct: snap.totals.exportYoyPct,
-                isPartial: false,
-              },
-            ];
-      return statistaTrendWithPartialOption(t, {
-        periods: pts.map((p) => p.period),
-        lastIsPartial: false,
-        series: [
-          {
-            name: "出口额(亿美元)",
-            values: pts.map((p) => usdToYiNumber(p.exportUsd, 4)),
-            colorIndex: 0,
-            showLabels: pts.length <= 6,
-          },
-          {
-            name: "进口额(亿美元)",
-            values: pts.map((p) => usdToYiNumber(p.importUsd, 4)),
-            colorIndex: 1,
-            showLabels: false,
-          },
-          {
-            name: "差额(亿美元)",
-            values: pts.map((p) => usdToYiNumber(p.balanceUsd, 4)),
-            colorIndex: 2,
-            showLabels: pts.length <= 6,
-          },
-        ],
-      });
-    },
-    [filteredAnnualPoints, snap.period, snap.totals, snap.trend, trendMode],
+    (t: ChartTheme): ChartOption => buildTrendChartOption(t, snap, { trendMode, startYear, endYear }),
+    [endYear, snap, startYear, trendMode],
   );
 
   const donutOption = useCallback(
@@ -544,20 +316,8 @@ export function LiveTradeView({ snap }: { snap: TradeOverviewPublished }) {
   );
 
   const cr3Option = useCallback(
-    (t: ChartTheme): ChartOption => {
-      const items = cr3RankingItems.length > 0 ? cr3RankingItems : [{ name: "暂无分类", cr3: 0, cr3Text: "0.0%" }];
-      return statistaHorizontalBarOption(t, {
-        categories: items.map((i) => i.name),
-        values: items.map((i) => Number(i.cr3.toFixed(1))),
-        labels: items.map((i) => i.cr3Text),
-        emphasizeIndex: 0,
-        highlightTopN: 3,
-        max: 100,
-        rightPadding: 76,
-        referenceLine: { value: 70, label: "70% 高集中度线" },
-      });
-    },
-    [cr3RankingItems],
+    (t: ChartTheme): ChartOption => buildCr3ChartOption(t, snap.categories, selectedFlow),
+    [selectedFlow, snap.categories],
   );
 
   const categoryColumns: DataTableColumn<TradeCategoryStat>[] = useMemo(
@@ -860,7 +620,15 @@ export function LiveTradeView({ snap }: { snap: TradeOverviewPublished }) {
                 <button
                   type="button"
                   data-testid="btn-export-trade-report"
-                  onClick={() => exportTradeReportHtml(snap)}
+                  onClick={() => {
+                    void exportTradeReportHtml(snap, {
+                      flow: selectedFlow,
+                      rankingDimension: rankingDim,
+                      trendMode,
+                      startYear,
+                      endYear,
+                    });
+                  }}
                   className="inline-flex cursor-pointer items-center gap-1.5 rounded-sm border border-brand-navy bg-brand-navy px-3 py-1.5 body-sm font-semibold text-on-brand transition-colors focus-ring"
                 >
                   <IconFileText size={16} aria-hidden="true" />

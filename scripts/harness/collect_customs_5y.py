@@ -5,8 +5,9 @@ Driven by browser-use / browser-harness over a single persistent CDP session + c
 
 Hard invariants:
 1. MAX_INFLIGHT == 1 (single-process, single-tab, single serial loop; zero concurrency).
-2. Polite jittered delay >= 3.5s..6.5s (hard floor >= 2.5s) before every request + staged batch/year cooldowns.
+2. Polite jittered delay >= 3.5s..6.5s (hard floor >= 2.5s) before every actual HTTP request + staged batch/year cooldowns.
 3. Zero CAPTCHA/WAF bypass: halts immediately on HTTP 412/429 or HTML challenge, saves _checkpoint.json, and prompts human check.
+4. Strict completeness & evidence integrity: never marks probeVerifiedZero=True unless exported CSV rows and scope match the official probe, and never records empty-result evidence without a real verified screenshot.
 """
 
 from __future__ import annotations
@@ -15,9 +16,12 @@ import argparse
 import base64
 import csv
 import hashlib
+import io
 import json
 import os
 import random
+import re
+import struct
 import subprocess
 import sys
 import time
@@ -40,6 +44,7 @@ DEFAULT_USERSCRIPT_PATH = (
 )
 DEFAULT_DICT_CSV_PATH = PLATFORM_ROOT / "data" / "hs_dict_202601.csv"
 DEFAULT_ARCHIVE_DIR = PLATFORM_ROOT / "data" / "customs-raw"
+DEFAULT_PILOT_ARCHIVE_DIR = PLATFORM_ROOT / "data" / "customs-raw-pilot"
 DEFAULT_CHROME_PROFILE_DIR = PLATFORM_ROOT / "apps" / "api" / ".wrangler" / "chrome-customs-profile"
 
 DICT_VERSION = "202601"
@@ -49,28 +54,267 @@ ORDERED_FLOWS = ["import", "export"]
 ORDERED_GROUPINGS = ["product", "partner", "regime", "region"]
 HARD_FLOOR_DELAY_SEC = 2.5
 MAX_SAFE_ROWS = 9000
+MIN_EVIDENCE_PNG_DIM = 16
 
-MINIMAL_FALLBACK_PNG_BYTES = bytes(
-    [
-        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
-        0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
-        0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
-        0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4,
-        0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41,
-        0x54, 0x78, 0x9C, 0x63, 0x00, 0x01, 0x00, 0x00,
-        0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00,
-        0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE,
-        0x42, 0x60, 0x82,
-    ]
-)
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+
+HS_HEADERS = ("商品编码", "商品代码", "商品税号", "hs海关编码", "hs编码", "hs_code", "hscode", "code_ts")
+USD_HEADERS = ("美元", "金额(美元)", "金额（美元）", "美元金额", "usd", "amount_usd")
+NON_USD_HEADERS = ("人民币", "金额(人民币)", "金额（人民币）", "rmb", "cny")
+PERIOD_HEADERS = ("数据年月", "统计年月", "年月", "period", "month")
+FLOW_HEADERS = ("进出口", "贸易流向", "流向", "flow")
+PARTNER_CODE_HEADERS = ("贸易伙伴编码", "贸易伙伴代码", "原产国(地)编码", "最终目的国(地)编码", "产销国(地)编码", "partner_code")
+PARTNER_NAME_HEADERS = ("贸易伙伴名称", "贸易伙伴", "原产国(地)", "最终目的国(地)", "产销国(地)", "partner_name")
+REGIME_CODE_HEADERS = ("贸易方式编码", "贸易方式代码", "regime_code")
+REGIME_NAME_HEADERS = ("贸易方式名称", "贸易方式", "regime_name")
+REGION_CODE_HEADERS = ("收发货人注册地编码", "收发货人注册地代码", "注册地编码", "注册地代码", "region_code")
+REGION_NAME_HEADERS = ("收发货人注册地名称", "收发货人注册地", "注册地名称", "注册地", "region_name")
+SUMMARY_LABELS = frozenset({"合计", "总计", "全国", "全国合计", "全部", "世界", "world", "total", "all"})
 
 
 class CustomsCircuitBreakError(RuntimeError):
     """Raised immediately when WAF/session check requires human intervention in visible Chrome."""
 
 
+class CustomsExportVerificationError(RuntimeError):
+    """Raised when an exported CSV fails row-count, HS8 scope, month range, or column integrity checks."""
+
+
+class CustomsScreenshotError(RuntimeError):
+    """Raised when capturing or validating a real non-placeholder empty-result PNG screenshot fails."""
+
+
 def sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def validate_evidence_png(png_bytes: bytes) -> tuple[int, int]:
+    """Verify that empty-result screenshot bytes form a real PNG (rejecting empty payloads or 1x1 placeholders)."""
+    if not isinstance(png_bytes, (bytes, bytearray)) or len(png_bytes) < 24:
+        raise CustomsScreenshotError("Empty-result screenshot is too short to be a valid PNG")
+    raw = bytes(png_bytes)
+    if not raw.startswith(PNG_SIGNATURE) or raw[12:16] != b"IHDR":
+        raise CustomsScreenshotError("Empty-result screenshot does not have a valid PNG/IHDR header")
+    width, height = struct.unpack(">II", raw[16:24])
+    if width < MIN_EVIDENCE_PNG_DIM or height < MIN_EVIDENCE_PNG_DIM:
+        raise CustomsScreenshotError(
+            f"Empty-result screenshot dimensions {width}x{height} are below minimum {MIN_EVIDENCE_PNG_DIM}x{MIN_EVIDENCE_PNG_DIM} (placeholder rejected)"
+        )
+    return width, height
+
+
+def _find_header_col(headers: list[str], aliases: tuple[str, ...]) -> int:
+    lower = [h.strip().lower() for h in headers]
+    for alias in aliases:
+        target = alias.lower()
+        for idx, col in enumerate(lower):
+            if col == target:
+                return idx
+    return -1
+
+
+def _normalize_hs8_cell(raw_cell: str) -> str | None:
+    cleaned = raw_cell.strip()
+    m_eq = re.fullmatch(r'="(\d+)"', cleaned)
+    if m_eq:
+        cleaned = m_eq.group(1)
+    elif cleaned.startswith("'") and cleaned[1:].isdigit():
+        cleaned = cleaned[1:]
+    cleaned = cleaned.strip()
+    return cleaned if re.fullmatch(r"\d{8}", cleaned) else None
+
+
+def _normalize_month_cell(raw_cell: str) -> str | None:
+    cleaned = raw_cell.strip()
+    m1 = re.fullmatch(r"(\d{4})-(0[1-9]|1[0-2])", cleaned)
+    if m1:
+        return f"{m1.group(1)}-{m1.group(2)}"
+    m2 = re.fullmatch(r"(\d{4})(0[1-9]|1[0-2])", cleaned)
+    if m2:
+        return f"{m2.group(1)}-{m2.group(2)}"
+    return None
+
+
+def _normalize_flow_cell(raw_cell: str) -> str | None:
+    cleaned = raw_cell.strip().lower()
+    if cleaned in ("进口", "import", "1"):
+        return "import"
+    if cleaned in ("出口", "export", "0"):
+        return "export"
+    return None
+
+
+def _decode_customs_csv_bytes(raw_bytes: bytes) -> tuple[str, str]:
+    if not raw_bytes:
+        raise CustomsExportVerificationError("empty_csv_bytes")
+    try:
+        text = raw_bytes.decode("utf-8")
+        encoding = "utf-8"
+    except UnicodeDecodeError:
+        try:
+            text = raw_bytes.decode("gb18030")
+            encoding = "gb18030"
+        except UnicodeDecodeError as exc:
+            raise CustomsExportVerificationError(f"undecodable_csv_bytes:{exc}") from exc
+    if text.startswith("\ufeff"):
+        text = text[1:]
+    head = text[:512].lstrip().lower()
+    if head.startswith("<!doctype") or head.startswith("<html") or "<html" in head:
+        raise CustomsExportVerificationError("html_error_page_in_csv")
+    return text, encoding
+
+
+def verify_exported_csv(
+    raw_bytes: bytes,
+    *,
+    expected_total: int,
+    months_covered: list[str],
+    requested_hs8: list[str],
+    flow: str,
+    grouping: str,
+    bridge_inspection: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """
+    Independently parse and verify raw exported CSV bytes against official probe count and requested scope.
+    Raises CustomsExportVerificationError on any row-count, HS8, month-range, flow, or column mismatch.
+    """
+    text, encoding = _decode_customs_csv_bytes(raw_bytes)
+    reader = csv.reader(io.StringIO(text, newline=""))
+    non_blank = [row for row in reader if any(cell.strip() for cell in row)]
+    if not non_blank:
+        raise CustomsExportVerificationError("blank_csv_payload")
+
+    headers = [cell.strip() for cell in non_blank[0]]
+    usd_col = _find_header_col(headers, USD_HEADERS)
+    if usd_col < 0:
+        if _find_header_col(headers, NON_USD_HEADERS) >= 0:
+            raise CustomsExportVerificationError("rmb_currency_detected")
+        raise CustomsExportVerificationError("missing_usd_header")
+
+    hs_col = _find_header_col(headers, HS_HEADERS)
+    if hs_col < 0:
+        raise CustomsExportVerificationError("missing_hs8_header")
+
+    period_col = _find_header_col(headers, PERIOD_HEADERS)
+    flow_col = _find_header_col(headers, FLOW_HEADERS)
+
+    group_code_col = -1
+    group_name_col = -1
+    if grouping == "partner":
+        group_code_col = _find_header_col(headers, PARTNER_CODE_HEADERS)
+        group_name_col = _find_header_col(headers, PARTNER_NAME_HEADERS)
+        if group_code_col < 0 or group_name_col < 0:
+            raise CustomsExportVerificationError("missing_partner_columns")
+    elif grouping == "regime":
+        group_code_col = _find_header_col(headers, REGIME_CODE_HEADERS)
+        group_name_col = _find_header_col(headers, REGIME_NAME_HEADERS)
+        if group_code_col < 0 or group_name_col < 0:
+            raise CustomsExportVerificationError("missing_regime_columns")
+    elif grouping == "region":
+        group_code_col = _find_header_col(headers, REGION_CODE_HEADERS)
+        group_name_col = _find_header_col(headers, REGION_NAME_HEADERS)
+        if group_code_col < 0 or group_name_col < 0:
+            raise CustomsExportVerificationError("missing_region_columns")
+
+    if len(months_covered) > 1 and period_col < 0:
+        raise CustomsExportVerificationError("multi_month_csv_missing_period_column")
+
+    allowed_months = set(months_covered)
+    requested_clean = [str(c).strip() for c in requested_hs8]
+    requested_set = set(requested_clean)
+
+    detail_row_count = 0
+    summary_row_count = 0
+    returned_set: set[str] = set()
+    unexpected_hs8: set[str] = set()
+    observed_months: set[str] = set()
+    out_of_range_months: set[str] = set()
+
+    for line_idx, row in enumerate(non_blank[1:], start=2):
+        def get_col(col_idx: int) -> str:
+            return row[col_idx].strip() if 0 <= col_idx < len(row) else ""
+
+        raw_hs = get_col(hs_col)
+        hs8 = _normalize_hs8_cell(raw_hs)
+        if not hs8:
+            if not raw_hs or raw_hs.lower() in SUMMARY_LABELS or any(c.strip().lower() in SUMMARY_LABELS for c in row):
+                summary_row_count += 1
+                continue
+            raise CustomsExportVerificationError(f"invalid_hs8_at_line_{line_idx}:{raw_hs}")
+
+        if grouping != "product":
+            gc = get_col(group_code_col)
+            gn = get_col(group_name_col)
+            is_zero_world = gc in ("0", "00", "000") and (gn == "" or gn.lower() in SUMMARY_LABELS)
+            if gc.lower() in SUMMARY_LABELS or gn.lower() in SUMMARY_LABELS or is_zero_world:
+                summary_row_count += 1
+                continue
+            if not gc or not gn:
+                raise CustomsExportVerificationError(f"missing_group_cell_at_line_{line_idx}")
+
+        if hs8 not in requested_set:
+            unexpected_hs8.add(hs8)
+
+        if period_col >= 0:
+            raw_period = get_col(period_col)
+            norm_m = _normalize_month_cell(raw_period)
+            if not norm_m:
+                raise CustomsExportVerificationError(f"invalid_month_at_line_{line_idx}:{raw_period}")
+            observed_months.add(norm_m)
+            if norm_m not in allowed_months:
+                out_of_range_months.add(norm_m)
+
+        if flow_col >= 0:
+            raw_flow = get_col(flow_col)
+            if raw_flow:
+                norm_flow = _normalize_flow_cell(raw_flow)
+                if norm_flow != flow:
+                    raise CustomsExportVerificationError(f"flow_mismatch_at_line_{line_idx}:{raw_flow}!={flow}")
+
+        detail_row_count += 1
+        returned_set.add(hs8)
+
+    if unexpected_hs8:
+        raise CustomsExportVerificationError(
+            f"unexpected_hs8_in_export:{','.join(sorted(unexpected_hs8))}"
+        )
+
+    if out_of_range_months:
+        raise CustomsExportVerificationError(
+            f"out_of_range_months_in_export:{','.join(sorted(out_of_range_months))}"
+        )
+
+    if expected_total > 0 and detail_row_count != expected_total:
+        raise CustomsExportVerificationError(
+            f"row_count_mismatch:exported={detail_row_count},probe_total={expected_total}"
+        )
+
+    if bridge_inspection and isinstance(bridge_inspection, dict):
+        reported_count = bridge_inspection.get("detailRowCount")
+        if reported_count is not None and int(reported_count) != detail_row_count:
+            raise CustomsExportVerificationError(
+                f"inspection_row_count_mismatch:bridge={reported_count},parsed={detail_row_count}"
+            )
+        reported_unexpected = bridge_inspection.get("unexpectedHs8") or []
+        if reported_unexpected:
+            raise CustomsExportVerificationError(
+                f"bridge_reported_unexpected_hs8:{','.join(str(x) for x in reported_unexpected)}"
+            )
+
+    returned_hs8 = [c for c in requested_clean if c in returned_set]
+    unreturned_hs8 = [c for c in requested_clean if c not in returned_set]
+    return {
+        "ok": True,
+        "encoding": encoding,
+        "headerColumns": headers,
+        "hasMonthColumn": period_col >= 0,
+        "observedMonths": sorted(observed_months),
+        "detailRowCount": detail_row_count,
+        "summaryRowCount": summary_row_count,
+        "returnedHs8": returned_hs8,
+        "unreturnedHs8": unreturned_hs8,
+        "unexpectedHs8": [],
+    }
 
 
 @dataclass
@@ -96,6 +340,10 @@ class PoliteRatePolicy:
         if self.batch_cooldown_every < 1:
             raise ValueError("batch_cooldown_every must be >= 1")
 
+    @property
+    def request_count(self) -> int:
+        return self._request_count
+
     def wait_before_request(self) -> float:
         delay = self.rng.uniform(self.min_delay_sec, self.max_delay_sec)
         self.sleep_fn(delay)
@@ -108,6 +356,11 @@ class PoliteRatePolicy:
             self.sleep_fn(rest)
             return rest
         return None
+
+    def record_extra_requests(self, extra_count: int) -> None:
+        for _ in range(max(0, int(extra_count))):
+            self._request_count += 1
+            self.maybe_batch_cooldown()
 
     def wait_year_cooldown(self) -> float:
         rest = self.rng.uniform(*self.year_cooldown_range)
@@ -195,6 +448,63 @@ class SerialCustomsCollector:
         self.rate_policy.maybe_batch_cooldown()
         return result
 
+    def _probe_count_serial(
+        self,
+        *,
+        year: int,
+        start_month: int,
+        end_month: int,
+        month_flag: str,
+        flow: str,
+        grouping: str,
+        hs8: list[str],
+    ) -> dict[str, Any]:
+        """Execute state-candidate probes strictly one HTTP request per rate-limited single-flight call."""
+        get_candidates = getattr(self.transport, "get_state_candidates", None)
+        if callable(get_candidates):
+            candidates = list(get_candidates(year=year, start_month=start_month, end_month=end_month))
+            last_probe: dict[str, Any] = {
+                "ok": False,
+                "state": None,
+                "total": None,
+                "isHtmlBlocked": False,
+                "circuitBreakRequired": False,
+                "reason": "no_state_matched",
+            }
+            for state in candidates:
+                probe = self._guard_single_flight_call(
+                    lambda st=state: self.transport.probe_count(
+                        year=year,
+                        start_month=start_month,
+                        end_month=end_month,
+                        month_flag=month_flag,
+                        flow=flow,
+                        grouping=grouping,
+                        hs8=hs8,
+                        state_candidates=[st],
+                    )
+                )
+                last_probe = probe
+                if probe.get("isHtmlBlocked") or probe.get("circuitBreakRequired") or probe.get("ok"):
+                    return probe
+            return last_probe
+
+        probe = self._guard_single_flight_call(
+            lambda: self.transport.probe_count(
+                year=year,
+                start_month=start_month,
+                end_month=end_month,
+                month_flag=month_flag,
+                flow=flow,
+                grouping=grouping,
+                hs8=hs8,
+            )
+        )
+        extra_reqs = max(0, int(probe.get("requestCount", 1)) - 1)
+        if extra_reqs > 0:
+            self.rate_policy.record_extra_requests(extra_reqs)
+        return probe
+
     def collect_task(
         self,
         *,
@@ -212,17 +522,15 @@ class SerialCustomsCollector:
             self.log(f"[skip-checkpoint] {task_key}")
             return [{"status": "skipped_checkpoint", "monthRange": month_range_label}]
 
-        month_flag = "1" if start_month < end_month else "1"
-        probe = self._guard_single_flight_call(
-            lambda: self.transport.probe_count(
-                year=year,
-                start_month=start_month,
-                end_month=end_month,
-                month_flag=month_flag,
-                flow=flow,
-                grouping=grouping,
-                hs8=hs8,
-            )
+        month_flag = "1"
+        probe = self._probe_count_serial(
+            year=year,
+            start_month=start_month,
+            end_month=end_month,
+            month_flag=month_flag,
+            flow=flow,
+            grouping=grouping,
+            hs8=hs8,
         )
 
         if probe.get("isHtmlBlocked") or probe.get("circuitBreakRequired"):
@@ -285,11 +593,19 @@ class SerialCustomsCollector:
 
         months_covered = [f"{year}-{m:02d}" for m in range(start_month, end_month + 1)]
         target_dir = self.archive_dir / str(year) / flow / grouping / batch_key / self.revision
-        target_dir.mkdir(parents=True, exist_ok=True)
         stem = f"customs_{DICT_VERSION}_{year}_{start_month:02d}-{end_month:02d}_{flow}_{grouping}_{batch_key}_{self.revision}"
 
         if total == 0:
-            png_bytes = self.transport.capture_empty_png()
+            try:
+                png_bytes = self.transport.capture_empty_png()
+                png_w, png_h = validate_evidence_png(png_bytes)
+            except Exception as exc:
+                self._save_checkpoint(halted_reason=f"empty_screenshot_failed:{exc}")
+                raise CustomsScreenshotError(
+                    f"Failed to capture verified empty-result screenshot ({month_range_label} {flow}/{grouping}): {exc}"
+                ) from exc
+
+            target_dir.mkdir(parents=True, exist_ok=True)
             png_sha = sha256_hex(png_bytes)
             png_path = target_dir / f"{stem}.empty.png"
             png_path.write_bytes(png_bytes)
@@ -320,6 +636,7 @@ class SerialCustomsCollector:
                         "officialTotal": 0,
                         "emptyPngFilename": png_path.name,
                         "emptyPngSha256": png_sha,
+                        "emptyPngDimensions": {"width": png_w, "height": png_h},
                         "collectedAt": datetime.now(timezone.utc).isoformat(),
                     },
                     ensure_ascii=False,
@@ -357,8 +674,26 @@ class SerialCustomsCollector:
         raw_bytes = base64.b64decode(export_res["base64"])
         actual_sha = sha256_hex(raw_bytes)
         if actual_sha != export_res["sha256"]:
+            self._save_checkpoint(halted_reason="ipc_sha256_mismatch")
             raise RuntimeError(f"IPC byte integrity mismatch: {actual_sha} != {export_res['sha256']}")
 
+        try:
+            verified = verify_exported_csv(
+                raw_bytes,
+                expected_total=total,
+                months_covered=months_covered,
+                requested_hs8=hs8,
+                flow=flow,
+                grouping=grouping,
+                bridge_inspection=export_res.get("inspection"),
+            )
+        except CustomsExportVerificationError as exc:
+            self._save_checkpoint(halted_reason=f"export_verification_failed:{exc}")
+            raise CustomsExportVerificationError(
+                f"Export verification failed ({month_range_label} {flow}/{grouping} {batch_key}): {exc}"
+            ) from exc
+
+        target_dir.mkdir(parents=True, exist_ok=True)
         csv_path = target_dir / f"{stem}.raw.csv"
         csv_path.write_bytes(raw_bytes)
 
@@ -370,7 +705,7 @@ class SerialCustomsCollector:
             "currency": "USD",
             "grouping": grouping,
             "hs8": hs8,
-            "emptyHs8": export_res.get("inspection", {}).get("unreturnedHs8", []),
+            "emptyHs8": verified["unreturnedHs8"],
             "probeVerifiedZero": True,
         }
         (target_dir / f"{stem}.manifest.json").write_text(
@@ -390,7 +725,7 @@ class SerialCustomsCollector:
                     "savedCsvFilename": csv_path.name,
                     "sha256": actual_sha,
                     "byteLength": len(raw_bytes),
-                    "inspection": export_res.get("inspection", {}),
+                    "inspection": verified,
                     "collectedAt": datetime.now(timezone.utc).isoformat(),
                 },
                 ensure_ascii=False,
@@ -402,7 +737,7 @@ class SerialCustomsCollector:
 
         self.completed_keys.add(task_key)
         self._save_checkpoint(halted_reason=None)
-        self.log(f"[saved] {csv_path.name} ({len(raw_bytes)} B, sha256={actual_sha[:12]}…)")
+        self.log(f"[saved] {csv_path.name} ({len(raw_bytes)} B, rows={verified['detailRowCount']}, sha256={actual_sha[:12]}…)")
         return [{"status": "received", "monthRange": month_range_label, "sha256": actual_sha, "csvPath": str(csv_path)}]
 
     def run_plan(
@@ -500,8 +835,17 @@ def ensure_dedicated_chrome_cdp(port: int = 9333, profile_dir: Path = DEFAULT_CH
 class BrowserHarnessTransport:
     """Real Chrome transport powered by browser-use / browser-harness persistent CDP daemon."""
 
-    def __init__(self, *, cdp_url: str | None = None, userscript_path: Path = DEFAULT_USERSCRIPT_PATH) -> None:
+    def __init__(
+        self,
+        *,
+        cdp_url: str | None = None,
+        userscript_path: Path = DEFAULT_USERSCRIPT_PATH,
+        rate_policy: PoliteRatePolicy | None = None,
+    ) -> None:
         _inject_browser_harness_site_packages()
+        policy = rate_policy or PoliteRatePolicy()
+        self._min_delay_ms = int(round(policy.min_delay_sec * 1000))
+        self._max_delay_ms = int(round(policy.max_delay_sec * 1000))
         daemon_name = "mdes-customs-serial" if cdp_url else "default"
         if cdp_url:
             os.environ["BU_CDP_URL"] = cdp_url
@@ -567,11 +911,22 @@ class BrowserHarnessTransport:
             disable_customs_debugger_traps(self._bh.cdp)
             inject_customs_suite_bridge(self._eval_async_js, self.userscript_path)
 
+    def get_state_candidates(self, *, year: int, start_month: int, end_month: int) -> list[int]:
+        self.ensure_bridge()
+        res = self._eval_async_js(
+            f"window.__CUSTOMS_SUITE_BRIDGE__.getStateCandidates({int(year)}, {int(start_month)}, {int(end_month)})",
+            timeout=10.0,
+        )
+        if isinstance(res, list) and res:
+            return [int(x) for x in res]
+        return [2, 1, 3]
+
     def check_session_ready(self) -> dict[str, Any]:
         self.ensure_bridge()
+        payload = json.dumps({"minDelayMs": self._min_delay_ms, "maxDelayMs": self._max_delay_ms})
         return self._eval_async_js(
-            "window.__CUSTOMS_SUITE_BRIDGE__.checkSessionReady({ skipPoliteWaitForUnitTest: true })",
-            timeout=25.0,
+            f"window.__CUSTOMS_SUITE_BRIDGE__.checkSessionReady({payload})",
+            timeout=45.0,
         )
 
     def probe_count(
@@ -584,20 +939,23 @@ class BrowserHarnessTransport:
         flow: str,
         grouping: str,
         hs8: list[str],
+        state_candidates: list[int] | None = None,
     ) -> dict[str, Any]:
         self.ensure_bridge()
-        payload = json.dumps(
-            {
-                "year": year,
-                "startMonth": start_month,
-                "endMonth": end_month,
-                "monthFlag": month_flag,
-                "flow": flow,
-                "grouping": grouping,
-                "hs8": hs8,
-                "skipPoliteWaitForUnitTest": True,
-            }
-        )
+        req: dict[str, Any] = {
+            "year": year,
+            "startMonth": start_month,
+            "endMonth": end_month,
+            "monthFlag": month_flag,
+            "flow": flow,
+            "grouping": grouping,
+            "hs8": hs8,
+            "minDelayMs": self._min_delay_ms,
+            "maxDelayMs": self._max_delay_ms,
+        }
+        if state_candidates is not None:
+            req["stateCandidates"] = [int(s) for s in state_candidates]
+        payload = json.dumps(req)
         return self._eval_async_js(f"window.__CUSTOMS_SUITE_BRIDGE__.probeCount({payload})", timeout=45.0)
 
     def fetch_raw_export(
@@ -623,29 +981,48 @@ class BrowserHarnessTransport:
                 "grouping": grouping,
                 "hs8": hs8,
                 "selectTableState": state,
-                "skipPoliteWaitForUnitTest": True,
+                "minDelayMs": self._min_delay_ms,
+                "maxDelayMs": self._max_delay_ms,
             }
         )
         return self._eval_async_js(f"window.__CUSTOMS_SUITE_BRIDGE__.fetchRawExportBase64({payload})", timeout=75.0)
 
     def capture_empty_png(self) -> bytes:
         res = self._bh.cdp("Page.captureScreenshot", format="png")
-        if isinstance(res, dict) and res.get("data"):
-            return base64.b64decode(res["data"])
-        return MINIMAL_FALLBACK_PNG_BYTES
+        if not isinstance(res, dict) or not isinstance(res.get("data"), str) or not res["data"].strip():
+            raise CustomsScreenshotError(f"Page.captureScreenshot failed: missing screenshot data ({res!r})")
+        try:
+            png_bytes = base64.b64decode(res["data"])
+        except Exception as exc:
+            raise CustomsScreenshotError(f"Page.captureScreenshot returned invalid base64: {exc}") from exc
+        validate_evidence_png(png_bytes)
+        return png_bytes
+
+
+def resolve_archive_dir(args: argparse.Namespace) -> Path:
+    """Resolve archive directory, isolating --pilot runs into data/customs-raw-pilot by default."""
+    if getattr(args, "archive_dir", None):
+        return Path(args.archive_dir)
+    if getattr(args, "pilot", False):
+        return DEFAULT_PILOT_ARCHIVE_DIR
+    return DEFAULT_ARCHIVE_DIR
 
 
 def parse_cli_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Low-frequency compliant serial China Customs collector (browser-harness).")
     p.add_argument("--years", default="2024", help="Comma-separated years, e.g. 2022,2023,2024,2025,2026")
-    p.add_argument("--pilot", action="store_true", help="Collect only pilot HS8 90181100 (ECG recorder)")
+    p.add_argument("--pilot", action="store_true", help="Collect only pilot HS8 90181100 into isolated data/customs-raw-pilot by default")
     p.add_argument("--groups", default="", help="Optional comma-separated group IDs, e.g. G01,G02")
     p.add_argument("--min-delay", type=float, default=3.5, help="Minimum delay (sec) before each request (>=2.5)")
     p.add_argument("--max-delay", type=float, default=6.5, help="Maximum delay (sec) before each request")
     p.add_argument("--cdp-port", type=int, default=9333, help="Dedicated Chrome remote debugging port")
     p.add_argument("--use-running-chrome", action="store_true", help="Attach to existing running Chrome instead of dedicated port")
     p.add_argument("--wait-human-seconds", type=int, default=90, help="Max seconds to wait for human initial query/verification in visible Chrome")
-    p.add_argument("--archive-dir", default=str(DEFAULT_ARCHIVE_DIR), help="Target raw archive directory")
+    p.add_argument(
+        "--archive-dir",
+        default=None,
+        help="Target raw archive directory (defaults to data/customs-raw-pilot with --pilot, else data/customs-raw)",
+    )
     p.add_argument("--latest-month", default="2026-10", help="Latest complete YYYY-MM for current year")
     return p.parse_args(argv)
 
@@ -653,6 +1030,7 @@ def parse_cli_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_cli_args(argv)
     policy = PoliteRatePolicy(min_delay_sec=args.min_delay, max_delay_sec=args.max_delay)
+    archive_dir = resolve_archive_dir(args)
     years = [int(y.strip()) for y in args.years.split(",") if y.strip()]
 
     if args.pilot:
@@ -666,13 +1044,15 @@ def main(argv: list[str] | None = None) -> int:
             batches = all_batches
 
     cdp_url = None if args.use_running_chrome else ensure_dedicated_chrome_cdp(port=args.cdp_port)
-    transport = BrowserHarnessTransport(cdp_url=cdp_url)
+    transport = BrowserHarnessTransport(cdp_url=cdp_url, rate_policy=policy)
 
     status = transport.check_session_ready()
+    if isinstance(status, dict):
+        policy.record_extra_requests(int(status.get("requestCount", 1)))
     if not status.get("ready"):
         collector_tmp = SerialCustomsCollector(
             transport=transport,
-            archive_dir=Path(args.archive_dir),
+            archive_dir=archive_dir,
             rate_policy=policy,
             latest_complete_month=args.latest_month,
         )
@@ -684,12 +1064,12 @@ def main(argv: list[str] | None = None) -> int:
 
     collector = SerialCustomsCollector(
         transport=transport,
-        archive_dir=Path(args.archive_dir),
+        archive_dir=archive_dir,
         rate_policy=policy,
         latest_complete_month=args.latest_month,
     )
     outcomes = collector.run_plan(years=years, batches=batches)
-    print(json.dumps({"ok": True, "completedCount": len(outcomes)}, ensure_ascii=False))
+    print(json.dumps({"ok": True, "archiveDir": str(archive_dir), "completedCount": len(outcomes)}, ensure_ascii=False))
     return 0
 
 
