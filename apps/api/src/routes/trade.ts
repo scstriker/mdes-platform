@@ -69,8 +69,68 @@ async function readTradeMultipart(c: Context<AppEnv>): Promise<{
   return { rawManifest, file, emptyEvidences, deferPublishField: body["deferPublish"] };
 }
 
+function timingSafeEqualStr(a: string, b: string): boolean {
+  const enc = new TextEncoder();
+  const ab = enc.encode(a);
+  const bb = enc.encode(b);
+  const len = Math.max(ab.length, bb.length);
+  let diff = ab.length ^ bb.length;
+  for (let i = 0; i < len; i++) {
+    diff |= (ab[i] ?? 0) ^ (bb[i] ?? 0);
+  }
+  return diff === 0;
+}
+
+function isLoopbackHost(rawUrl: string): boolean {
+  try {
+    const host = new URL(rawUrl).hostname.toLowerCase();
+    return host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 写路由入口统一门禁（遵循 docs/TECH_SPEC.md）：
+ * - 公开部署默认关闭写入（wrangler.toml 不开启 ENABLE_TRADE_WRITE），直接返回 403 TRADE_WRITE_DISABLED；
+ * - 若配置了 TRADE_WRITE_TOKEN，则强制校验 X-Admin-Token 或 Authorization: Bearer 令牌；
+ * - 否则仅在显式开启 ENABLE_TRADE_WRITE=1 且请求来自本机回环（localhost/127.0.0.1/::1）时放行。
+ */
+function requireTradeWriteAccess(c: Context<AppEnv>): void {
+  const writeFlag = String(c.env.ENABLE_TRADE_WRITE ?? "")
+    .trim()
+    .toLowerCase();
+  const writeEnabled = writeFlag === "1" || writeFlag === "true";
+  const configuredToken = String(c.env.TRADE_WRITE_TOKEN ?? "").trim();
+
+  if (!writeEnabled && !configuredToken) {
+    throw new AppError(403, "TRADE_WRITE_DISABLED", {
+      reason: "write endpoints disabled by default; set ENABLE_TRADE_WRITE=1 in local admin environment",
+    });
+  }
+
+  if (configuredToken) {
+    const authHeader = (c.req.header("authorization") || "").trim();
+    const bearer = /^Bearer\s+(.+)$/i.exec(authHeader)?.[1]?.trim() ?? "";
+    const provided = (c.req.header("x-admin-token") || "").trim() || bearer;
+    if (!provided || !timingSafeEqualStr(provided, configuredToken)) {
+      throw new AppError(403, "TRADE_WRITE_DISABLED", {
+        reason: "valid admin write token required",
+      });
+    }
+    return;
+  }
+
+  if (!isLoopbackHost(c.req.url)) {
+    throw new AppError(403, "TRADE_WRITE_DISABLED", {
+      reason: "non-loopback write requires TRADE_WRITE_TOKEN",
+    });
+  }
+}
+
 export function tradeRoutes(app: Hono<AppEnv>) {
   app.post("/api/trade/import", async (c) => {
+    requireTradeWriteAccess(c);
     const parsed = await readTradeMultipart(c);
     const hooksEnabled = c.env.ENABLE_TEST_HOOKS === "1";
     const failHeader = hooksEnabled && c.req.header("x-test-fail-before-publish") === "1";
@@ -95,6 +155,7 @@ export function tradeRoutes(app: Hono<AppEnv>) {
   });
 
   app.post("/api/trade/import-bulk", async (c) => {
+    requireTradeWriteAccess(c);
     const parsed = await readTradeMultipart(c);
     const deferPublish = parseBoolField(parsed.deferPublishField, true);
     const parseOptPositiveInt = (raw: string | undefined): number | undefined => {
@@ -123,6 +184,7 @@ export function tradeRoutes(app: Hono<AppEnv>) {
   });
 
   app.post("/api/trade/publish", async (c) => {
+    requireTradeWriteAccess(c);
     let dictVersion: string | null = textParam(c.req.query("dictVersion")) ?? null;
     const rawBody = await c.req.text();
     if (rawBody.trim() !== "") {
@@ -190,7 +252,14 @@ export function tradeRoutes(app: Hono<AppEnv>) {
     const month = textParam(c.req.query("month"));
     const flow = textParam(c.req.query("flow"));
     const grouping = textParam(c.req.query("grouping"));
-    const list = await listTradeBatches(c.get("db"), { dictVersion, month, flow, grouping });
+    const rawBatchIds = textParam(c.req.query("batchIds"));
+    const batchIds = rawBatchIds
+      ? rawBatchIds
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean)
+      : undefined;
+    const list = await listTradeBatches(c.get("db"), { dictVersion, month, flow, grouping, batchIds });
     return c.json(list);
   });
 

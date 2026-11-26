@@ -33,6 +33,7 @@ export const TRADE_ERROR_CODES = [
   "TRADE_CSV_INVALID",
   "TRADE_SCOPE_CONFLICT",
   "TRADE_PERIOD_INVALID",
+  "TRADE_WRITE_DISABLED",
 ] as const;
 
 export const ERROR_CODES = [
@@ -67,6 +68,7 @@ export type ErrorParamsMap = {
   TRADE_CSV_INVALID: { line: number; field: string; reason?: string };
   TRADE_SCOPE_CONFLICT: { existingBatchId: string; existingHs8: string; requestedHs8: string };
   TRADE_PERIOD_INVALID: { period: string };
+  TRADE_WRITE_DISABLED: { reason?: string };
   NOT_FOUND: { resource: string; id: string };
   INTERNAL_ERROR: Record<string, never>;
 };
@@ -125,6 +127,8 @@ export function developerMessage(code: ErrorCode, params: ErrorParams = {}): str
       return `partial hs8 scope overlap with batch ${params.existingBatchId ?? "existing"}`;
     case "TRADE_PERIOD_INVALID":
       return `invalid trade period format: ${params.period ?? ""}`;
+    case "TRADE_WRITE_DISABLED":
+      return `trade write operations are disabled${params.reason ? `: ${params.reason}` : ""}`;
     case "NOT_FOUND":
       return `${params.resource ?? "resource"} not found: ${params.id ?? ""}`.trim();
     case "INTERNAL_ERROR":

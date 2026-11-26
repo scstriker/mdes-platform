@@ -86,6 +86,10 @@ class CustomsScreenshotError(RuntimeError):
     """Raised when capturing or validating a real non-placeholder empty-result PNG screenshot fails."""
 
 
+class CustomsArchiveConflictError(RuntimeError):
+    """Raised when writing would overwrite or collide with an existing archive having a different HS8 scope."""
+
+
 def sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -615,11 +619,61 @@ class SerialCustomsCollector:
                     )
                     return left + right
 
+        months_covered = [f"{year}-{m:02d}" for m in range(start_month, end_month + 1)]
+        target_dir = self.archive_dir / str(year) / flow / grouping / batch_key / self.revision
+        stem = f"customs_{DICT_VERSION}_{year}_{start_month:02d}-{end_month:02d}_{flow}_{grouping}_{batch_key}_{self.revision}"
+
         month_range_label = f"{year}-{start_month:02d}..{year}-{end_month:02d}"
-        task_key = f"{DICT_VERSION}|{month_range_label}|{flow}|{grouping}|{batch_key}|{','.join(sorted(hs8))}"
+        sorted_hs8 = sorted(hs8)
+        task_key = f"{DICT_VERSION}|{month_range_label}|{flow}|{grouping}|{batch_key}|{','.join(sorted_hs8)}"
+
+        def _assert_no_archive_scope_conflict() -> None:
+            if not target_dir.exists():
+                return
+            months_set = set(months_covered)
+            for mf_path in sorted(target_dir.glob("*.manifest.json")):
+                try:
+                    existing_mf = json.loads(mf_path.read_text(encoding="utf-8"))
+                except Exception as exc:
+                    if mf_path.name == f"{stem}.manifest.json":
+                        raise CustomsArchiveConflictError(
+                            f"ARCHIVE_SCOPE_OVERWRITE_REFUSED: existing manifest {mf_path} is unreadable ({exc}); refusing to overwrite"
+                        ) from exc
+                    continue
+                existing_hs8 = sorted(str(c).strip() for c in (existing_mf.get("hs8") or []) if str(c).strip())
+                existing_months = existing_mf.get("months")
+                if not isinstance(existing_months, list):
+                    single_m = existing_mf.get("month")
+                    existing_months = [single_m] if single_m else []
+                existing_month_set = {str(m) for m in existing_months}
+                same_stem = mf_path.name == f"{stem}.manifest.json"
+                overlaps_window = bool(months_set & existing_month_set)
+                if (same_stem or overlaps_window) and existing_hs8 != sorted_hs8:
+                    raise CustomsArchiveConflictError(
+                        f"ARCHIVE_SCOPE_OVERWRITE_REFUSED: existing archive '{mf_path.name}' covers different HS8 scope "
+                        f"({len(existing_hs8)} codes vs requested {len(sorted_hs8)} codes) for overlapping window; "
+                        "use a separate --archive-dir or bump --revision instead of changing --group-size in place."
+                    )
+
+        _assert_no_archive_scope_conflict()
+
         if task_key in self.completed_keys:
-            self.log(f"[skip-checkpoint] {task_key}")
-            return [{"status": "skipped_checkpoint", "monthRange": month_range_label}]
+            mf_path = target_dir / f"{stem}.manifest.json"
+            csv_exists = (target_dir / f"{stem}.raw.csv").exists()
+            png_exists = (target_dir / f"{stem}.empty.png").exists()
+            disk_valid = False
+            if mf_path.exists() and (csv_exists or png_exists):
+                try:
+                    existing_mf = json.loads(mf_path.read_text(encoding="utf-8"))
+                    existing_hs8 = sorted(str(c).strip() for c in (existing_mf.get("hs8") or []) if str(c).strip())
+                    disk_valid = existing_hs8 == sorted_hs8
+                except Exception:
+                    disk_valid = False
+            if disk_valid:
+                self.log(f"[skip-checkpoint] {task_key}")
+                return [{"status": "skipped_checkpoint", "monthRange": month_range_label}]
+            self.log(f"[stale-checkpoint] Archived artifact missing for {stem}; re-collecting...")
+            self.completed_keys.discard(task_key)
 
         month_flag = "1"
         probe: dict[str, Any] = {}
@@ -712,11 +766,8 @@ class SerialCustomsCollector:
                 )
                 return left + right
 
-        months_covered = [f"{year}-{m:02d}" for m in range(start_month, end_month + 1)]
-        target_dir = self.archive_dir / str(year) / flow / grouping / batch_key / self.revision
-        stem = f"customs_{DICT_VERSION}_{year}_{start_month:02d}-{end_month:02d}_{flow}_{grouping}_{batch_key}_{self.revision}"
-
         if total == 0:
+            _assert_no_archive_scope_conflict()
             expected_fp = build_zero_query_fingerprint(
                 year=year,
                 start_month=start_month,
@@ -798,6 +849,7 @@ class SerialCustomsCollector:
                         "flow": flow,
                         "grouping": grouping,
                         "batchKey": batch_key,
+                        "requestedHs8": list(hs8),
                         "officialTotal": 0,
                         "queryFingerprint": expected_fp,
                         "officialProbeResponseSha256": zero_ev.get("responseSha256") or sync_res.get("responseSha256"),
@@ -996,6 +1048,7 @@ class SerialCustomsCollector:
                     f"Export verification failed ({month_range_label} {flow}/{grouping} {batch_key}): {exc}"
                 ) from exc
 
+        _assert_no_archive_scope_conflict()
         target_dir.mkdir(parents=True, exist_ok=True)
         csv_path = target_dir / f"{stem}.raw.csv"
         csv_path.write_bytes(raw_bytes)
@@ -1023,6 +1076,7 @@ class SerialCustomsCollector:
                     "flow": flow,
                     "grouping": grouping,
                     "batchKey": batch_key,
+                    "requestedHs8": list(hs8),
                     "officialProbeTotal": total,
                     "selectTableState": state,
                     "savedCsvFilename": csv_path.name,
@@ -1470,6 +1524,61 @@ def resolve_archive_dir(args: argparse.Namespace) -> Path:
     return DEFAULT_ARCHIVE_DIR
 
 
+def resolve_repo_ledger_path(args: argparse.Namespace) -> Path:
+    """Resolve real-time ledger path, isolating --pilot runs so they never overwrite the official ledger."""
+    if getattr(args, "repo_ledger", None):
+        return Path(args.repo_ledger)
+    if getattr(args, "pilot", False):
+        return resolve_archive_dir(args) / "_pilot_ledger.md"
+    return DEFAULT_REPO_LEDGER_PATH
+
+
+def build_collection_batches(
+    args: argparse.Namespace,
+    *,
+    dict_csv_path: Path = DEFAULT_DICT_CSV_PATH,
+) -> tuple[list[dict[str, Any]], dict[str, list[dict[str, Any]]] | None, str]:
+    """Build default and per-grouping batches while applying --groups filter uniformly across all dimensions."""
+    years = [int(y.strip()) for y in str(args.years).split(",") if y.strip()]
+    if getattr(args, "pilot", False):
+        return (
+            [{"batchKey": "PILOT-90181100", "hs8": PILOT_HS8}],
+            None,
+            f"90181100 试点核验（年份：{','.join(str(y) for y in years)}）",
+        )
+
+    wanted = {g.strip().upper() for g in str(getattr(args, "groups", "") or "").split(",") if g.strip()}
+    all_batches = load_official_dict_batches(dict_csv_path=dict_csv_path, group_size=int(args.group_size))
+    batches = [b for b in all_batches if b["batchKey"] in wanted] if wanted else all_batches
+
+    batches_by_grouping: dict[str, list[dict[str, Any]]] | None = None
+    grouping_sizes_raw = str(getattr(args, "grouping_sizes", "") or "").strip()
+    if grouping_sizes_raw:
+        batches_by_grouping = {}
+        size_desc = []
+        for kv in grouping_sizes_raw.split(","):
+            if ":" in kv:
+                gk, gv = kv.split(":", 1)
+                gk_clean = gk.strip()
+                gs_int = int(gv.strip())
+                dim_batches = load_official_dict_batches(dict_csv_path=dict_csv_path, group_size=gs_int)
+                if wanted:
+                    dim_batches = [b for b in dim_batches if b["batchKey"] in wanted]
+                batches_by_grouping[gk_clean] = dim_batches
+                size_desc.append(f"{gk_clean}={gs_int}")
+        filter_suffix = f"，定向组={','.join(sorted(wanted))}" if wanted else ""
+        mode_label = (
+            f"全量 164 码低频串行采集（年份：{','.join(str(y) for y in years)}，"
+            f"自适应分组大小：{','.join(size_desc)}{filter_suffix}）"
+        )
+    else:
+        mode_label = (
+            f"全量 164 码低频串行采集（年份：{','.join(str(y) for y in years)}，"
+            f"分组大小={args.group_size}，批次组数={len(batches)}）"
+        )
+    return batches, batches_by_grouping, mode_label
+
+
 def parse_cli_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Low-frequency compliant serial China Customs collector (browser-harness).")
     p.add_argument("--years", default="2024", help="Comma-separated years, e.g. 2022,2023,2024,2025,2026")
@@ -1491,7 +1600,11 @@ def parse_cli_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--export-cooldown-max", type=float, default=10.5, help="Additional post-export cooldown sec")
     p.add_argument("--cdp-port", type=int, default=9336, help="Standalone Chromium remote debugging port (default 9336)")
     p.add_argument("--use-running-chrome", action="store_true", help="Attach to existing running Chrome instead of dedicated port")
-    p.add_argument("--repo-ledger", default=str(DEFAULT_REPO_LEDGER_PATH), help="Path to repo real-time markdown ledger")
+    p.add_argument(
+        "--repo-ledger",
+        default=None,
+        help="Path to real-time markdown ledger (defaults to isolated _pilot_ledger.md with --pilot, else docs/海关2022_2026实采进度实时台账.md)",
+    )
     p.add_argument("--artifact-ledger", default="", help="Optional path to artifact real-time markdown ledger")
     p.add_argument(
         "--archive-dir",
@@ -1519,38 +1632,16 @@ def main(argv: list[str] | None = None) -> int:
         export_cooldown_range=(args.export_cooldown_min, args.export_cooldown_max),
     )
     archive_dir = resolve_archive_dir(args)
+    repo_ledger_path = resolve_repo_ledger_path(args)
     years = [int(y.strip()) for y in args.years.split(",") if y.strip()]
     flows = [f.strip() for f in args.flows.split(",") if f.strip()]
     groupings = [g.strip() for g in args.groupings.split(",") if g.strip()]
 
-    batches_by_grouping: dict[str, list[dict[str, Any]]] | None = None
-    if args.pilot:
-        batches = [{"batchKey": "PILOT-90181100", "hs8": PILOT_HS8}]
-        mode_label = f"90181100 试点核验（年份：{','.join(str(y) for y in years)}）"
-    else:
-        all_batches = load_official_dict_batches(group_size=args.group_size)
-        if args.groups.strip():
-            wanted = {g.strip().upper() for g in args.groups.split(",") if g.strip()}
-            batches = [b for b in all_batches if b["batchKey"] in wanted]
-        else:
-            batches = all_batches
-        if args.grouping_sizes.strip():
-            batches_by_grouping = {}
-            size_desc = []
-            for kv in args.grouping_sizes.split(","):
-                if ":" in kv:
-                    gk, gv = kv.split(":", 1)
-                    gk_clean = gk.strip()
-                    gs_int = int(gv.strip())
-                    batches_by_grouping[gk_clean] = load_official_dict_batches(group_size=gs_int)
-                    size_desc.append(f"{gk_clean}={gs_int}")
-            mode_label = f"全量 164 码低频串行采集（年份：{','.join(str(y) for y in years)}，自适应分组大小：{','.join(size_desc)}）"
-        else:
-            mode_label = f"全量 164 码低频串行采集（年份：{','.join(str(y) for y in years)}，分组大小={args.group_size}，批次组数={len(batches)}）"
+    batches, batches_by_grouping, mode_label = build_collection_batches(args)
 
     ledger = LiveCollectionLedger(
         archive_dir=archive_dir,
-        repo_ledger_path=Path(args.repo_ledger),
+        repo_ledger_path=repo_ledger_path,
         artifact_ledger_path=Path(args.artifact_ledger) if args.artifact_ledger.strip() else None,
         mode_label=mode_label,
     )

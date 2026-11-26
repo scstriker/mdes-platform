@@ -486,15 +486,14 @@ export function buildTradeSummaryDualTableCsv(rawSnap: TradeOverviewPublished): 
   );
 
   lines.push("");
-  // 表二：对齐样表《Sheet1》8位商品编码金额+第一数量及同比明细
-  lines.push("# 表二：海关8位商品编码进出口额与第一数量同比明细表（对齐样表《Sheet1》）");
+  // 表二：严格保留样表《Sheet1》原 16 列位置（B=HS8商品编码、H=进口额(美元)、N=出口额(美元)），新指标追加于 Q 列之后
+  lines.push("# 表二：海关8位商品编码进出口额与第一数量同比明细表（对齐样表《Sheet1》A–P 16列 + 扩展指标）");
   lines.push(
     [
-      "序号",
       "一级类别",
-      "HS6编码",
       "HS8商品编码",
       "海关商品名称",
+      "计量单位",
       "进口第一数量",
       "进口第一计量单位",
       "进口数量同比(%)",
@@ -510,19 +509,21 @@ export function buildTradeSummaryDualTableCsv(rawSnap: TradeOverviewPublished): 
       "贸易差额(美元)",
       "进口CR3(%)",
       "出口CR3(%)",
+      "HS6编码",
+      "序号",
     ]
       .map(escapeCsvCell)
       .join(","),
   );
 
   snap.hsItems.forEach((it, idx) => {
+    const primaryUnit = it.importQty1.unit ?? it.exportQty1.unit ?? "";
     lines.push(
       [
-        idx + 1,
         it.category,
-        it.hs6,
         it.hs8,
         it.itemName,
+        primaryUnit,
         it.importQty1.value ?? "",
         it.importQty1.unit ?? "",
         fmtPct(it.importQty1YoyPct),
@@ -538,6 +539,8 @@ export function buildTradeSummaryDualTableCsv(rawSnap: TradeOverviewPublished): 
         it.balanceUsd,
         fmtPct(it.importConcentration.cr3),
         fmtPct(it.exportConcentration.cr3),
+        it.hs6,
+        idx + 1,
       ]
         .map(escapeCsvCell)
         .join(","),

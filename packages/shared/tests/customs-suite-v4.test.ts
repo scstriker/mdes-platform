@@ -822,6 +822,17 @@ describe("G6 / AC-018：china_customs_suite.user.js v4.0 医疗器械 164 码字
         manifestObj: Record<string, unknown>;
         months: string[];
       }) => { expectedSourceSha256: string; expectedDetailRowCount: number | null };
+      sealEmptyEvidenceMeta: (pngPath: string) => {
+        metaPath: string;
+        emptyPngSha256: string;
+        width: number;
+        height: number;
+      };
+      fetchImportedBatchesAfterPublish: (
+        client: { sendJson: (url: string) => Promise<{ status: number; json: unknown }> },
+        dictVersion: string,
+        importedBatchIds: string[],
+      ) => Promise<Array<{ batchId: string; publishState: string; supersededBy: string | null }>>;
       verifyPublishOutcome: (args: {
         expectedMonths: string[];
         importedBatchIds?: string[];
@@ -864,7 +875,11 @@ describe("G6 / AC-018：china_customs_suite.user.js v4.0 医疗器械 164 码字
           grouping: "product",
           sha256: fullSha,
           byteLength: fullCsv.byteLength,
-          inspection: { detailRowCount: 2 },
+          inspection: {
+            detailRowCount: 2,
+            returnedHs8: ["90181100", "90181210"],
+            unreturnedHs8: [],
+          },
         }),
       );
 
@@ -872,6 +887,50 @@ describe("G6 / AC-018：china_customs_suite.user.js v4.0 医疗器械 164 码字
       const ok = importerMod.verifyArchiveEntryIntegrity({ mfPath, manifestObj, months: ["2024-01"] });
       expect(ok.expectedSourceSha256).toBe(fullSha);
       expect(ok.expectedDetailRowCount).toBe(2);
+
+      // [R3 P1-3] 清单多出一个未查询的有效税号（CSV 摘要与行数均不变），必须因 HS8 范围失配立即拦截
+      expect(() =>
+        importerMod.verifyArchiveEntryIntegrity({
+          mfPath,
+          manifestObj: { ...manifestObj, hs8: ["90181100", "90181210", "90221200"] },
+          months: ["2024-01"],
+        }),
+      ).toThrow(/清单多余=\[90221200\]/);
+
+      // [R3 P1-3] .meta.json 缺少 HS8 范围凭证且 probeVerifiedZero=true 时必须拒绝上传
+      fs.writeFileSync(
+        metaPath,
+        JSON.stringify({
+          dictVersion: "202601",
+          months: ["2024-01"],
+          flow: "import",
+          grouping: "product",
+          sha256: fullSha,
+          byteLength: fullCsv.byteLength,
+          inspection: { detailRowCount: 2 },
+        }),
+      );
+      expect(() =>
+        importerMod.verifyArchiveEntryIntegrity({ mfPath, manifestObj, months: ["2024-01"] }),
+      ).toThrow(/缺少原查询 HS8 范围凭证/);
+
+      // 恢复合法 meta 后测试 CSV 缺行
+      fs.writeFileSync(
+        metaPath,
+        JSON.stringify({
+          dictVersion: "202601",
+          months: ["2024-01"],
+          flow: "import",
+          grouping: "product",
+          sha256: fullSha,
+          byteLength: fullCsv.byteLength,
+          inspection: {
+            detailRowCount: 2,
+            returnedHs8: ["90181100", "90181210"],
+            unreturnedHs8: [],
+          },
+        }),
+      );
 
       // [P1-C] 若归档后的 CSV 丢了一行（但仍是合法 CSV），必须因 SHA-256 失配立即拦截
       const truncatedCsv = Buffer.from("数据年月,商品编码,商品名称,美元\r\n202401,90181100,心电图记录仪,100\r\n", "utf8");
@@ -935,6 +994,97 @@ describe("G6 / AC-018：china_customs_suite.user.js v4.0 医疗器械 164 码字
         }),
       ).not.toThrow();
 
+      // [R3 P2-2] 查不到任意一个导入 batchId、缺少批次核验数组或查询接口返回非 200 均必须显式报错
+      expect(() =>
+        importerMod.verifyPublishOutcome({
+          expectedMonths: ["2024-01"],
+          importedBatchIds: ["batch-pub", "batch-missing-from-query"],
+          publishResponse: {
+            status: 200,
+            json: { published: false, publishedMonths: ["2024-01"], reconciliationNotes: {} },
+          },
+          batchesAfterPublish: [{ batchId: "batch-pub", publishState: "published", supersededBy: null }],
+        }),
+      ).toThrow(/batch-missing-from-query/);
+
+      expect(() =>
+        importerMod.verifyPublishOutcome({
+          expectedMonths: ["2024-01"],
+          importedBatchIds: ["batch-staged"],
+          publishResponse: {
+            status: 200,
+            json: { published: false, publishedMonths: ["2024-01"], reconciliationNotes: {} },
+          },
+          batchesAfterPublish: null,
+        }),
+      ).toThrow(/缺少发布后批次状态核验结果/);
+
+      await expect(
+        importerMod.fetchImportedBatchesAfterPublish(
+          { sendJson: async () => ({ status: 500, json: { error: "boom" } }) },
+          "202601",
+          ["b1"],
+        ),
+      ).rejects.toThrow(/查询导入批次发布终态失败/);
+
+      // [R3 P2-1] 手动零结果 PNG 经 sealEmptyEvidenceMeta 封签摘要后可直接通过导入器核验，且 HS8 不符时仍被 P1-3 拦截
+      const emptyStem = "customs_202601_2024_01-01_export_product_PILOT-90181100_r01";
+      const emptyMfPath = path.join(tmpDir, `${emptyStem}.manifest.json`);
+      const emptyMetaPath = path.join(tmpDir, `${emptyStem}.meta.json`);
+      const emptyPngPath = path.join(tmpDir, `${emptyStem}.empty.png`);
+      // 合法 32x32 PNG 最小头
+      const validPngBuf = Buffer.concat([
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+        Buffer.from([0x00, 0x00, 0x00, 0x0d]),
+        Buffer.from("IHDR", "ascii"),
+        Buffer.from([0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 0x20, 8, 6, 0, 0, 0]),
+        Buffer.from([0x00, 0x00, 0x00, 0x00]),
+      ]);
+      const emptyManifest = {
+        dictVersion: "202601",
+        months: ["2024-01"],
+        flow: "export",
+        currency: "USD",
+        grouping: "product",
+        hs8: ["90181100"],
+        emptyHs8: ["90181100"],
+        probeVerifiedZero: true,
+      };
+      fs.writeFileSync(emptyMfPath, JSON.stringify(emptyManifest));
+      fs.writeFileSync(emptyPngPath, validPngBuf);
+      fs.writeFileSync(
+        emptyMetaPath,
+        JSON.stringify({
+          dictVersion: "202601",
+          months: ["2024-01"],
+          flow: "export",
+          grouping: "product",
+          queryFingerprint: "202601|2024-01..2024-01|mf=1|export|product|st=2|hs8=90181100",
+          officialTotal: 0,
+        }),
+      );
+      // 封签前缺 emptyPngSha256 被拒绝
+      expect(() =>
+        importerMod.verifyArchiveEntryIntegrity({ mfPath: emptyMfPath, manifestObj: emptyManifest, months: ["2024-01"] }),
+      ).toThrow(/缺少 emptyPngSha256/);
+      // 封签后通过核验
+      const sealed = importerMod.sealEmptyEvidenceMeta(emptyPngPath);
+      expect(sealed.emptyPngSha256).toMatch(/^[0-9a-f]{64}$/);
+      const okEmpty = importerMod.verifyArchiveEntryIntegrity({
+        mfPath: emptyMfPath,
+        manifestObj: emptyManifest,
+        months: ["2024-01"],
+      });
+      expect(okEmpty.expectedSourceSha256).toBe(sealed.emptyPngSha256);
+      // 若清单多出未查询税号 90181210，与 queryFingerprint 不一致必须被 P1-3 拦截
+      expect(() =>
+        importerMod.verifyArchiveEntryIntegrity({
+          mfPath: emptyMfPath,
+          manifestObj: { ...emptyManifest, hs8: ["90181100", "90181210"], emptyHs8: ["90181100", "90181210"] },
+          months: ["2024-01"],
+        }),
+      ).toThrow(/清单多余=\[90181210\]/);
+
       // [P2-7] 字典摘要在 LF 与 CRLF 换行下均精确匹配 EXPECTED_DICT_SHA256
       const manifestToolHref = pathToFileURL(path.resolve(here, "../../../scripts/trade-collection-manifest.mjs")).href;
       const manifestTool = (await import(manifestToolHref)) as {
@@ -950,6 +1100,214 @@ describe("G6 / AC-018：china_customs_suite.user.js v4.0 医疗器械 164 码字
       expect(crlfDict.hs8Count).toBe(164);
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("[R3 P2-1] 油猴手动采集遇到零结果时自动生成 .empty.png 与配套 emptyPngSha256 / requestedHs8，可直接被归档导入器核验通过", async () => {
+    const importerHref = pathToFileURL(path.resolve(here, "../../../scripts/import-customs-archive.mjs")).href;
+    const importerMod = (await import(importerHref)) as {
+      verifyArchiveEntryIntegrity: (entry: {
+        mfPath: string;
+        manifestObj: Record<string, unknown>;
+        months: string[];
+      }) => { expectedSourceSha256: string };
+    };
+
+    // 合法 32x32 PNG base64（供模拟浏览器 <canvas>.toDataURL("image/png") 返回）
+    const fakePngBuf = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      Buffer.from([0x00, 0x00, 0x00, 0x0d]),
+      Buffer.from("IHDR", "ascii"),
+      Buffer.from([0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 0x20, 8, 6, 0, 0, 0]),
+      Buffer.from([0x00, 0x00, 0x00, 0x00]),
+    ]);
+    const fakePngDataUrl = `data:image/png;base64,${fakePngBuf.toString("base64")}`;
+
+    for (const scriptPath of [TOP_SUITE_PATH, COLLECTOR_COPY_PATH]) {
+      const code = fs.readFileSync(scriptPath, "utf8");
+      const downloads: Array<{ filename: string; raw: Buffer }> = [];
+      const blobToBuf = new Map<string, Buffer>();
+      let blobSeq = 0;
+
+      const elementsById = new Map<string, Record<string, unknown>>();
+      const makeEl = (tag: string): Record<string, unknown> => {
+        const listeners = new Map<string, Array<(e?: unknown) => unknown>>();
+        const classSet = new Set<string>();
+        const attrs = new Map<string, string>();
+        let innerHtmlVal = "";
+        const el: Record<string, unknown> = {
+          tagName: tag.toUpperCase(),
+          id: "",
+          value: "",
+          disabled: false,
+          style: {},
+          dataset: {},
+          width: 0,
+          height: 0,
+          setAttribute(k: string, v: string) {
+            attrs.set(k, v);
+          },
+          getAttribute(k: string) {
+            return attrs.get(k) ?? null;
+          },
+          getContext() {
+            if (tag.toLowerCase() !== "canvas") return null;
+            return {
+              fillStyle: "",
+              strokeStyle: "",
+              lineWidth: 1,
+              font: "",
+              fillRect() {},
+              strokeRect() {},
+              fillText() {},
+            };
+          },
+          toDataURL() {
+            return fakePngDataUrl;
+          },
+          classList: {
+            toggle(c: string) {
+              if (classSet.has(c)) classSet.delete(c);
+              else classSet.add(c);
+            },
+            contains(c: string) {
+              return classSet.has(c);
+            },
+          },
+          children: [] as unknown[],
+          appendChild(child: Record<string, unknown>) {
+            (this.children as unknown[]).push(child);
+            if (child.id) elementsById.set(String(child.id), child);
+            return child;
+          },
+          remove() {
+            if (this.id) elementsById.delete(String(this.id));
+          },
+          addEventListener(ev: string, fn: (e?: unknown) => unknown) {
+            const arr = listeners.get(ev) ?? [];
+            arr.push(fn);
+            listeners.set(ev, arr);
+          },
+          async click() {
+            if (tag === "a" && typeof this.download === "string" && typeof this.href === "string") {
+              downloads.push({ filename: this.download, raw: blobToBuf.get(this.href) ?? Buffer.alloc(0) });
+            }
+            for (const fn of listeners.get("click") ?? []) {
+              await fn({ target: this });
+            }
+          },
+        };
+        Object.defineProperty(el, "innerHTML", {
+          get: () => innerHtmlVal,
+          set: (v: string) => {
+            innerHtmlVal = v;
+            const idRegex = /id="([^"]+)"/g;
+            for (const m of v.matchAll(idRegex)) {
+              if (!elementsById.has(m[1])) {
+                const sub = makeEl("div");
+                sub.id = m[1];
+                if (m[1] === "inp-year") sub.value = "2024";
+                if (m[1] === "inp-m-start") sub.value = "1";
+                if (m[1] === "inp-m-end") sub.value = "2";
+                if (m[1] === "sel-month-flag") sub.value = "1";
+                if (m[1] === "sel-ietype") sub.value = "export";
+                if (m[1] === "sel-grouping") sub.value = "product";
+                if (m[1] === "sel-batch") sub.value = "PILOT";
+                elementsById.set(m[1], sub);
+              }
+            }
+          },
+        });
+        return el;
+      };
+
+      const fakeDoc = {
+        readyState: "complete",
+        head: makeEl("head"),
+        body: makeEl("body"),
+        createElement: (tag: string) => makeEl(tag),
+        getElementById: (id: string) => elementsById.get(id) ?? null,
+        querySelector: () => null,
+        querySelectorAll: () => [],
+      };
+
+      class FakeBlob {
+        buf: Buffer;
+        constructor(parts: unknown[]) {
+          this.buf = Buffer.concat(
+            parts.map((p) => (p instanceof Uint8Array ? Buffer.from(p) : Buffer.from(String(p), "utf8"))),
+          );
+        }
+      }
+
+      const fakeWindow: Record<string, unknown> = {};
+      fakeWindow.top = fakeWindow;
+      fakeWindow.self = fakeWindow;
+
+      const sandbox: Record<string, unknown> = {
+        window: fakeWindow,
+        document: fakeDoc,
+        location: { href: "http://stats.customs.gov.cn/" },
+        Blob: FakeBlob,
+        URL: {
+          createObjectURL: (b: FakeBlob) => {
+            const key = `blob:zero/${++blobSeq}`;
+            blobToBuf.set(key, b.buf);
+            return key;
+          },
+          revokeObjectURL: () => {},
+        },
+        TextEncoder,
+        TextDecoder,
+        URLSearchParams,
+        Uint8Array,
+        Uint32Array,
+        DataView,
+        ArrayBuffer,
+        crypto: globalThis.crypto,
+        Buffer,
+        alert: () => {},
+        setTimeout: (fn: () => void) => {
+          fn();
+          return 0;
+        },
+        clearTimeout,
+        console,
+        btoa: (str: string) => Buffer.from(str, "binary").toString("base64"),
+        atob: (b64: string) => Buffer.from(b64, "base64").toString("binary"),
+        fetch: async () => new Response('<input type="hidden" id="totalSize" value="0">暂无数据', { status: 200 }),
+      };
+      sandbox.globalThis = sandbox;
+      vm.createContext(sandbox);
+      vm.runInContext(code, sandbox, { filename: path.basename(scriptPath) });
+      await new Promise((resolve) => setTimeout(resolve, 25));
+
+      const startBtn = elementsById.get("btn-start-suite") as { click: () => Promise<void> };
+      await startBtn.click();
+      await new Promise((resolve) => setTimeout(resolve, 25));
+
+      const pngDl = downloads.find((d) => d.filename.endsWith(".empty.png"));
+      const mfDl = downloads.find((d) => d.filename.endsWith(".manifest.json"));
+      const metaDl = downloads.find((d) => d.filename.endsWith(".meta.json"));
+      expect(pngDl).toBeDefined();
+      expect(mfDl).toBeDefined();
+      expect(metaDl).toBeDefined();
+
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "mdes-manual-zero-"));
+      try {
+        fs.writeFileSync(path.join(tmpDir, pngDl!.filename), pngDl!.raw);
+        fs.writeFileSync(path.join(tmpDir, mfDl!.filename), mfDl!.raw);
+        fs.writeFileSync(path.join(tmpDir, metaDl!.filename), metaDl!.raw);
+        const manifestObj = JSON.parse(mfDl!.raw.toString("utf8")) as Record<string, unknown>;
+        const verified = importerMod.verifyArchiveEntryIntegrity({
+          mfPath: path.join(tmpDir, mfDl!.filename),
+          manifestObj,
+          months: manifestObj.months as string[],
+        });
+        expect(verified.expectedSourceSha256).toMatch(/^[0-9a-f]{64}$/);
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
     }
   });
 });

@@ -613,6 +613,94 @@ class SerialCollectorTests(unittest.TestCase):
             # 2026 被跳过后不应触发无效跨年冷却
             self.assertFalse(any(s >= 45.0 for s in sleeps))
 
+    def test_refuses_to_overwrite_existing_archive_when_group_size_changes_hs8_scope(self):
+        # [R3 P1-2] 调整 --group-size 导致 G01 税号范围变化时，拒绝覆盖原归档且不发多余请求；且切回原分组时校验磁盘文件存在
+        counts = {(2024, 1, 12, "import", "product"): 2}
+        transport = FakeHarnessTransport(counts)
+        policy = collector.PoliteRatePolicy(min_delay_sec=3.5, max_delay_sec=4.0, sleep_fn=lambda _: None)
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+            runner = collector.SerialCustomsCollector(transport=transport, archive_dir=out_dir, rate_policy=policy)
+
+            first = runner.collect_task(
+                year=2024,
+                start_month=1,
+                end_month=12,
+                flow="import",
+                grouping="product",
+                batch_key="G01",
+                hs8=["90181100", "90181210"],
+            )
+            self.assertEqual(first[0]["status"], "received")
+            csv_path = Path(first[0]["csvPath"])
+            orig_csv_bytes = csv_path.read_bytes()
+            orig_mf_text = csv_path.with_name(csv_path.name.replace(".raw.csv", ".manifest.json")).read_text("utf-8")
+            calls_after_first = len(transport.calls)
+
+            # 改大分组后用同一 G01 采集不同税号集合 -> 必须在发请求前即拒绝覆盖，原文件分毫不改
+            with self.assertRaises(collector.CustomsArchiveConflictError):
+                runner.collect_task(
+                    year=2024,
+                    start_month=1,
+                    end_month=12,
+                    flow="import",
+                    grouping="product",
+                    batch_key="G01",
+                    hs8=["90181100", "90181210", "90221200"],
+                )
+            self.assertEqual(len(transport.calls), calls_after_first)
+            self.assertEqual(csv_path.read_bytes(), orig_csv_bytes)
+            self.assertEqual(
+                csv_path.with_name(csv_path.name.replace(".raw.csv", ".manifest.json")).read_text("utf-8"),
+                orig_mf_text,
+            )
+
+            # 若磁盘原件被意外删掉，切回原分组时绝不盲信旧断点而跳过，会重新采集
+            csv_path.unlink()
+            redone = runner.collect_task(
+                year=2024,
+                start_month=1,
+                end_month=12,
+                flow="import",
+                grouping="product",
+                batch_key="G01",
+                hs8=["90181100", "90181210"],
+            )
+            self.assertEqual(redone[0]["status"], "received")
+            self.assertTrue(csv_path.exists())
+
+    def test_pilot_mode_isolates_repo_ledger_path_from_official_ledger(self):
+        # [R3 P2-3] --pilot 默认使用独立台账路径，绝不覆盖正式 docs/海关2022_2026实采进度实时台账.md
+        pilot_args = collector.parse_cli_args(["--pilot", "--years", "2024"])
+        full_args = collector.parse_cli_args(["--years", "2024"])
+        custom_pilot = collector.parse_cli_args(["--pilot", "--archive-dir", "/tmp/p-arch"])
+        explicit_ledger = collector.parse_cli_args(["--pilot", "--repo-ledger", "/tmp/custom.md"])
+
+        self.assertEqual(collector.resolve_repo_ledger_path(pilot_args), collector.DEFAULT_PILOT_ARCHIVE_DIR / "_pilot_ledger.md")
+        self.assertNotEqual(collector.resolve_repo_ledger_path(pilot_args), collector.DEFAULT_REPO_LEDGER_PATH)
+        self.assertEqual(collector.resolve_repo_ledger_path(full_args), collector.DEFAULT_REPO_LEDGER_PATH)
+        self.assertEqual(collector.resolve_repo_ledger_path(custom_pilot), Path("/tmp/p-arch/_pilot_ledger.md"))
+        self.assertEqual(collector.resolve_repo_ledger_path(explicit_ledger), Path("/tmp/custom.md"))
+
+    def test_groups_filter_applies_consistently_with_grouping_sizes(self):
+        # [R3 P2-6] 同时传入 --groups G01 与 --grouping-sizes 时，各自定义维度的批次列表均只保留 G01
+        args = collector.parse_cli_args(
+            [
+                "--years",
+                "2024",
+                "--groups",
+                "G01",
+                "--grouping-sizes",
+                "product:164,regime:41,region:28,partner:20",
+            ]
+        )
+        batches, batches_by_grouping, _ = collector.build_collection_batches(args)
+        self.assertEqual([b["batchKey"] for b in batches], ["G01"])
+        self.assertIsNotNone(batches_by_grouping)
+        assert batches_by_grouping is not None
+        for dim in ("product", "regime", "region", "partner"):
+            self.assertEqual([b["batchKey"] for b in batches_by_grouping[dim]], ["G01"])
+
 
 if __name__ == "__main__":
     unittest.main()
