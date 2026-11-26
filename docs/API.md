@@ -192,7 +192,7 @@ Returns：
 
 有效请求返回 HTTP 200，包含 `batchId`、`sourceSha256`、`rowCount`、`coverage` 和 `status`。有 CSV 时 `sourceSha256` 为 CSV 原件摘要，附加证据摘要随批次保存。`coverage` 使用三个 HS8 数组：`received`、`confirmedEmpty`、`missing`。批次已接收而全月尚未齐备时为 `staged`，整月成功发布后为 `published`。相同范围、内容与覆盖声明的重传返回原批次；重传历史批次保留当前已发布版本。已发布范围收到修订时，按该覆盖集合整体替换。通用观测值 CSV 沿用原入口。
 
-清单、编码或单位不符合约定时返回 HTTP 400，标出字段或 CSV 行号；修订与既有批次范围部分重叠时返回 HTTP 409 并指出冲突覆盖范围。校验失败时保留当前已发布结果。本期仅在本地管理环境启用写入。
+清单、编码或单位不符合约定时返回 HTTP 400，标出字段或 CSV 行号；修订与既有批次范围部分重叠时返回 HTTP 409 并指出冲突覆盖范围。校验失败时保留当前已发布结果。本期写入路由（`POST /api/trade/import`、`POST /api/trade/import-bulk`、`POST /api/trade/publish`）默认关闭，公开部署返回 HTTP 403 `TRADE_WRITE_DISABLED`；仅在受控本地管理环境显式开启 `ENABLE_TRADE_WRITE=1`（且为本机回环地址）或配置 `TRADE_WRITE_TOKEN` 并携带有效管理令牌时允许写入。`GET /api/trade/batches` 支持 `batchIds` 逗号分隔精确批量回查终态。
 
 ### POST /api/trade/import-bulk
 

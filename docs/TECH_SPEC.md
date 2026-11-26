@@ -60,6 +60,8 @@ Agent 默认按 TechStack：TypeScript + Pi Agent，经 HTTP/MCP 调本 API；**
 |---|---|
 | `DB` | Worker 的 D1 绑定（`apps/api/wrangler.toml`） |
 | `IMPORT_MAX_ROWS` | 默认 5000 |
+| `ENABLE_TRADE_WRITE` | 默认关闭（`wrangler.toml` 不启用），仅受控本地管理环境通过 `--var ENABLE_TRADE_WRITE:1` 显式开启；公开部署未开启时写路由一律返回 `403 TRADE_WRITE_DISABLED` |
+| `TRADE_WRITE_TOKEN` | 可选远端管理写令牌（Secret）；配置后所有贸易写路由均须携带匹配的 `X-Admin-Token` 或 `Authorization: Bearer` 请求头 |
 
 ## Existing Architecture
 

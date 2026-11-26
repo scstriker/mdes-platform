@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "wrangler dev --port 8787 --ip 127.0.0.1",
+    "dev": "wrangler dev --port 8787 --ip 127.0.0.1 --var ENABLE_TRADE_WRITE:1",
     "db:migrate": "wrangler d1 migrations apply mdes --local",
     "seed": "tsx src/seed.ts",
     "test": "vitest run",

@@ -61,6 +61,8 @@ const MESSAGES: Record<ErrorCode, (p: ApiErrorParams) => string> = {
     `本次请求的 HS8 范围与既有批次 ${text(p.existingBatchId, "已有批次")} 部分重叠（原范围：${text(p.existingHs8, "既有集合")}），请按原覆盖集合完整重采后导入`,
   TRADE_PERIOD_INVALID: (p) =>
     `统计期间「${text(p.period, "输入值")}」格式无效，支持月度（2024-12）、季度（2024-Q4）、年度（2024）或年内累计（2024-YTD-09）`,
+  TRADE_WRITE_DISABLED: () =>
+    "当前环境未启用海关原件写入与发布权限（仅限受控本地管理环境或携带有效管理令牌启用）",
   NOT_FOUND: (p) =>
     p.id && p.resource !== "route" ? `未找到 ${p.id}，请确认编号是否正确` : "请求的内容不存在，请返回上一页重试",
   INTERNAL_ERROR: () => "服务器内部错误，请稍后重试",

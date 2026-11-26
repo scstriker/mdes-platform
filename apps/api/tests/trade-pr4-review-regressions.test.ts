@@ -935,4 +935,162 @@ describe("PR #4 独立审查后端缺陷回归验证（P1-1 / P1-2 / P1-5 / P2-7
     expect(singleBody.coverage.received).toEqual([HS_ECG]);
     expect(singleBody.rowCount).toBe(1);
   });
+
+  it("[R3 P1-1] 公开部署默认关闭贸易写路由（403 TRADE_WRITE_DISABLED），仅受控本地环境或有效管理令牌可写", async () => {
+    // (a) 模拟按 wrangler.toml 默认部署（ENABLE_TRADE_WRITE 未开启、未设 TRADE_WRITE_TOKEN）
+    const pubHarness = await startHarness({ enableTradeWrite: false });
+    try {
+      const formSingle = new FormData();
+      formSingle.append(
+        "manifest",
+        JSON.stringify({
+          dictVersion: "202601",
+          month: "2024-01",
+          flow: "import",
+          currency: "USD",
+          grouping: "product",
+          hs8: [HS_ECG],
+          emptyHs8: [],
+        }),
+      );
+      formSingle.append("file", new File([buildSingleCsv("product", HS_ECG, 100)], "f.csv", { type: "text/csv" }));
+
+      const r1 = await pubHarness.request("/api/trade/import", { method: "POST", body: formSingle });
+      expect(r1.status).toBe(403);
+      expect(((await r1.json()) as { error: { code: string } }).error.code).toBe("TRADE_WRITE_DISABLED");
+
+      const r2 = await pubHarness.request(
+        "/api/trade/import-bulk",
+        buildBulkMultipart({
+          manifest: {
+            dictVersion: "202601",
+            months: ["2024-01"],
+            flow: "import",
+            currency: "USD",
+            grouping: "product",
+            hs8: [HS_ECG],
+            probeVerifiedZero: true,
+          },
+          csvText: buildMultiMonthCsv("product", [{ ym: "202401", hs8: HS_ECG, name: "心电图记录仪", usd: 100 }]),
+        }),
+      );
+      expect(r2.status).toBe(403);
+      expect(((await r2.json()) as { error: { code: string } }).error.code).toBe("TRADE_WRITE_DISABLED");
+
+      const r3 = await pubHarness.post("/api/trade/publish", { dictVersion: "202601" });
+      expect(r3.status).toBe(403);
+      expect(((await r3.json()) as { error: { code: string } }).error.code).toBe("TRADE_WRITE_DISABLED");
+
+      // 只读查询接口依然正常对外开放
+      expect((await pubHarness.request("/api/trade/overview")).status).toBe(200);
+      expect((await pubHarness.request("/api/trade/periods")).status).toBe(200);
+      expect((await pubHarness.request("/api/trade/batches")).status).toBe(200);
+      expect((await pubHarness.request("/api/trade/coverage?year=2024")).status).toBe(200);
+    } finally {
+      await pubHarness.dispose();
+    }
+
+    // (b) 即使开启 ENABLE_TRADE_WRITE=1 但未配置 TRADE_WRITE_TOKEN，非回环公开域名仍被拦截 403
+    const nonLoopbackRes = await h.request("https://mdes-api.example.workers.dev/api/trade/publish", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ dictVersion: "202601" }),
+    });
+    expect(nonLoopbackRes.status).toBe(403);
+    expect(((await nonLoopbackRes.json()) as { error: { code: string } }).error.code).toBe("TRADE_WRITE_DISABLED");
+
+    // (c) 配置 TRADE_WRITE_TOKEN 后，缺令牌或错误令牌返回 403，合法 X-Admin-Token / Bearer 放行
+    const tokenHarness = await startHarness({ enableTradeWrite: true, tradeWriteToken: "mdes-secret-write-token" });
+    try {
+      const noTok = await tokenHarness.request("https://mdes-api.example.workers.dev/api/trade/publish", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ dictVersion: "202601" }),
+      });
+      expect(noTok.status).toBe(403);
+
+      const badTok = await tokenHarness.request("https://mdes-api.example.workers.dev/api/trade/publish", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-admin-token": "wrong-token" },
+        body: JSON.stringify({ dictVersion: "202601" }),
+      });
+      expect(badTok.status).toBe(403);
+
+      const goodHeader = await tokenHarness.request("https://mdes-api.example.workers.dev/api/trade/publish", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-admin-token": "mdes-secret-write-token" },
+        body: JSON.stringify({ dictVersion: "202601" }),
+      });
+      expect(goodHeader.status).toBe(200);
+
+      const goodBearer = await tokenHarness.request("https://mdes-api.example.workers.dev/api/trade/publish", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: "Bearer mdes-secret-write-token",
+        },
+        body: JSON.stringify({ dictVersion: "202601" }),
+      });
+      expect(goodBearer.status).toBe(200);
+    } finally {
+      await tokenHarness.dispose();
+    }
+  }, 30_000);
+
+  it("[R3 P2-2 / P2-4 / P2-5] batchIds 精确批量回查终态、年度样表 Sheet1 B/H/N 列精确对齐、单月修订与多年度发布结果一致", async () => {
+    const dictVer = "PR4-R3-COMBINED";
+    await h.sql([
+      `INSERT INTO trade_dict_meta (dict_version, source_filename, source_sha256, hs8_count, hs6_count, category_count, scope_mode)
+       VALUES ('${dictVer}', 'r3.csv', '${"7".repeat(64)}', 1, 1, 1, 'pilot')`,
+      `INSERT INTO trade_hs_dict (dict_version, hs8, hs6, item_name, category_id, category_name, category_order, seq_no)
+       VALUES ('${dictVer}', '${HS_ECG}', '901811', '心电图记录仪', 'cat-01', '医用诊断装备', 1, 1)`,
+    ]);
+
+    // 先发布 2022-01、2023-01、2024-01（多年度数据）
+    const r2022 = await importSingleMonthAllCombos(h, dictVer, "2022-01", 1000, 2000);
+    const r2023 = await importSingleMonthAllCombos(h, dictVer, "2023-01", 1200, 2400);
+    const r2024 = await importSingleMonthAllCombos(h, dictVer, "2024-01", 1500, 3000);
+    expect(r2024.status).toBe("published");
+
+    // [P2-2] GET /api/trade/batches?batchIds=... 按 ID 精确回查全部状态（不受 LIMIT 100 截断）
+    const exactRes = await h.request(
+      `/api/trade/batches?dictVersion=${dictVer}&batchIds=${[r2022.batchId, r2023.batchId, r2024.batchId].join(",")}`,
+    );
+    expect(exactRes.status).toBe(200);
+    const exactJson = (await exactRes.json()) as { items: Array<{ batchId: string; publishState: string }> };
+    expect(exactJson.items.map((x) => x.batchId).sort()).toEqual([r2022.batchId, r2023.batchId, r2024.batchId].sort());
+    expect(exactJson.items.every((x) => x.publishState === "published")).toBe(true);
+
+    // [P2-5] 单月修订 2024-01（按 D1 product 聚合 annualTrend + 仅加载目标年份明细），核对跨年趋势与快照金额精准更新
+    const rev2024 = await importSingleMonthAllCombos(h, dictVer, "2024-01", 2000, 5000);
+    expect(rev2024.status).toBe("published");
+    const ov2024 = (await (await h.request(`/api/trade/overview?dictVersion=${dictVer}&period=2024-01`)).json()) as TradeOverviewPublished;
+    expect(ov2024.totals.importUsd).toBe(2000);
+    expect(ov2024.totals.exportUsd).toBe(5000);
+    expect(ov2024.annualTrend.map((p) => [p.year, p.importUsd, p.exportUsd])).toEqual([
+      [2022, 1000, 2000],
+      [2023, 1200, 2400],
+      [2024, 2000, 5000],
+    ]);
+
+    // [P2-4] 核对年度汇总双表 CSV 表二严格对齐样表 Sheet1 原 16 列位置：B(1)=HS8、G(6)=进口数量同比、H(7)=进口额(美元)、M(12)=出口数量同比、N(13)=出口额(美元)
+    const dualCsv = buildTradeSummaryDualTableCsv(ov2024);
+    const csvLines = dualCsv.replace(/^\uFEFF/, "").split(/\r?\n/);
+    const sheet1TitleIdx = csvLines.findIndex((l) => l.startsWith("# 表二："));
+    expect(sheet1TitleIdx).toBeGreaterThan(0);
+    const headerCols = csvLines[sheet1TitleIdx + 1].split(",");
+    const dataCols = csvLines[sheet1TitleIdx + 2].split(",");
+
+    expect(headerCols[1]).toBe("HS8商品编码"); // Col B
+    expect(headerCols[6]).toBe("进口数量同比(%)"); // Col G
+    expect(headerCols[7]).toBe("进口额(美元)"); // Col H
+    expect(headerCols[12]).toBe("出口数量同比(%)"); // Col M
+    expect(headerCols[13]).toBe("出口额(美元)"); // Col N
+    expect(headerCols[16]).toBe("贸易差额(美元)"); // Col Q (追加扩展列)
+
+    expect(dataCols[1]).toBe(HS_ECG); // Col B = HS8
+    expect(Number(dataCols[7])).toBe(2000); // Col H = 进口额(美元)
+    expect(Number(dataCols[13])).toBe(5000); // Col N = 出口额(美元)
+    expect(Number(dataCols[16])).toBe(3000); // Col Q = 顺差
+  }, 30_000);
 });

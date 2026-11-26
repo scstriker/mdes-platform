@@ -1859,85 +1859,17 @@ async function attemptPublishAllReadyOnce(
   }
   const targetPeriods = [...targetPeriodsSet].sort();
 
-  const neededMonths = new Set<string>(publishedMonths);
-  for (const tp of targetPeriods) {
-    const parsed = parseTradePeriod(tp)!;
-    for (const m of parsed.months) neededMonths.add(m);
-    const prior = parseTradePeriod(parsed.priorPeriod)!;
-    if (prior.months.every((m) => publishedMonthSet.has(m))) {
-      for (const m of prior.months) neededMonths.add(m);
-    }
-    for (let mm = 1; mm <= 12; mm++) {
-      const mStr = `${parsed.year}-${String(mm).padStart(2, "0")}`;
-      if (publishedMonthSet.has(mStr)) {
-        neededMonths.add(mStr);
-        const priorMStr = `${parsed.year - 1}-${String(mm).padStart(2, "0")}`;
-        if (publishedMonthSet.has(priorMStr)) neededMonths.add(priorMStr);
-      }
-    }
-  }
-
-  const neededBatchIds: string[] = [];
-  for (const m of neededMonths) {
-    for (const bid of activeBatchesByMonth.get(m) ?? []) {
-      neededBatchIds.push(bid);
-    }
-  }
-
-  const batchMetaMap = await queryBatchesByIds(db, neededBatchIds);
-  const allNeededFacts = await queryFactsByBatchIds(db, neededBatchIds);
-  const factsByMonth = new Map<string, FactDbRow[]>();
-  for (const f of allNeededFacts) {
-    const list = factsByMonth.get(f.month) ?? [];
-    list.push(f);
-    factsByMonth.set(f.month, list);
-  }
-
-  for (const m of publishedMonths) {
-    const yr = Number(m.slice(0, 4));
-    await getDict(yr);
-    await getDict(yr - 1);
-  }
-  const annualTrend = buildAnnualTrend({
+  const { annualTrend, snapshotsToWrite, derivedObsRows } = await buildSnapshotsForTargetPeriods(db, {
+    dictVersion,
+    releaseId,
+    availablePeriods,
+    publishedMonths,
     publishedMonthSet,
-    factsByMonth,
-    dictByYear: dictCache,
+    activeBatchesByMonth,
+    targetPeriods,
+    dictCache,
+    getDict,
   });
-
-  const snapshotsToWrite: Array<{ period: string; payload: TradeOverviewPublished }> = [];
-  const derivedObsRows: Array<{
-    indicator_id: string;
-    period: string;
-    geo: string;
-    dims: string;
-    value_num: number | null;
-    value_text: string | null;
-    unit: string;
-    object_ref: string;
-  }> = [];
-
-  for (const tp of targetPeriods) {
-    const parsed = parseTradePeriod(tp)!;
-    const yDict = await getDict(parsed.year);
-    const prevYDict = await getDict(parsed.year - 1);
-    const payload = buildPeriodSnapshot({
-      dictVersion,
-      period: tp,
-      releaseId,
-      availablePeriods,
-      annualTrend,
-      publishedMonthSet,
-      activeBatchesByMonth,
-      batchMetaMap,
-      factsByMonth,
-      yearDict: yDict,
-      priorYearDict: prevYDict,
-    });
-    snapshotsToWrite.push({ period: tp, payload });
-    for (const obsRow of buildDerivedObservations(payload)) {
-      derivedObsRows.push(obsRow);
-    }
-  }
 
   const headerStmts: D1PreparedStatement[] = [
     db
@@ -2064,8 +1996,55 @@ async function queryFactComboSumsByBatchIds(
   return byMonth;
 }
 
-async function queryFactsByBatchIds(db: D1Database, batchIds: readonly string[]): Promise<FactDbRow[]> {
+type ProductMonthSumRow = {
+  month: string;
+  flow: TradeFlow;
+  hs8: string;
+  sum_scaled_str: string;
+};
+
+async function queryAnnualProductSumsByBatchIds(
+  db: D1Database,
+  productBatchIds: readonly string[],
+): Promise<Map<string, ProductMonthSumRow[]>> {
+  const byMonth = new Map<string, ProductMonthSumRow[]>();
+  for (let i = 0; i < productBatchIds.length; i += 64) {
+    const slice = productBatchIds.slice(i, i + 64);
+    const { results } = await db
+      .prepare(
+        `SELECT month, flow, hs8, CAST(SUM(usd_scaled) AS TEXT) AS sum_scaled_str
+         FROM trade_fact
+         WHERE batch_id IN (SELECT value FROM json_each(?1))
+           AND grouping = 'product'
+         GROUP BY month, flow, hs8`,
+      )
+      .bind(JSON.stringify(slice))
+      .all<ProductMonthSumRow>();
+    for (let k = 0; k < results.length; k++) {
+      const r = results[k]!;
+      let list = byMonth.get(r.month);
+      if (!list) {
+        list = [];
+        byMonth.set(r.month, list);
+      }
+      list.push(r);
+    }
+  }
+  return byMonth;
+}
+
+async function queryFactsByBatchIdsFiltered(
+  db: D1Database,
+  batchIds: readonly string[],
+  mode: "all" | "product" | "detail",
+): Promise<FactDbRow[]> {
   const out: FactDbRow[] = [];
+  const groupingClause =
+    mode === "product"
+      ? "AND grouping = 'product'"
+      : mode === "detail"
+        ? "AND grouping != 'product'"
+        : "";
   for (let i = 0; i < batchIds.length; i += FACT_BATCH_QUERY_CHUNK) {
     const slice = batchIds.slice(i, i + FACT_BATCH_QUERY_CHUNK);
     const sliceJson = JSON.stringify(slice);
@@ -2077,6 +2056,7 @@ async function queryFactsByBatchIds(db: D1Database, batchIds: readonly string[])
                   CAST(usd_scaled AS TEXT) AS usd_scaled_str, qty1, unit1, qty2, unit2
            FROM trade_fact
            WHERE batch_id IN (SELECT value FROM json_each(?1))
+             ${groupingClause}
            ORDER BY rowid ASC
            LIMIT ?2 OFFSET ?3`,
         )
@@ -2092,6 +2072,172 @@ async function queryFactsByBatchIds(db: D1Database, batchIds: readonly string[])
     }
   }
   return out;
+}
+
+/**
+ * 内存受控的多期间快照构造器：
+ * 1) 跨年趋势 annualTrend 在 D1 中仅按 grouping='product' 聚合 (month, flow, hs8)，绝不拉取非目标年份明细；
+ * 2) 受影响期间按自然年分片构建：每年仅加载该年及上年 product 行与该年目标月份的 partner/regime/region 明细，
+ *    完成当年快照后立即释放明细引用，避免单月修订或 5 年大批量发布时全量明细同时驻留堆内存。
+ */
+async function buildSnapshotsForTargetPeriods(
+  db: D1Database,
+  ctx: {
+    dictVersion: string;
+    releaseId: string;
+    availablePeriods: string[];
+    publishedMonths: string[];
+    publishedMonthSet: ReadonlySet<string>;
+    activeBatchesByMonth: ReadonlyMap<string, string[]>;
+    targetPeriods: string[];
+    dictCache: Map<number, DictItemRow[]>;
+    getDict: (year: number) => Promise<DictItemRow[]>;
+  },
+): Promise<{
+  annualTrend: TradeAnnualTrendPoint[];
+  snapshotsToWrite: Array<{ period: string; payload: TradeOverviewPublished }>;
+  derivedObsRows: DerivedObsPayloadRow[];
+}> {
+  const allPublishedBatchIds: string[] = [];
+  for (const m of ctx.publishedMonths) {
+    for (const bid of ctx.activeBatchesByMonth.get(m) ?? []) {
+      allPublishedBatchIds.push(bid);
+    }
+  }
+  const batchMetaMap = await queryBatchesByIds(db, allPublishedBatchIds);
+
+  const productBatchIdsByMonth = new Map<string, string[]>();
+  const detailBatchIdsByMonth = new Map<string, string[]>();
+  const allProductBatchIds: string[] = [];
+  for (const m of ctx.publishedMonths) {
+    const pIds: string[] = [];
+    const dIds: string[] = [];
+    for (const bid of ctx.activeBatchesByMonth.get(m) ?? []) {
+      const meta = batchMetaMap.get(bid);
+      if (meta?.grouping === "product") {
+        pIds.push(bid);
+        allProductBatchIds.push(bid);
+      } else {
+        dIds.push(bid);
+      }
+    }
+    productBatchIdsByMonth.set(m, pIds);
+    detailBatchIdsByMonth.set(m, dIds);
+  }
+
+  for (const m of ctx.publishedMonths) {
+    const yr = Number(m.slice(0, 4));
+    await ctx.getDict(yr);
+    await ctx.getDict(yr - 1);
+  }
+
+  const productSumsByMonth = await queryAnnualProductSumsByBatchIds(db, allProductBatchIds);
+  const annualTrend = buildAnnualTrend({
+    publishedMonthSet: ctx.publishedMonthSet,
+    productSumsByMonth,
+    dictByYear: ctx.dictCache,
+  });
+
+  const periodsByYear = new Map<number, string[]>();
+  for (const tp of ctx.targetPeriods) {
+    const parsed = parseTradePeriod(tp)!;
+    const list = periodsByYear.get(parsed.year) ?? [];
+    list.push(tp);
+    periodsByYear.set(parsed.year, list);
+  }
+
+  const snapshotsToWrite: Array<{ period: string; payload: TradeOverviewPublished }> = [];
+  const derivedObsRows: DerivedObsPayloadRow[] = [];
+
+  for (const [year, yearPeriods] of [...periodsByYear.entries()].sort((a, b) => a[0] - b[0])) {
+    const yearDetailMonths = new Set<string>();
+    const yearProductMonths = new Set<string>();
+
+    for (const tp of yearPeriods) {
+      const parsed = parseTradePeriod(tp)!;
+      for (const m of parsed.months) {
+        yearDetailMonths.add(m);
+        yearProductMonths.add(m);
+      }
+      const prior = parseTradePeriod(parsed.priorPeriod)!;
+      if (prior.months.every((m) => ctx.publishedMonthSet.has(m))) {
+        for (const m of prior.months) yearProductMonths.add(m);
+      }
+    }
+    for (let mm = 1; mm <= 12; mm++) {
+      const mStr = `${year}-${String(mm).padStart(2, "0")}`;
+      if (ctx.publishedMonthSet.has(mStr)) {
+        yearProductMonths.add(mStr);
+        const priorMStr = `${year - 1}-${String(mm).padStart(2, "0")}`;
+        if (ctx.publishedMonthSet.has(priorMStr)) yearProductMonths.add(priorMStr);
+      }
+    }
+
+    const yearProductBatchIds: string[] = [];
+    for (const m of yearProductMonths) {
+      for (const bid of productBatchIdsByMonth.get(m) ?? []) {
+        yearProductBatchIds.push(bid);
+      }
+    }
+    const yearDetailBatchIds: string[] = [];
+    for (const m of yearDetailMonths) {
+      for (const bid of detailBatchIdsByMonth.get(m) ?? []) {
+        yearDetailBatchIds.push(bid);
+      }
+    }
+
+    const productRows = await queryFactsByBatchIdsFiltered(db, yearProductBatchIds, "product");
+    const productFactsByMonth = new Map<string, FactDbRow[]>();
+    for (let i = 0; i < productRows.length; i++) {
+      const f = productRows[i]!;
+      let list = productFactsByMonth.get(f.month);
+      if (!list) {
+        list = [];
+        productFactsByMonth.set(f.month, list);
+      }
+      list.push(f);
+    }
+
+    const detailRows = await queryFactsByBatchIdsFiltered(db, yearDetailBatchIds, "detail");
+    const detailFactsByMonth = new Map<string, FactDbRow[]>();
+    for (let i = 0; i < detailRows.length; i++) {
+      const f = detailRows[i]!;
+      let list = detailFactsByMonth.get(f.month);
+      if (!list) {
+        list = [];
+        detailFactsByMonth.set(f.month, list);
+      }
+      list.push(f);
+    }
+
+    const yDict = await ctx.getDict(year);
+    const prevYDict = await ctx.getDict(year - 1);
+    for (const tp of yearPeriods) {
+      const payload = buildPeriodSnapshot({
+        dictVersion: ctx.dictVersion,
+        period: tp,
+        releaseId: ctx.releaseId,
+        availablePeriods: ctx.availablePeriods,
+        annualTrend,
+        publishedMonthSet: ctx.publishedMonthSet,
+        activeBatchesByMonth: ctx.activeBatchesByMonth,
+        batchMetaMap,
+        productFactsByMonth,
+        detailFactsByMonth,
+        yearDict: yDict,
+        priorYearDict: prevYDict,
+      });
+      snapshotsToWrite.push({ period: tp, payload });
+      for (const obsRow of buildDerivedObservations(payload)) {
+        derivedObsRows.push(obsRow);
+      }
+    }
+
+    detailFactsByMonth.clear();
+    productFactsByMonth.clear();
+  }
+
+  return { annualTrend, snapshotsToWrite, derivedObsRows };
 }
 
 function isTradeReleaseCasConflict(err: unknown): boolean {
@@ -2197,15 +2343,10 @@ async function attemptPublishMonthOnce(
     }
   }
 
-  // 分块（json_each 单参数绑定）读取当月候选批次的全部事实，避免超过 D1 每条查询 100 绑定参数上限
+  // 在 D1 中按 (month, flow, grouping, hs8) SQL 聚合对账，避免全量拉取当月明细进 Worker 堆内存
   const candidateIds = candidateBatches.map((b) => b.batch_id);
-  const monthFacts = await queryFactsByBatchIds(db, candidateIds);
-
-  const sumByCombo = new Map<string, bigint>();
-  for (const f of monthFacts) {
-    const key = `${f.flow}|${f.grouping}|${f.hs8}`;
-    sumByCombo.set(key, (sumByCombo.get(key) ?? 0n) + BigInt(f.usd_scaled_str));
-  }
+  const comboSumsByMonth = await queryFactComboSumsByBatchIds(db, candidateIds);
+  const sumByCombo = comboSumsByMonth.get(month) ?? new Map<string, bigint>();
 
   const now = new Date().toISOString();
   const reconStmts: D1PreparedStatement[] = [];
@@ -2294,42 +2435,6 @@ async function attemptPublishMonthOnce(
   const releaseId = crypto.randomUUID();
   const triggerBatchId = candidateBatches[candidateBatches.length - 1]?.batch_id ?? candidateIds[0];
 
-  // 收集计算全部受影响期间（及各自上年同期基期、年内趋势与跨年趋势）所需的月份集合
-  const neededMonths = new Set<string>(publishedMonths);
-  for (const tp of targetPeriods) {
-    const parsed = parseTradePeriod(tp)!;
-    for (const m of parsed.months) neededMonths.add(m);
-    const prior = parseTradePeriod(parsed.priorPeriod)!;
-    if (prior.months.every((m) => publishedMonthSet.has(m))) {
-      for (const m of prior.months) neededMonths.add(m);
-    }
-    // 同年各月用于趋势序列及其上年同期月度同比
-    for (let mm = 1; mm <= 12; mm++) {
-      const mStr = `${parsed.year}-${String(mm).padStart(2, "0")}`;
-      if (publishedMonthSet.has(mStr)) {
-        neededMonths.add(mStr);
-        const priorMStr = `${parsed.year - 1}-${String(mm).padStart(2, "0")}`;
-        if (publishedMonthSet.has(priorMStr)) neededMonths.add(priorMStr);
-      }
-    }
-  }
-
-  const neededBatchIds: string[] = [];
-  for (const m of neededMonths) {
-    for (const bid of activeBatchesByMonth.get(m) ?? []) {
-      neededBatchIds.push(bid);
-    }
-  }
-
-  const batchMetaMap = await queryBatchesByIds(db, neededBatchIds);
-  const allNeededFacts = await queryFactsByBatchIds(db, neededBatchIds);
-  const factsByMonth = new Map<string, FactDbRow[]>();
-  for (const f of allNeededFacts) {
-    const list = factsByMonth.get(f.month) ?? [];
-    list.push(f);
-    factsByMonth.set(f.month, list);
-  }
-
   const dictCache = new Map<number, DictItemRow[]>();
   const getDict = async (y: number) => {
     if (!dictCache.has(y)) {
@@ -2338,51 +2443,17 @@ async function attemptPublishMonthOnce(
     return dictCache.get(y)!;
   };
 
-  for (const m of publishedMonths) {
-    const yr = Number(m.slice(0, 4));
-    await getDict(yr);
-    await getDict(yr - 1);
-  }
-  const annualTrend = buildAnnualTrend({
+  const { annualTrend, snapshotsToWrite, derivedObsRows } = await buildSnapshotsForTargetPeriods(db, {
+    dictVersion,
+    releaseId,
+    availablePeriods,
+    publishedMonths,
     publishedMonthSet,
-    factsByMonth,
-    dictByYear: dictCache,
+    activeBatchesByMonth,
+    targetPeriods,
+    dictCache,
+    getDict,
   });
-
-  const snapshotsToWrite: Array<{ period: string; payload: TradeOverviewPublished }> = [];
-  const derivedObsRows: Array<{
-    indicator_id: string;
-    period: string;
-    geo: string;
-    dims: string;
-    value_num: number | null;
-    value_text: string | null;
-    unit: string;
-    object_ref: string;
-  }> = [];
-
-  for (const tp of targetPeriods) {
-    const parsed = parseTradePeriod(tp)!;
-    const yDict = await getDict(parsed.year);
-    const prevYDict = await getDict(parsed.year - 1);
-    const payload = buildPeriodSnapshot({
-      dictVersion,
-      period: tp,
-      releaseId,
-      availablePeriods,
-      annualTrend,
-      publishedMonthSet,
-      activeBatchesByMonth,
-      batchMetaMap,
-      factsByMonth,
-      yearDict: yDict,
-      priorYearDict: prevYDict,
-    });
-    snapshotsToWrite.push({ period: tp, payload });
-    for (const obsRow of buildDerivedObservations(payload)) {
-      derivedObsRows.push(obsRow);
-    }
-  }
 
   // 测试钩子：模拟跨 Worker 实例在快照计算完毕后、事务提交前抢先提交了同 version_seq
   if (opts?.injectPreemptNow) {
@@ -2592,7 +2663,7 @@ function computeSameUnitQtyYoyPct(curr: TradeQuantityStat, prior: TradeQuantityS
 
 function buildAnnualTrend(opts: {
   publishedMonthSet: ReadonlySet<string>;
-  factsByMonth: ReadonlyMap<string, FactDbRow[]>;
+  productSumsByMonth: ReadonlyMap<string, ProductMonthSumRow[]>;
   dictByYear: ReadonlyMap<number, DictItemRow[]>;
 }): TradeAnnualTrendPoint[] {
   const years = [...new Set([...opts.publishedMonthSet].map((m) => Number(m.slice(0, 4))))].sort((a, b) => a - b);
@@ -2628,9 +2699,9 @@ function buildAnnualTrend(opts: {
     let compExpScaled = 0n;
 
     for (const m of yrMonths) {
-      for (const f of opts.factsByMonth.get(m) ?? []) {
-        if (f.grouping !== "product" || !yrApplicableSet.has(f.hs8)) continue;
-        const val = BigInt(f.usd_scaled_str);
+      for (const f of opts.productSumsByMonth.get(m) ?? []) {
+        if (!yrApplicableSet.has(f.hs8)) continue;
+        const val = BigInt(f.sum_scaled_str);
         if (f.flow === "import") {
           impScaled += val;
           if (compSet.has(f.hs8)) compImpScaled += val;
@@ -2648,9 +2719,9 @@ function buildAnnualTrend(opts: {
       pImpScaled = 0n;
       pExpScaled = 0n;
       for (const pm of priorMonths) {
-        for (const pf of opts.factsByMonth.get(pm) ?? []) {
-          if (pf.grouping !== "product" || !compSet.has(pf.hs8)) continue;
-          const val = BigInt(pf.usd_scaled_str);
+        for (const pf of opts.productSumsByMonth.get(pm) ?? []) {
+          if (!compSet.has(pf.hs8)) continue;
+          const val = BigInt(pf.sum_scaled_str);
           if (pf.flow === "import") pImpScaled += val;
           else pExpScaled += val;
         }
@@ -2688,7 +2759,8 @@ function buildPeriodSnapshot(ctx: {
   publishedMonthSet: ReadonlySet<string>;
   activeBatchesByMonth: ReadonlyMap<string, string[]>;
   batchMetaMap: ReadonlyMap<string, BatchMetaRow>;
-  factsByMonth: ReadonlyMap<string, FactDbRow[]>;
+  productFactsByMonth: ReadonlyMap<string, FactDbRow[]>;
+  detailFactsByMonth: ReadonlyMap<string, FactDbRow[]>;
   yearDict: DictItemRow[];
   priorYearDict: DictItemRow[];
 }): TradeOverviewPublished {
@@ -2748,23 +2820,28 @@ function buildPeriodSnapshot(ctx: {
   const regionMap = new Map<string, { name: string; imp: bigint; exp: bigint }>();
 
   for (const m of parsed.months) {
-    for (const f of ctx.factsByMonth.get(m) ?? []) {
+    for (const f of ctx.productFactsByMonth.get(m) ?? []) {
+      const meta = hsMetaMap.get(f.hs8);
+      if (!meta || f.grouping !== "product") continue;
+      const val = BigInt(f.usd_scaled_str);
+      const q = hsQty.get(f.hs8)!;
+      if (f.flow === "import") {
+        hsProductImp.set(f.hs8, (hsProductImp.get(f.hs8) ?? 0n) + val);
+        addQty(q.imp1, f.qty1, f.unit1);
+        addQty(q.imp2, f.qty2, f.unit2);
+      } else {
+        hsProductExp.set(f.hs8, (hsProductExp.get(f.hs8) ?? 0n) + val);
+        addQty(q.exp1, f.qty1, f.unit1);
+        addQty(q.exp2, f.qty2, f.unit2);
+      }
+    }
+
+    for (const f of ctx.detailFactsByMonth.get(m) ?? []) {
       const meta = hsMetaMap.get(f.hs8);
       if (!meta) continue;
       const val = BigInt(f.usd_scaled_str);
 
-      if (f.grouping === "product") {
-        const q = hsQty.get(f.hs8)!;
-        if (f.flow === "import") {
-          hsProductImp.set(f.hs8, (hsProductImp.get(f.hs8) ?? 0n) + val);
-          addQty(q.imp1, f.qty1, f.unit1);
-          addQty(q.imp2, f.qty2, f.unit2);
-        } else {
-          hsProductExp.set(f.hs8, (hsProductExp.get(f.hs8) ?? 0n) + val);
-          addQty(q.exp1, f.qty1, f.unit1);
-          addQty(q.exp2, f.qty2, f.unit2);
-        }
-      } else if (f.grouping === "partner") {
+      if (f.grouping === "partner") {
         let pEntry = partnerMap.get(f.group_code);
         if (!pEntry) {
           pEntry = { name: f.group_name, imp: 0n, exp: 0n, byCat: new Map() };
@@ -2840,7 +2917,7 @@ function buildPeriodSnapshot(ctx: {
   if (hasFullPrior) {
     const priorAllApplicableSet = new Set(ctx.priorYearDict.filter((d) => d.applicable === 1).map((d) => d.hs8));
     for (const pm of priorParsed.months) {
-      for (const f of ctx.factsByMonth.get(pm) ?? []) {
+      for (const f of ctx.productFactsByMonth.get(pm) ?? []) {
         if (f.grouping !== "product") continue;
         const val = BigInt(f.usd_scaled_str);
         if (priorAllApplicableSet.has(f.hs8)) {
@@ -3088,7 +3165,7 @@ function buildPeriodSnapshot(ctx: {
     let mExp = 0n;
     let mCompImp = 0n;
     let mCompExp = 0n;
-    for (const f of ctx.factsByMonth.get(tm) ?? []) {
+    for (const f of ctx.productFactsByMonth.get(tm) ?? []) {
       if (f.grouping !== "product" || !hsMetaMap.has(f.hs8)) continue;
       const val = BigInt(f.usd_scaled_str);
       if (f.flow === "import") {
@@ -3105,7 +3182,7 @@ function buildPeriodSnapshot(ctx: {
     if (ctx.publishedMonthSet.has(priorMonth) && comparableHs8Set.size > 0) {
       pImp = 0n;
       pExp = 0n;
-      for (const pf of ctx.factsByMonth.get(priorMonth) ?? []) {
+      for (const pf of ctx.productFactsByMonth.get(priorMonth) ?? []) {
         if (pf.grouping !== "product" || !comparableHs8Set.has(pf.hs8)) continue;
         const val = BigInt(pf.usd_scaled_str);
         if (pf.flow === "import") pImp += val;
@@ -3439,9 +3516,56 @@ export async function getTradePeriodsMeta(db: D1Database, rawDictVersion?: strin
 
 export async function listTradeBatches(
   db: D1Database,
-  filters: { dictVersion?: string | null; month?: string | null; flow?: string | null; grouping?: string | null },
+  filters: {
+    dictVersion?: string | null;
+    month?: string | null;
+    flow?: string | null;
+    grouping?: string | null;
+    batchIds?: readonly string[];
+  },
 ): Promise<{ items: TradeBatchListItem[] }> {
   const dictVersion = filters.dictVersion?.trim() || DEFAULT_DICT_VERSION;
+
+  const mapRow = (r: BatchMetaRow & { created_at: string }): TradeBatchListItem => ({
+    batchId: r.batch_id,
+    dictVersion: r.dict_version,
+    month: r.month,
+    flow: r.flow,
+    currency: r.currency,
+    grouping: r.grouping,
+    filename: r.filename,
+    sourceSha256: r.source_sha256,
+    evidenceSha256s: JSON.parse(r.evidence_sha256s_json) as string[],
+    rowCount: r.row_count,
+    publishState: r.publish_state === "published" ? "published" : "staged",
+    supersededBy: r.superseded_by,
+    coverage: {
+      received: JSON.parse(r.received_hs8_json) as string[],
+      confirmedEmpty: JSON.parse(r.confirmed_empty_hs8_json) as string[],
+      missing: JSON.parse(r.missing_hs8_json) as string[],
+    },
+    createdAt: r.created_at,
+  });
+
+  if (filters.batchIds && filters.batchIds.length > 0) {
+    const uniqueIds = [...new Set(filters.batchIds.map((id) => id.trim()).filter(Boolean))];
+    const matched: Array<BatchMetaRow & { created_at: string }> = [];
+    for (let i = 0; i < uniqueIds.length; i += ID_QUERY_CHUNK_SIZE) {
+      const slice = uniqueIds.slice(i, i + ID_QUERY_CHUNK_SIZE);
+      const { results } = await db
+        .prepare(
+          `SELECT *
+           FROM trade_import_batch
+           WHERE dict_version = ?1
+             AND batch_id IN (SELECT value FROM json_each(?2))`,
+        )
+        .bind(dictVersion, JSON.stringify(slice))
+        .all<BatchMetaRow & { created_at: string }>();
+      matched.push(...results);
+    }
+    return { items: matched.map(mapRow) };
+  }
+
   const clauses = ["dict_version = ?1", "publish_state IN ('staged', 'published')"];
   const params: unknown[] = [dictVersion];
 
@@ -3471,26 +3595,7 @@ export async function listTradeBatches(
     .all<BatchMetaRow & { created_at: string }>();
 
   return {
-    items: results.map((r) => ({
-      batchId: r.batch_id,
-      dictVersion: r.dict_version,
-      month: r.month,
-      flow: r.flow,
-      currency: r.currency,
-      grouping: r.grouping,
-      filename: r.filename,
-      sourceSha256: r.source_sha256,
-      evidenceSha256s: JSON.parse(r.evidence_sha256s_json) as string[],
-      rowCount: r.row_count,
-      publishState: r.publish_state === "published" ? "published" : "staged",
-      supersededBy: r.superseded_by,
-      coverage: {
-        received: JSON.parse(r.received_hs8_json) as string[],
-        confirmedEmpty: JSON.parse(r.confirmed_empty_hs8_json) as string[],
-        missing: JSON.parse(r.missing_hs8_json) as string[],
-      },
-      createdAt: r.created_at,
-    })),
+    items: results.map(mapRow),
   };
 }
 

@@ -1116,6 +1116,125 @@
   }
 
   /**
+   * 为手动油猴采集的零结果批次直接生成含完整查询条件与官方响应摘要的 PNG 凭证字节及 SHA-256，
+   * 使手动下载的 .empty.png + .manifest.json + .meta.json 无需二次处理即可通过归档导入器校验。
+   */
+  async function renderEmptyEvidencePngBytes({
+    year,
+    startMonth = 1,
+    endMonth = 12,
+    monthFlag = "1",
+    flow,
+    grouping,
+    hs8,
+    selectTableState,
+    queryFingerprint,
+    responseSha256 = "",
+    officialResponseExcerpt = "",
+    requestParams = "",
+    checkedAt = null
+  }) {
+    if (typeof document === "undefined" || typeof document.createElement !== "function") {
+      return null;
+    }
+    const canvas = document.createElement("canvas");
+    if (!canvas || typeof canvas.getContext !== "function") {
+      return null;
+    }
+    const width = 1200;
+    const height = 760;
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
+
+    const validHs8 = validateHs8Batch(hs8);
+    const flowSpec = FLOW_SPECS[flow] || { label: flow, iEType: "" };
+    const groupSpec = GROUPING_SPECS[grouping] || { label: grouping, outerFields: [] };
+    const sm = String(Number(startMonth)).padStart(2, "0");
+    const em = String(Number(endMonth)).padStart(2, "0");
+    const pageUrl =
+      typeof location !== "undefined" && location && location.href
+        ? String(location.href)
+        : "http://stats.customs.gov.cn/";
+    const verifiedAt = checkedAt || new Date().toISOString();
+
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, width, height);
+    ctx.strokeStyle = "#0b3a6e";
+    ctx.lineWidth = 8;
+    ctx.strokeRect(4, 4, width - 8, height - 8);
+
+    ctx.fillStyle = "#0b3a6e";
+    ctx.font = "bold 24px sans-serif";
+    ctx.fillText("中国海关总署统计数据查询 · 官方零结果核验凭证", 40, 56);
+    ctx.fillStyle = "#166534";
+    ctx.font = "bold 18px sans-serif";
+    ctx.fillText("官方返回：0 条记录 (officialTotal = 0)", 820, 56);
+
+    ctx.fillStyle = "#334155";
+    ctx.font = "14px monospace";
+    const wrapLines = (prefix, value, maxChars = 96) => {
+      const full = `${prefix}${value}`;
+      const out = [];
+      for (let i = 0; i < full.length; i += maxChars) {
+        out.push(full.slice(i, i + maxChars));
+      }
+      return out.length ? out : [prefix];
+    };
+
+    const rows = [
+      ...wrapLines("来源页面: ", pageUrl),
+      ...wrapLines("核验时间: ", verifiedAt),
+      ...wrapLines("字典/币制: ", `${DICT_VERSION} / USD`),
+      ...wrapLines(
+        "统计区间: ",
+        `${year}-${sm} .. ${year}-${em} (monthFlag=${monthFlag === "1" ? "1" : "single"}, selectTableState=${selectTableState})`
+      ),
+      ...wrapLines(
+        "流向/分组: ",
+        `${flow} (${flowSpec.label}, iEType=${flowSpec.iEType}) / ${grouping} (${groupSpec.label}, ${groupSpec.outerFields.join("+")})`
+      ),
+      ...wrapLines(`查询税号(${validHs8.length}项): `, validHs8.join(", ")),
+      ...wrapLines("查询指纹: ", queryFingerprint || ""),
+      ...wrapLines("官方响应 SHA-256: ", responseSha256 || ""),
+      ...wrapLines("官方响应摘录: ", (officialResponseExcerpt || "暂无数据（total=0）").slice(0, 360)),
+      ...(requestParams ? wrapLines("请求参数: ", requestParams.slice(0, 240)) : [])
+    ];
+
+    let y = 100;
+    for (const line of rows) {
+      if (y > height - 30) break;
+      ctx.fillText(line, 40, y);
+      y += 24;
+    }
+
+    if (typeof canvas.toDataURL !== "function") return null;
+    const dataUrl = canvas.toDataURL("image/png");
+    const prefix = "data:image/png;base64,";
+    if (typeof dataUrl !== "string" || !dataUrl.startsWith(prefix)) {
+      return null;
+    }
+    const b64 = dataUrl.slice(prefix.length);
+    const bin = atob(b64);
+    const pngBytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) {
+      pngBytes[i] = bin.charCodeAt(i);
+    }
+    if (
+      pngBytes.byteLength < 24 ||
+      pngBytes[0] !== 0x89 ||
+      pngBytes[1] !== 0x50 ||
+      pngBytes[2] !== 0x4e ||
+      pngBytes[3] !== 0x47
+    ) {
+      return null;
+    }
+    const sha256 = await computeSha256Hex(pngBytes);
+    return { pngBytes, sha256, width, height };
+  }
+
+  /**
    * 低频单飞预检查询总行数与有效 selectTableState（遇 412 / HTML 风控页立即返回熔断信号，绝不盲目重试）
    */
   async function probeOfficialCountAndState({
@@ -1449,6 +1568,7 @@
     buildZeroQueryFingerprint,
     renderEmptyQueryEvidence,
     clearEmptyQueryEvidence,
+    renderEmptyEvidencePngBytes,
     fetchRawExportBase64,
     buildArchivePaths
   });
@@ -1792,6 +1912,23 @@
       }
 
       if (probe.total === 0) {
+        const queryFp = probe.zeroEvidence
+          ? probe.zeroEvidence.queryFingerprint
+          : buildZeroQueryFingerprint({
+              year,
+              startMonth: sMonth,
+              endMonth: eMonth,
+              monthFlag,
+              flow,
+              grouping,
+              selectTableState: probe.state,
+              hs8
+            });
+        const respSha = probe.zeroEvidence ? probe.zeroEvidence.responseSha256 : "";
+        const respExcerpt = probe.zeroEvidence ? probe.zeroEvidence.officialResponseExcerpt : "";
+        const reqParams = probe.zeroEvidence ? probe.zeroEvidence.requestParams : "";
+        const checkedAt = probe.zeroEvidence ? probe.zeroEvidence.checkedAt : new Date().toISOString();
+
         await renderEmptyQueryEvidence({
           year,
           startMonth: sMonth,
@@ -1802,11 +1939,26 @@
           hs8,
           selectTableState: probe.state,
           officialTotal: 0,
-          responseSha256: probe.zeroEvidence ? probe.zeroEvidence.responseSha256 : "",
-          officialResponseExcerpt: probe.zeroEvidence ? probe.zeroEvidence.officialResponseExcerpt : "",
-          requestParams: probe.zeroEvidence ? probe.zeroEvidence.requestParams : "",
-          checkedAt: probe.zeroEvidence ? probe.zeroEvidence.checkedAt : null,
+          responseSha256: respSha,
+          officialResponseExcerpt: respExcerpt,
+          requestParams: reqParams,
+          checkedAt,
           allowCloseButton: true
+        });
+        const pngArtifact = await renderEmptyEvidencePngBytes({
+          year,
+          startMonth: sMonth,
+          endMonth: eMonth,
+          monthFlag,
+          flow,
+          grouping,
+          hs8,
+          selectTableState: probe.state,
+          queryFingerprint: queryFp,
+          responseSha256: respSha,
+          officialResponseExcerpt: respExcerpt,
+          requestParams: reqParams,
+          checkedAt
         });
         const emptyManifest = buildManifest({
           month: monthsCovered[0],
@@ -1815,7 +1967,7 @@
           grouping,
           hs8,
           emptyHs8: [...hs8],
-          probeVerifiedZero: true
+          probeVerifiedZero: Boolean(pngArtifact)
         });
         const emptyMeta = {
           dictVersion: DICT_VERSION,
@@ -1824,16 +1976,27 @@
           flow,
           grouping,
           batchKey,
+          requestedHs8: [...hs8],
           officialTotal: 0,
-          queryFingerprint: probe.zeroEvidence ? probe.zeroEvidence.queryFingerprint : null,
-          officialProbeResponseSha256: probe.zeroEvidence ? probe.zeroEvidence.responseSha256 : null,
+          queryFingerprint: queryFp,
+          officialProbeResponseSha256: respSha || null,
+          evidenceViewSynced: true,
+          emptyPngFilename: pngArtifact ? `${stem}.empty.png` : null,
+          emptyPngSha256: pngArtifact ? pngArtifact.sha256 : null,
+          emptyPngDimensions: pngArtifact ? { width: pngArtifact.width, height: pngArtifact.height } : null,
           requiredEmptyPngFilename: `${stem}.empty.png`,
           collectedAt: new Date().toISOString()
         };
+        if (pngArtifact) {
+          triggerBlobDownload(new Blob([pngArtifact.pngBytes], { type: "image/png" }), `${stem}.empty.png`);
+          await sleep(120);
+        }
         await downloadTextFile(`${JSON.stringify(emptyManifest, null, 2)}\n`, `${stem}.manifest.json`);
         await downloadTextFile(`${JSON.stringify(emptyMeta, null, 2)}\n`, `${stem}.meta.json`);
         appendLog(
-          `○ [${year} ${sMonth}-${eMonth}月 ${flow}/${grouping}/${batchKey}] 官网预检确认 0 条记录，已保存 ${stem}.manifest.json；请另存查询结果页截图为 ${stem}.empty.png 放入同目录供归档导入！`,
+          pngArtifact
+            ? `○ [${year} ${sMonth}-${eMonth}月 ${flow}/${grouping}/${batchKey}] 官网预检确认 0 条记录，已成套保存 ${stem}.empty.png (SHA256=${pngArtifact.sha256.slice(0, 10)}…) + .manifest.json + .meta.json，可直接归档导入。`
+            : `○ [${year} ${sMonth}-${eMonth}月 ${flow}/${grouping}/${batchKey}] 官网预检确认 0 条记录；当前环境不支持自动生成 PNG，请保存 ${stem}.empty.png 后执行 node scripts/import-customs-archive.mjs --seal-empty-png 写入摘要。`,
           "#fcd34d"
         );
         return;
@@ -1913,6 +2076,7 @@
         flow,
         grouping,
         batchKey,
+        requestedHs8: [...hs8],
         officialProbeTotal: probe.total,
         selectTableState: probe.state,
         savedCsvFilename: `${stem}.raw.csv`,
