@@ -37,6 +37,21 @@ export const DEFAULT_ARCHIVE_DIR = path.resolve(SCRIPT_DIR, "../data/customs-raw
 
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
+/** 将 CRLF / CR 换行规范化为 LF，确保字典摘要不受不同平台 git core.autocrlf 检出影响 */
+export function normalizeLineEndingsLf(rawBytes) {
+  const buf = Buffer.isBuffer(rawBytes) ? rawBytes : Buffer.from(rawBytes);
+  const out = [];
+  for (let i = 0; i < buf.length; i++) {
+    if (buf[i] === 0x0d) {
+      if (i + 1 < buf.length && buf[i + 1] === 0x0a) i++;
+      out.push(0x0a);
+    } else {
+      out.push(buf[i]);
+    }
+  }
+  return Buffer.from(out);
+}
+
 /** 计算原始字节的 SHA-256（小写十六进制） */
 export function computeSha256Hex(rawBytes) {
   const buf = Buffer.isBuffer(rawBytes) ? rawBytes : Buffer.from(rawBytes);
@@ -99,7 +114,7 @@ export function loadAndVerifyHsDict202601(dictPath = DEFAULT_DICT_PATH) {
   }
 
   const rawBuffer = fs.readFileSync(resolvedPath);
-  const sha256 = computeSha256Hex(rawBuffer);
+  const sha256 = computeSha256Hex(normalizeLineEndingsLf(rawBuffer));
   if (sha256 !== EXPECTED_DICT_SHA256) {
     throw new Error(
       `HS 字典 SHA-256 校验不匹配: 实际 ${sha256}, 预期 ${EXPECTED_DICT_SHA256} (${resolvedPath})`

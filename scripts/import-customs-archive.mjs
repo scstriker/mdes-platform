@@ -8,6 +8,7 @@
  *   node scripts/import-customs-archive.mjs --archive data/customs-raw --api-url http://127.0.0.1:8787
  */
 import { spawn } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import net from "node:net";
 import { createRequire } from "node:module";
@@ -103,18 +104,219 @@ export function selectImportableManifestEntries(manifestFiles, { dictVersion = "
       selected.push(item);
       continue;
     }
-    const overlapsFormal = item.months.some((m) => {
+    if (item.months.length === 0 || item.hs8.length === 0) {
+      selected.push(item);
+      continue;
+    }
+
+    const overlappedMonths = [];
+    const uncoveredMonths = [];
+    let totalPairs = 0;
+    let coveredPairs = 0;
+
+    for (const m of item.months) {
       const key = `${item.manifestObj.dictVersion}|${m}|${item.manifestObj.flow}|${item.manifestObj.grouping}`;
       const formalSet = formalScopeHs8.get(key);
-      return Boolean(formalSet && item.hs8.some((code) => formalSet.has(code)));
-    });
-    if (overlapsFormal) {
+      let monthCoveredCount = 0;
+      for (const code of item.hs8) {
+        totalPairs += 1;
+        if (formalSet && formalSet.has(code)) {
+          coveredPairs += 1;
+          monthCoveredCount += 1;
+        }
+      }
+      if (monthCoveredCount > 0) overlappedMonths.push(m);
+      if (monthCoveredCount < item.hs8.length) uncoveredMonths.push(m);
+    }
+
+    if (coveredPairs === 0) {
+      selected.push(item);
+    } else if (coveredPairs === totalPairs) {
       skippedPilot.push(item);
     } else {
-      selected.push(item);
+      throw new Error(
+        `PILOT_PARTIAL_OVERLAP: 试点清单 ${path.basename(item.mfPath)} 与正式批次仅部分重叠` +
+          `（已覆盖月份=[${overlappedMonths.join(",")}]，未覆盖月份=[${uncoveredMonths.join(",")}]）。` +
+          "拒绝跳过整份试点清单以免丢失未覆盖月份；请补齐正式分组采集或将试点文件隔离至独立目录 data/customs-raw-pilot/。",
+      );
     }
   }
   return { selected, skippedPilot };
+}
+
+function sha256Hex(buf) {
+  return crypto.createHash("sha256").update(buf).digest("hex");
+}
+
+/**
+ * 核验归档原件（.raw.csv / .empty.png）在落盘后的字节完整性，防止归档 CSV 被截断或缺行后仍携带
+ * probeVerifiedZero=true 上传导致缺失记录被误确认为零。
+ */
+export function verifyArchiveEntryIntegrity(entry) {
+  const { mfPath, manifestObj, months } = entry;
+  const dir = path.dirname(mfPath);
+  const stem = path.basename(mfPath, ".manifest.json");
+  const csvPath = path.join(dir, `${stem}.raw.csv`);
+  const pngPath = path.join(dir, `${stem}.empty.png`);
+  const metaPath = path.join(dir, `${stem}.meta.json`);
+
+  const hasCsv = fs.existsSync(csvPath);
+  const hasPng = fs.existsSync(pngPath);
+  if (!hasCsv && !hasPng) {
+    throw new Error(`ARCHIVE_INTEGRITY_ERROR (${stem}): 缺少 .raw.csv 与 .empty.png 原件`);
+  }
+
+  const csvBytes = hasCsv ? fs.readFileSync(csvPath) : null;
+  const pngBytes = hasPng ? fs.readFileSync(pngPath) : null;
+  const actualCsvSha256 = csvBytes ? sha256Hex(csvBytes) : null;
+  const actualPngSha256 = pngBytes ? sha256Hex(pngBytes) : null;
+  const hasMeta = fs.existsSync(metaPath);
+
+  if (!hasMeta) {
+    if (manifestObj.probeVerifiedZero === true) {
+      throw new Error(
+        `ARCHIVE_INTEGRITY_ERROR (${stem}): probeVerifiedZero=true 的归档批次缺少配套 .meta.json 摘要凭证，拒绝上传`,
+      );
+    }
+    return {
+      stem,
+      csvPath: hasCsv ? csvPath : null,
+      pngPath: hasPng ? pngPath : null,
+      csvBytes,
+      pngBytes,
+      expectedSourceSha256: actualCsvSha256 ?? actualPngSha256,
+      expectedDetailRowCount: null,
+    };
+  }
+
+  let meta;
+  try {
+    meta = JSON.parse(fs.readFileSync(metaPath, "utf8"));
+  } catch (err) {
+    throw new Error(`ARCHIVE_INTEGRITY_ERROR (${stem}): .meta.json 解析失败 (${err instanceof Error ? err.message : String(err)})`);
+  }
+
+  if (!meta || typeof meta !== "object" || Array.isArray(meta)) {
+    throw new Error(`ARCHIVE_INTEGRITY_ERROR (${stem}): .meta.json 必须为 JSON 对象`);
+  }
+  if (meta.dictVersion && meta.dictVersion !== manifestObj.dictVersion) {
+    throw new Error(`ARCHIVE_INTEGRITY_ERROR (${stem}): .meta.json dictVersion(${meta.dictVersion}) 与清单(${manifestObj.dictVersion})不一致`);
+  }
+  if (meta.flow && meta.flow !== manifestObj.flow) {
+    throw new Error(`ARCHIVE_INTEGRITY_ERROR (${stem}): .meta.json flow(${meta.flow}) 与清单(${manifestObj.flow})不一致`);
+  }
+  if (meta.grouping && meta.grouping !== manifestObj.grouping) {
+    throw new Error(`ARCHIVE_INTEGRITY_ERROR (${stem}): .meta.json grouping(${meta.grouping}) 与清单(${manifestObj.grouping})不一致`);
+  }
+  if (Array.isArray(meta.months)) {
+    const metaMonthsSorted = [...meta.months].map(String).sort();
+    const manifestMonthsSorted = [...months].map(String).sort();
+    if (JSON.stringify(metaMonthsSorted) !== JSON.stringify(manifestMonthsSorted)) {
+      throw new Error(
+        `ARCHIVE_INTEGRITY_ERROR (${stem}): .meta.json months([${metaMonthsSorted.join(",")}]) 与清单([${manifestMonthsSorted.join(",")}])不一致`,
+      );
+    }
+  }
+
+  let expectedSourceSha256 = null;
+  let expectedDetailRowCount = null;
+
+  if (csvBytes) {
+    const metaSha = typeof meta.sha256 === "string" ? meta.sha256.trim().toLowerCase() : "";
+    if (!/^[0-9a-f]{64}$/.test(metaSha)) {
+      throw new Error(`ARCHIVE_INTEGRITY_ERROR (${stem}): .meta.json 缺少合法的 CSV sha256 摘要`);
+    }
+    if (actualCsvSha256 !== metaSha) {
+      throw new Error(
+        `ARCHIVE_INTEGRITY_ERROR (${stem}): .raw.csv 摘要校验失败（文件可能已被截断或修改）：actual=${actualCsvSha256}, expected=${metaSha}`,
+      );
+    }
+    if (typeof meta.byteLength === "number" && csvBytes.byteLength !== meta.byteLength) {
+      throw new Error(
+        `ARCHIVE_INTEGRITY_ERROR (${stem}): .raw.csv 字节数校验失败：actual=${csvBytes.byteLength}, expected=${meta.byteLength}`,
+      );
+    }
+    expectedSourceSha256 = metaSha;
+    if (meta.inspection && typeof meta.inspection.detailRowCount === "number") {
+      expectedDetailRowCount = meta.inspection.detailRowCount;
+    }
+  }
+
+  if (pngBytes) {
+    const metaPngSha = typeof meta.emptyPngSha256 === "string" ? meta.emptyPngSha256.trim().toLowerCase() : "";
+    if (metaPngSha) {
+      if (!/^[0-9a-f]{64}$/.test(metaPngSha) || actualPngSha256 !== metaPngSha) {
+        throw new Error(
+          `ARCHIVE_INTEGRITY_ERROR (${stem}): .empty.png 摘要校验失败：actual=${actualPngSha256}, expected=${metaPngSha}`,
+        );
+      }
+      if (!csvBytes) expectedSourceSha256 = metaPngSha;
+    } else if (!csvBytes && manifestObj.probeVerifiedZero === true) {
+      throw new Error(`ARCHIVE_INTEGRITY_ERROR (${stem}): 零结果批次 .meta.json 缺少 emptyPngSha256 摘要`);
+    } else if (!csvBytes) {
+      expectedSourceSha256 = actualPngSha256;
+    }
+  }
+
+  return {
+    stem,
+    csvPath: hasCsv ? csvPath : null,
+    pngPath: hasPng ? pngPath : null,
+    csvBytes,
+    pngBytes,
+    expectedSourceSha256,
+    expectedDetailRowCount,
+  };
+}
+
+/**
+ * 核验 POST /api/trade/publish 最终状态：仅当无对账差异且本次全部导入月份与批次均已处于 published 状态时才视为成功。
+ */
+export function verifyPublishOutcome({
+  expectedMonths = [],
+  importedBatchIds = [],
+  publishResponse,
+  batchesAfterPublish = null,
+}) {
+  if (!publishResponse || publishResponse.status !== 200) {
+    throw new Error(
+      `批量发布失败: HTTP ${publishResponse?.status ?? "unknown"} ${JSON.stringify(publishResponse?.json ?? null)}`,
+    );
+  }
+  const body = publishResponse.json && typeof publishResponse.json === "object" ? publishResponse.json : {};
+  const reconNotes =
+    body.reconciliationNotes && typeof body.reconciliationNotes === "object" ? body.reconciliationNotes : {};
+  const reconEntries = Object.entries(reconNotes);
+  if (reconEntries.length > 0) {
+    throw new Error(`批量发布存在对账差异，未通过核验: ${JSON.stringify(reconNotes)}`);
+  }
+
+  const publishedMonths = Array.isArray(body.publishedMonths) ? body.publishedMonths.map(String) : [];
+  const pubMonthSet = new Set(publishedMonths);
+  const expectedUnique = [...new Set(expectedMonths.map(String))].sort();
+  const unpublishedMonths = expectedUnique.filter((m) => !pubMonthSet.has(m));
+  if (unpublishedMonths.length > 0) {
+    throw new Error(
+      `批量发布未覆盖全部导入月份（可能缺分组/缺税号或对账未通过）：未发布月份=[${unpublishedMonths.join(",")}]，已发布月份=[${publishedMonths.join(",")}]`,
+    );
+  }
+
+  if (expectedUnique.length === 0 && body.published !== true) {
+    throw new Error(`批量发布未生成任何已发布月份: ${JSON.stringify(body)}`);
+  }
+
+  if (Array.isArray(batchesAfterPublish) && importedBatchIds.length > 0) {
+    const byId = new Map(batchesAfterPublish.map((b) => [b.batchId, b]));
+    const unpublishedBatches = importedBatchIds.filter((bid) => {
+      const rec = byId.get(bid);
+      return !rec || (rec.publishState !== "published" && !rec.supersededBy);
+    });
+    if (unpublishedBatches.length > 0) {
+      throw new Error(
+        `以下导入批次在发布后仍未处于 published 状态（可能存在未就绪修订或对账拦截）：[${unpublishedBatches.join(",")}]`,
+      );
+    }
+  }
 }
 
 function collectManifestFiles(dir) {
@@ -271,34 +473,52 @@ async function main() {
     opts.target === "http" ? createHttpClient(opts.apiUrl) : await createLocalD1Client(opts.persistDir);
 
   try {
-    console.log(`[import-archive] 共发现 ${entriesToImport.length} 个可导入采集批次，开始 deferPublish=true 批量暂存...`);
+    console.log(`[import-archive] 共发现 ${entriesToImport.length} 个可导入采集批次，开始完整度校验与 deferPublish=true 批量暂存...`);
     let totalRows = 0;
     let importedCount = 0;
+    const expectedMonths = new Set();
+    const importedBatchIds = [];
 
     for (const entry of entriesToImport) {
-      const { mfPath, rawManifestText } = entry;
-      const dir = path.dirname(mfPath);
-      const stem = path.basename(mfPath, ".manifest.json");
-
-      const csvPath = path.join(dir, `${stem}.raw.csv`);
-      const pngPath = path.join(dir, `${stem}.empty.png`);
+      const { rawManifestText } = entry;
+      const integrity = verifyArchiveEntryIntegrity(entry);
 
       const form = new FormData();
       form.append("manifest", rawManifestText);
       form.append("deferPublish", "1");
 
-      if (fs.existsSync(csvPath)) {
-        const bytes = fs.readFileSync(csvPath);
-        form.append("file", new File([bytes], path.basename(csvPath), { type: "text/csv" }));
+      if (integrity.csvPath && integrity.csvBytes) {
+        form.append("file", new File([integrity.csvBytes], path.basename(integrity.csvPath), { type: "text/csv" }));
       }
-      if (fs.existsSync(pngPath)) {
-        const pngBytes = fs.readFileSync(pngPath);
-        form.append("emptyEvidence", new File([pngBytes], path.basename(pngPath), { type: "image/png" }));
+      if (integrity.pngPath && integrity.pngBytes) {
+        form.append(
+          "emptyEvidence",
+          new File([integrity.pngBytes], path.basename(integrity.pngPath), { type: "image/png" }),
+        );
       }
 
       const { status, json } = await client.sendMultipart("/api/trade/import-bulk", form);
       if (status !== 200) {
-        throw new Error(`批次导入失败 (${stem}): HTTP ${status} ${JSON.stringify(json)}`);
+        throw new Error(`批次导入失败 (${integrity.stem}): HTTP ${status} ${JSON.stringify(json)}`);
+      }
+      if (integrity.expectedSourceSha256 && json.sourceSha256 && json.sourceSha256 !== integrity.expectedSourceSha256) {
+        throw new Error(
+          `ARCHIVE_INTEGRITY_ERROR (${integrity.stem}): 后端实收原件摘要(${json.sourceSha256}) 与归档 .meta.json(${integrity.expectedSourceSha256})不一致`,
+        );
+      }
+      if (
+        integrity.expectedDetailRowCount !== null &&
+        Number(json.totalRowCount) !== integrity.expectedDetailRowCount
+      ) {
+        throw new Error(
+          `ARCHIVE_INTEGRITY_ERROR (${integrity.stem}): 后端解析行数(${json.totalRowCount}) 与归档 .meta.json(${integrity.expectedDetailRowCount})不一致`,
+        );
+      }
+      for (const m of Array.isArray(json.months) ? json.months : entry.months) {
+        expectedMonths.add(String(m));
+      }
+      for (const bid of Array.isArray(json.batchIds) ? json.batchIds : []) {
+        importedBatchIds.push(String(bid));
       }
       totalRows += Number(json.totalRowCount || 0);
       importedCount += 1;
@@ -306,9 +526,43 @@ async function main() {
 
     console.log(`[import-archive] 已暂存 ${importedCount} 个批次（累计明细 ${totalRows} 行），开始执行单次向量化发布...`);
     const pub = await client.sendJson("/api/trade/publish", "POST", { dictVersion: opts.dictVersion });
-    if (pub.status !== 200) {
-      throw new Error(`批量发布失败: HTTP ${pub.status} ${JSON.stringify(pub.json)}`);
+    let batchesAfterPublish = null;
+    if (pub.status === 200 && importedBatchIds.length > 0) {
+      const newlySet = new Set(Array.isArray(pub.json?.newlyPublishedMonths) ? pub.json.newlyPublishedMonths.map(String) : []);
+      const monthsToInspect = [...expectedMonths].filter((m) => !newlySet.has(m));
+      if (monthsToInspect.length > 0) {
+        const fetched = [];
+        for (const m of monthsToInspect) {
+          const res = await client.sendJson(
+            `/api/trade/batches?dictVersion=${encodeURIComponent(opts.dictVersion)}&month=${encodeURIComponent(m)}`,
+          );
+          if (res.status === 200 && Array.isArray(res.json?.items)) {
+            fetched.push(...res.json.items);
+          }
+        }
+        // 对于本轮 newlyPublishedMonths 中的批次，直接标记为已发布（仅核验未新发布月份中的批次状态）
+        const inspectedMonthSet = new Set(monthsToInspect);
+        const batchIdsToVerify = [];
+        for (const item of importedBatchIds) {
+          if (fetched.some((b) => b.batchId === item)) {
+            batchIdsToVerify.push(item);
+          }
+        }
+        if (batchIdsToVerify.length > 0) {
+          batchesAfterPublish = fetched;
+        } else if (inspectedMonthSet.size > 0 && fetched.length > 0) {
+          batchesAfterPublish = fetched;
+        }
+      }
     }
+    verifyPublishOutcome({
+      expectedMonths: [...expectedMonths],
+      importedBatchIds: batchesAfterPublish
+        ? importedBatchIds.filter((bid) => batchesAfterPublish.some((b) => b.batchId === bid))
+        : [],
+      publishResponse: pub,
+      batchesAfterPublish,
+    });
 
     const summary = {
       importedBatchFiles: importedCount,

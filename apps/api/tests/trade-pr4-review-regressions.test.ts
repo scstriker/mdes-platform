@@ -627,4 +627,312 @@ describe("PR #4 独立审查后端缺陷回归验证（P1-1 / P1-2 / P1-5 / P2-7
     expect(singleBadJson.error.code).toBe("TRADE_MANIFEST_INVALID");
     expect(singleBadJson.error.params?.field).toBe("probeVerifiedZero");
   });
+
+  it("[R2 P1-A] 并发导入重叠税号在数据库槽位主键层原子拦截（409），绝不重复覆盖或双倍累计金额", async () => {
+    const dictVer = "PR4-R2-P1A-RACE";
+    await h.sql([
+      `INSERT INTO trade_dict_meta (dict_version, source_filename, source_sha256, hs8_count, hs6_count, category_count, scope_mode)
+       VALUES ('${dictVer}', 'r2_p1a.csv', '${"c".repeat(64)}', 2, 2, 2, 'pilot')`,
+      `INSERT INTO trade_hs_dict (dict_version, hs8, hs6, item_name, category_id, category_name, category_order, seq_no) VALUES
+       ('${dictVer}', '${HS_ECG}', '901811', '心电图记录仪', 'cat-01', '医用诊断装备', 1, 1),
+       ('${dictVer}', '${HS_ROBOT}', '901890', '手术机器人', 'cat-02', '治疗装备', 2, 2)`,
+    ]);
+
+    // 场景 1：两个并发 /api/trade/import-bulk 请求同时通过 SELECT 重叠检查，覆盖重叠税号 HS_ECG（范围不同：[ECG] vs [ECG, ROBOT]）
+    const bulkA = buildBulkMultipart({
+      manifest: {
+        dictVersion: dictVer,
+        months: ["2024-01"],
+        flow: "import",
+        currency: "USD",
+        grouping: "product",
+        hs8: [HS_ECG],
+        probeVerifiedZero: true,
+      },
+      csvText: buildMultiMonthCsv("product", [{ ym: "202401", hs8: HS_ECG, name: "心电图记录仪", usd: 1000 }]),
+      filename: "race_a.csv",
+      headers: { "x-test-delay-before-import-commit-ms": "60" },
+    });
+    const bulkB = buildBulkMultipart({
+      manifest: {
+        dictVersion: dictVer,
+        months: ["2024-01"],
+        flow: "import",
+        currency: "USD",
+        grouping: "product",
+        hs8: [HS_ECG, HS_ROBOT],
+        probeVerifiedZero: true,
+      },
+      csvText: buildMultiMonthCsv("product", [
+        { ym: "202401", hs8: HS_ECG, name: "心电图记录仪", usd: 1000 },
+        { ym: "202401", hs8: HS_ROBOT, name: "手术机器人", usd: 2000 },
+      ]),
+      filename: "race_b.csv",
+      headers: { "x-test-delay-before-import-commit-ms": "60" },
+    });
+
+    const [resA, resB] = await Promise.all([
+      h.request("/api/trade/import-bulk", bulkA),
+      h.request("/api/trade/import-bulk", bulkB),
+    ]);
+    const statuses = [resA.status, resB.status].sort((a, b) => a - b);
+    expect(statuses).toEqual([200, 409]);
+
+    const loser = resA.status === 409 ? resA : resB;
+    const loserJson = (await loser.json()) as { error: { code: string } };
+    expect(loserJson.error.code).toBe("TRADE_SCOPE_CONFLICT");
+
+    const activeBatches = await h.query<{ cnt: number }>(
+      `SELECT COUNT(*) AS cnt FROM trade_import_batch
+       WHERE dict_version = '${dictVer}' AND month = '2024-01' AND flow = 'import' AND grouping = 'product'
+         AND superseded_by IS NULL`,
+    );
+    expect(activeBatches[0].cnt).toBe(1);
+
+    // 场景 2：两个并发 /api/trade/import 提交完全相同原件与范围 -> 双方均返回 200 且指向同一唯一批次，绝不双写
+    const makeIdenticalSingle = () => {
+      const form = new FormData();
+      form.append(
+        "manifest",
+        JSON.stringify({
+          dictVersion: dictVer,
+          month: "2024-02",
+          flow: "import",
+          currency: "USD",
+          grouping: "product",
+          hs8: [HS_ECG],
+          emptyHs8: [],
+        }),
+      );
+      form.append("deferPublish", "1");
+      form.append("file", new File([buildSingleCsv("product", HS_ECG, 3000)], "same.csv", { type: "text/csv" }));
+      return {
+        method: "POST",
+        body: form,
+        headers: { "x-test-delay-before-import-commit-ms": "60" },
+      } as RequestInit;
+    };
+    const [same1, same2] = await Promise.all([
+      h.request("/api/trade/import", makeIdenticalSingle()),
+      h.request("/api/trade/import", makeIdenticalSingle()),
+    ]);
+    expect(same1.status).toBe(200);
+    expect(same2.status).toBe(200);
+    const sameBody1 = (await same1.json()) as TradeImportResponse;
+    const sameBody2 = (await same2.json()) as TradeImportResponse;
+    expect(sameBody1.batchId).toBe(sameBody2.batchId);
+
+    const activeFeb = await h.query<{ cnt: number }>(
+      `SELECT COUNT(*) AS cnt FROM trade_import_batch
+       WHERE dict_version = '${dictVer}' AND month = '2024-02' AND flow = 'import' AND grouping = 'product'
+         AND superseded_by IS NULL`,
+    );
+    expect(activeFeb[0].cnt).toBe(1);
+  }, 30_000);
+
+  it("[R2 P2-1] 单月 /api/trade/import 同 CSV 将 probeVerifiedZero 从 false 改为 true 时不再沿用旧缺失批次", async () => {
+    const dictVer = "PR4-R2-P21-ZERO";
+    await h.sql([
+      `INSERT INTO trade_dict_meta (dict_version, source_filename, source_sha256, hs8_count, hs6_count, category_count, scope_mode)
+       VALUES ('${dictVer}', 'r2_p21.csv', '${"d".repeat(64)}', 2, 2, 2, 'pilot')`,
+      `INSERT INTO trade_hs_dict (dict_version, hs8, hs6, item_name, category_id, category_name, category_order, seq_no) VALUES
+       ('${dictVer}', '${HS_ECG}', '901811', '心电图记录仪', 'cat-01', '医用诊断装备', 1, 1),
+       ('${dictVer}', '${HS_ROBOT}', '901890', '手术机器人', 'cat-02', '治疗装备', 2, 2)`,
+    ]);
+
+    const csvOnlyEcg = buildSingleCsv("product", HS_ECG, 1500);
+    const uploadSingle = async (probeVerifiedZero: boolean) => {
+      const form = new FormData();
+      form.append(
+        "manifest",
+        JSON.stringify({
+          dictVersion: dictVer,
+          month: "2024-03",
+          flow: "import",
+          currency: "USD",
+          grouping: "product",
+          hs8: [HS_ECG, HS_ROBOT],
+          emptyHs8: [],
+          probeVerifiedZero,
+        }),
+      );
+      form.append("deferPublish", "1");
+      form.append("file", new File([csvOnlyEcg], "only_ecg.csv", { type: "text/csv" }));
+      const res = await h.request("/api/trade/import", { method: "POST", body: form });
+      expect(res.status).toBe(200);
+      return (await res.json()) as TradeImportResponse;
+    };
+
+    // 首次上传 probeVerifiedZero=false => HS_ROBOT 处于 missing
+    const first = await uploadSingle(false);
+    expect(first.replayed).toBe(false);
+    expect(first.coverage.missing).toEqual([HS_ROBOT]);
+    expect(first.coverage.confirmedEmpty).toEqual([]);
+
+    // 同一 CSV 改为 probeVerifiedZero=true => 必须生成新批次替代旧批次，并将 HS_ROBOT 转为 confirmedEmpty
+    const second = await uploadSingle(true);
+    expect(second.replayed).toBe(false);
+    expect(second.batchId).not.toBe(first.batchId);
+    expect(second.coverage.missing).toEqual([]);
+    expect(second.coverage.confirmedEmpty).toEqual([HS_ROBOT]);
+
+    // 再次以 probeVerifiedZero=true 上传 => 命中新批次的幂等重放
+    const third = await uploadSingle(true);
+    expect(third.replayed).toBe(true);
+    expect(third.batchId).toBe(second.batchId);
+  });
+
+  it("[R2 P2-2] /api/trade/import-bulk 即时发布时若仅同字典其他月份就绪发布，本次未就绪月份回执必须为 staged", async () => {
+    const dictVer = "PR4-R2-P22-STATUS";
+    await h.sql([
+      `INSERT INTO trade_dict_meta (dict_version, source_filename, source_sha256, hs8_count, hs6_count, category_count, scope_mode)
+       VALUES ('${dictVer}', 'r2_p22.csv', '${"e".repeat(64)}', 1, 1, 1, 'pilot')`,
+      `INSERT INTO trade_hs_dict (dict_version, hs8, hs6, item_name, category_id, category_name, category_order, seq_no)
+       VALUES ('${dictVer}', '${HS_ECG}', '901811', '心电图记录仪', 'cat-01', '医用诊断装备', 1, 1)`,
+    ]);
+
+    // 先暂存 2024-01 全部 2x4（deferPublish=true），使其处于就绪待发布状态
+    for (const flow of ["import", "export"] as const) {
+      for (const grouping of ["product", "partner", "regime", "region"] as const) {
+        const res = await h.request(
+          "/api/trade/import-bulk",
+          buildBulkMultipart({
+            manifest: {
+              dictVersion: dictVer,
+              months: ["2024-01"],
+              flow,
+              currency: "USD",
+              grouping,
+              hs8: [HS_ECG],
+              probeVerifiedZero: true,
+            },
+            csvText: buildMultiMonthCsv(grouping, [{ ym: "202401", hs8: HS_ECG, name: "心电图记录仪", usd: 500 }]),
+            deferPublish: true,
+          }),
+        );
+        expect(res.status).toBe(200);
+      }
+    }
+
+    // 现仅上传 2024-02 的 1 个分组（import/product）且 deferPublish=false：
+    // publishAllReadyTradeMonths 会发布 2024-01，但 2024-02 仍缺 7 组，本次回执绝不能误报 published
+    const unreadyRes = await h.request(
+      "/api/trade/import-bulk",
+      buildBulkMultipart({
+        manifest: {
+          dictVersion: dictVer,
+          months: ["2024-02"],
+          flow: "import",
+          currency: "USD",
+          grouping: "product",
+          hs8: [HS_ECG],
+          probeVerifiedZero: true,
+        },
+        csvText: buildMultiMonthCsv("product", [{ ym: "202402", hs8: HS_ECG, name: "心电图记录仪", usd: 600 }]),
+        deferPublish: false,
+      }),
+    );
+    expect(unreadyRes.status).toBe(200);
+    const unreadyBody = (await unreadyRes.json()) as TradeBulkImportResponse;
+    expect(unreadyBody.publishedMonths).toEqual(["2024-01"]);
+    expect(unreadyBody.status).toBe("staged");
+    expect(unreadyBody.releaseId).toBeNull();
+  });
+
+  it("[R2 P2-3] POST /api/trade/publish 收到损坏或非对象 JSON 请求体时返回 400，绝不静默回退发布默认字典", async () => {
+    // 准备一个合法可发布的 202601 暂存月份不重要，先验证即使默认字典存在可发布目标，损坏 JSON 也不会触发发布
+    const dictVer = "PR4-R2-P23-CHECK";
+    await h.sql([
+      `INSERT INTO trade_dict_meta (dict_version, source_filename, source_sha256, hs8_count, hs6_count, category_count, scope_mode)
+       VALUES ('${dictVer}', 'r2_p23.csv', '${"f".repeat(64)}', 1, 1, 1, 'pilot')`,
+      `INSERT INTO trade_hs_dict (dict_version, hs8, hs6, item_name, category_id, category_name, category_order, seq_no)
+       VALUES ('${dictVer}', '${HS_ECG}', '901811', '心电图记录仪', 'cat-01', '医用诊断装备', 1, 1)`,
+    ]);
+    // 把 202601 的一个可发布月替换为仅 1 码测试成本过高，改为核验 400 响应且不写入任何 trade_release
+    const brokenJsonRes = await h.request("/api/trade/publish", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: '{"dictVersion": "PR4-R2-P23-CHECK"',
+    });
+    expect(brokenJsonRes.status).toBe(400);
+    const brokenJson = (await brokenJsonRes.json()) as { error: { code: string; params?: { field?: string } } };
+    expect(brokenJson.error.code).toBe("TRADE_MANIFEST_INVALID");
+    expect(brokenJson.error.params?.field).toBe("body");
+
+    const arrayBodyRes = await h.request("/api/trade/publish", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "[]",
+    });
+    expect(arrayBodyRes.status).toBe(400);
+
+    const badTypeRes = await h.request("/api/trade/publish", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ dictVersion: 202601 }),
+    });
+    expect(badTypeRes.status).toBe(400);
+
+    // 合法空体仍允许正常调用
+    const emptyBodyRes = await h.request(`/api/trade/publish?dictVersion=${dictVer}`, { method: "POST" });
+    expect(emptyBodyRes.status).toBe(200);
+  });
+
+  it("[R2 P2-4] 带前导单引号（'90181100）或公式转义（=\"90181100\"）的税号在单月与批量接口均可正常导入", async () => {
+    const dictVer = "PR4-R2-P24-QUOTED-HS8";
+    await h.sql([
+      `INSERT INTO trade_dict_meta (dict_version, source_filename, source_sha256, hs8_count, hs6_count, category_count, scope_mode)
+       VALUES ('${dictVer}', 'r2_p24.csv', '${"9".repeat(64)}', 2, 2, 2, 'pilot')`,
+      `INSERT INTO trade_hs_dict (dict_version, hs8, hs6, item_name, category_id, category_name, category_order, seq_no) VALUES
+       ('${dictVer}', '${HS_ECG}', '901811', '心电图记录仪', 'cat-01', '医用诊断装备', 1, 1),
+       ('${dictVer}', '${HS_ROBOT}', '901890', '手术机器人', 'cat-02', '治疗装备', 2, 2)`,
+    ]);
+
+    // 批量导入：含 '90181100 与 ="90189080"
+    const quotedBulkCsv =
+      "数据年月,商品编码,商品名称,第一数量,第一计量单位,美元\r\n" +
+      `'202401,'${HS_ECG},心电图记录仪,10,台,1200\r\n` +
+      `202401,"=""${HS_ROBOT}""",手术机器人,2,台,5000\r\n`;
+    const bulkRes = await h.request(
+      "/api/trade/import-bulk",
+      buildBulkMultipart({
+        manifest: {
+          dictVersion: dictVer,
+          months: ["2024-01"],
+          flow: "import",
+          currency: "USD",
+          grouping: "product",
+          hs8: [HS_ECG, HS_ROBOT],
+          probeVerifiedZero: true,
+        },
+        csvText: quotedBulkCsv,
+      }),
+    );
+    expect(bulkRes.status).toBe(200);
+    const bulkBody = (await bulkRes.json()) as TradeBulkImportResponse;
+    expect(bulkBody.totalRowCount).toBe(2);
+
+    // 单月导入：含 '90181100
+    const singleQuotedCsv = `商品编码,商品名称,美元\n'${HS_ECG},心电图记录仪,888\n`;
+    const singleForm = new FormData();
+    singleForm.append(
+      "manifest",
+      JSON.stringify({
+        dictVersion: dictVer,
+        month: "2024-02",
+        flow: "export",
+        currency: "USD",
+        grouping: "product",
+        hs8: [HS_ECG],
+        emptyHs8: [],
+      }),
+    );
+    singleForm.append("deferPublish", "1");
+    singleForm.append("file", new File([singleQuotedCsv], "quoted.csv", { type: "text/csv" }));
+    const singleRes = await h.request("/api/trade/import", { method: "POST", body: singleForm });
+    expect(singleRes.status).toBe(200);
+    const singleBody = (await singleRes.json()) as TradeImportResponse;
+    expect(singleBody.coverage.received).toEqual([HS_ECG]);
+    expect(singleBody.rowCount).toBe(1);
+  });
 });

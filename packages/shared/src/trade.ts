@@ -163,7 +163,7 @@ function parseOptionalQuantity(raw: string): { ok: true; value: number | null } 
 
 function parseOptionalUnit(raw: string): string | null {
   const trimmed = raw.trim();
-  if (!trimmed || trimmed === "--" || trimmed === "—") return null;
+  if (!trimmed || trimmed === "--" || trimmed === "—" || trimmed === "?" || trimmed === "？") return null;
   return trimmed;
 }
 
@@ -537,12 +537,26 @@ function isAggregateLabel(val: string): boolean {
 }
 
 function normalizeCsvMonth(raw: string): string | null {
-  const t = raw.trim();
+  let t = raw.trim();
+  const eqMatch = /^="([^"]+)"$/.exec(t);
+  if (eqMatch) t = eqMatch[1].trim();
+  t = t.replace(/^'+/, "").trim();
   const m1 = /^(\d{4})-(0[1-9]|1[0-2])$/.exec(t);
   if (m1) return `${m1[1]}-${m1[2]}`;
   const m2 = /^(\d{4})(0[1-9]|1[0-2])$/.exec(t);
   if (m2) return `${m2[1]}-${m2[2]}`;
   return null;
+}
+
+/** 规范化海关原件中可能带 Excel 文本前导单引号（'90181100）或公式转义（="90181100"）的 8 位税号 */
+export function normalizeCsvHs8Cell(raw: string): string | null {
+  let cleaned = raw.trim();
+  const eqMatch = /^="(\d+)"$/.exec(cleaned);
+  if (eqMatch) {
+    cleaned = eqMatch[1];
+  }
+  cleaned = cleaned.replace(/^'+/, "").trim();
+  return /^\d{8}$/.test(cleaned) ? cleaned : null;
 }
 
 function normalizeCsvFlow(raw: string): TradeFlow | null {
@@ -688,16 +702,17 @@ export function parseCustomsCsvBytes(
       continue;
     }
 
-    if (!/^\d{8}$/.test(rawHs)) {
+    const hs8 = normalizeCsvHs8Cell(rawHs);
+    if (!hs8) {
       return {
         ok: false,
         error: { status: 400, code: "TRADE_CSV_INVALID", params: { line: rec.line, field: "hs8", reason: `invalid hs8 '${rawHs}'` } },
       };
     }
-    if (!allowedHs8.has(rawHs)) {
+    if (!allowedHs8.has(hs8)) {
       return {
         ok: false,
-        error: { status: 400, code: "TRADE_CSV_INVALID", params: { line: rec.line, field: "hs8", reason: `hs8 '${rawHs}' not in manifest` } },
+        error: { status: 400, code: "TRADE_CSV_INVALID", params: { line: rec.line, field: "hs8", reason: `hs8 '${hs8}' not in manifest` } },
       };
     }
 
@@ -762,13 +777,13 @@ export function parseCustomsCsvBytes(
       }
     }
 
-    if (declaredEmptyHs8.has(rawHs)) {
+    if (declaredEmptyHs8.has(hs8)) {
       return {
         ok: false,
         error: {
           status: 400,
           code: "TRADE_CSV_INVALID",
-          params: { line: rec.line, field: "emptyHs8", reason: `hs8 '${rawHs}' has detail row but listed in emptyHs8` },
+          params: { line: rec.line, field: "emptyHs8", reason: `hs8 '${hs8}' has detail row but listed in emptyHs8` },
         },
       };
     }
@@ -796,19 +811,19 @@ export function parseCustomsCsvBytes(
       };
     }
 
-    const bizKey = `${rawHs}|${groupCode}`;
+    const bizKey = `${hs8}|${groupCode}`;
     if (seenKeys.has(bizKey)) {
       return {
         ok: false,
-        error: { status: 400, code: "TRADE_CSV_INVALID", params: { line: rec.line, field: "duplicate_key", reason: `duplicate (${rawHs}, ${groupCode})` } },
+        error: { status: 400, code: "TRADE_CSV_INVALID", params: { line: rec.line, field: "duplicate_key", reason: `duplicate (${hs8}, ${groupCode})` } },
       };
     }
     seenKeys.add(bizKey);
 
     rows.push({
       line: rec.line,
-      hs8: rawHs,
-      itemName: rawName || rawHs,
+      hs8,
+      itemName: rawName || hs8,
       groupCode,
       groupName,
       usdScaled: parsedUsd.scaled,
@@ -984,16 +999,17 @@ export function parseMultiMonthCustomsCsvBytes(
       continue;
     }
 
-    if (!/^\d{8}$/.test(rawHs)) {
+    const hs8 = normalizeCsvHs8Cell(rawHs);
+    if (!hs8) {
       return {
         ok: false,
         error: { status: 400, code: "TRADE_CSV_INVALID", params: { line: rec.line, field: "hs8", reason: `invalid hs8 '${rawHs}'` } },
       };
     }
-    if (!allowedHs8.has(rawHs)) {
+    if (!allowedHs8.has(hs8)) {
       return {
         ok: false,
-        error: { status: 400, code: "TRADE_CSV_INVALID", params: { line: rec.line, field: "hs8", reason: `hs8 '${rawHs}' not in manifest` } },
+        error: { status: 400, code: "TRADE_CSV_INVALID", params: { line: rec.line, field: "hs8", reason: `hs8 '${hs8}' not in manifest` } },
       };
     }
 
@@ -1052,13 +1068,13 @@ export function parseMultiMonthCustomsCsvBytes(
       }
     }
 
-    if (!probeVerifiedZero && declaredEmptyHs8.has(rawHs)) {
+    if (!probeVerifiedZero && declaredEmptyHs8.has(hs8)) {
       return {
         ok: false,
         error: {
           status: 400,
           code: "TRADE_CSV_INVALID",
-          params: { line: rec.line, field: "emptyHs8", reason: `hs8 '${rawHs}' has detail row but listed in emptyHs8` },
+          params: { line: rec.line, field: "emptyHs8", reason: `hs8 '${hs8}' has detail row but listed in emptyHs8` },
         },
       };
     }
@@ -1086,19 +1102,19 @@ export function parseMultiMonthCustomsCsvBytes(
       };
     }
 
-    const bizKey = `${rowMonth}|${rawHs}|${groupCode}`;
+    const bizKey = `${rowMonth}|${hs8}|${groupCode}`;
     if (seenKeys.has(bizKey)) {
       return {
         ok: false,
-        error: { status: 400, code: "TRADE_CSV_INVALID", params: { line: rec.line, field: "duplicate_key", reason: `duplicate (${rowMonth}, ${rawHs}, ${groupCode})` } },
+        error: { status: 400, code: "TRADE_CSV_INVALID", params: { line: rec.line, field: "duplicate_key", reason: `duplicate (${rowMonth}, ${hs8}, ${groupCode})` } },
       };
     }
     seenKeys.add(bizKey);
 
     byMonth.get(rowMonth)!.push({
       line: rec.line,
-      hs8: rawHs,
-      itemName: rawName || rawHs,
+      hs8,
+      itemName: rawName || hs8,
       groupCode,
       groupName,
       usdScaled: parsedUsd.scaled,

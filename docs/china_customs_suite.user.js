@@ -599,17 +599,17 @@
       ["unitFlag1", "true"],
       ["codeLength", "8"],
       ["outerField1", groupSpec.outerFields[0]],
-      ["outerValue1", validHs8.join(",")]
+      ["outerField2", groupSpec.outerFields.length > 1 ? groupSpec.outerFields[1] : ""],
+      ["outerField3", ""],
+      ["outerField4", ""],
+      ["outerValue1", validHs8.join(",")],
+      ["outerValue2", ""],
+      ["outerValue3", ""],
+      ["outerValue4", ""],
+      ["orderType", "CODE ASC DEFAULT"],
+      ["selectTableState", String(effState)],
+      ["currentStartTime", String(effCurrentStartTime)]
     ];
-
-    if (groupSpec.outerFields.length > 1) {
-      entries.push(["outerField2", groupSpec.outerFields[1]]);
-      entries.push(["outerValue2", ""]);
-    }
-
-    entries.push(["orderType", "CODE ASC DEFAULT"]);
-    entries.push(["selectTableState", String(effState)]);
-    entries.push(["currentStartTime", String(effCurrentStartTime)]);
 
     return new URLSearchParams(entries);
   }
@@ -931,7 +931,13 @@
         if (Array.isArray(parsed?.rows)) return parsed.rows.length;
       } catch (_) {}
     }
-    // 海关列表接口 HTML 片段模式：<p class="c-666">共查询到<span>1,234</span>条数据</p>
+    // 优先提取官方结果页隐藏域：<input type="hidden" id="totalSize" name="totalSize" value="1">
+    const hiddenTotalMatch = /id=["']totalSize["'][^>]*value=["'](\d+)["']/i.exec(trimmed) || /value=["'](\d+)["'][^>]*id=["']totalSize["']/i.exec(trimmed);
+    if (hiddenTotalMatch && hiddenTotalMatch[1]) {
+      const hn = Number(hiddenTotalMatch[1]);
+      if (Number.isFinite(hn)) return hn;
+    }
+    // 海关列表接口 HTML 片段模式：<p class="c-666">共查询到 <span>1,234</span> 条数据</p>
     const spanMatch = /class=["'][^"']*c-666[^"']*["'][^>]*>[\s\S]*?<span[^>]*>([\d,]+)<\/span>/i.exec(trimmed);
     if (spanMatch && spanMatch[1]) {
       const n = Number(spanMatch[1].replace(/,/g, ""));
@@ -941,6 +947,172 @@
       return 0;
     }
     return null;
+  }
+
+  function buildZeroQueryFingerprint({
+    year,
+    startMonth = 1,
+    endMonth = 12,
+    monthFlag = "1",
+    flow,
+    grouping,
+    selectTableState,
+    hs8
+  }) {
+    const sortedHs8 = [...new Set((hs8 || []).map((c) => String(c).trim()).filter(Boolean))].sort();
+    const sm = String(Number(startMonth)).padStart(2, "0");
+    const em = String(Number(endMonth)).padStart(2, "0");
+    const mf = monthFlag === "1" ? "1" : "single";
+    return `${DICT_VERSION}|${Number(year)}-${sm}..${Number(year)}-${em}|mf=${mf}|${flow}|${grouping}|st=${Number(selectTableState)}|hs8=${sortedHs8.join(",")}`;
+  }
+
+  function extractOfficialResponseExcerpt(rawText) {
+    const cleaned = String(rawText ?? "")
+      .replace(/<script[\s\S]*?<\/script>/gi, " ")
+      .replace(/<style[\s\S]*?<\/style>/gi, " ")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    return cleaned.slice(0, 1000) || "(official empty response body)";
+  }
+
+  function escapeEvidenceHtml(str) {
+    return String(str ?? "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
+  /**
+   * 在可见页面上同步渲染当前零结果查询的完整条件与官方返回摘要，确保随后的截图凭证严格对应当前查询而非历史页面。
+   */
+  async function renderEmptyQueryEvidence({
+    year,
+    startMonth = 1,
+    endMonth = 12,
+    monthFlag = "1",
+    flow,
+    grouping,
+    hs8,
+    selectTableState,
+    officialTotal = 0,
+    responseSha256 = "",
+    officialResponseExcerpt = "",
+    requestParams = "",
+    checkedAt = null,
+    allowCloseButton = false
+  }) {
+    if (typeof document === "undefined" || !document.body) {
+      return { ok: false, rendered: false, reason: "document_unavailable" };
+    }
+    if (Number(officialTotal) !== 0) {
+      return { ok: false, rendered: false, reason: "official_total_must_be_zero" };
+    }
+    const validHs8 = validateHs8Batch(hs8);
+    const flowSpec = FLOW_SPECS[flow];
+    const groupSpec = GROUPING_SPECS[grouping];
+    if (!flowSpec || !groupSpec) {
+      return { ok: false, rendered: false, reason: "invalid_flow_or_grouping" };
+    }
+    const queryFingerprint = buildZeroQueryFingerprint({
+      year,
+      startMonth,
+      endMonth,
+      monthFlag,
+      flow,
+      grouping,
+      selectTableState,
+      hs8: validHs8
+    });
+    const prev = document.getElementById("mdes-empty-evidence-overlay");
+    if (prev && typeof prev.remove === "function") {
+      prev.remove();
+    }
+    const sm = String(Number(startMonth)).padStart(2, "0");
+    const em = String(Number(endMonth)).padStart(2, "0");
+    const verifiedAt = checkedAt || new Date().toISOString();
+    const pageUrl =
+      typeof location !== "undefined" && location && location.href
+        ? String(location.href)
+        : "http://stats.customs.gov.cn/";
+    const overlay = document.createElement("div");
+    overlay.id = "mdes-empty-evidence-overlay";
+    if (typeof overlay.setAttribute === "function") {
+      overlay.setAttribute("data-query-fingerprint", queryFingerprint);
+      overlay.setAttribute("data-response-sha256", String(responseSha256 || ""));
+      overlay.setAttribute("data-official-total", "0");
+    }
+    overlay.dataset = overlay.dataset || {};
+    overlay.dataset.queryFingerprint = queryFingerprint;
+    overlay.dataset.responseSha256 = String(responseSha256 || "");
+    overlay.dataset.officialTotal = "0";
+    overlay.style.cssText =
+      "position:fixed;inset:0;z-index:2147483647;background:#ffffff;color:#0f172a;" +
+      "font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;" +
+      "padding:28px 36px;overflow:auto;box-sizing:border-box;border:6px solid #0b3a6e;";
+    overlay.innerHTML = `
+      <div style="max-width:980px;margin:0 auto;">
+        <div style="display:flex;justify-content:space-between;align-items:center;border-bottom:2px solid #0b3a6e;padding-bottom:12px;margin-bottom:16px;">
+          <div>
+            <div style="font-size:20px;font-weight:700;color:#0b3a6e;">中国海关总署统计数据查询 · 官方零结果核验凭证</div>
+            <div style="font-size:12px;color:#475569;margin-top:4px;">来源页面：${escapeEvidenceHtml(pageUrl)} | 核验时间：${escapeEvidenceHtml(verifiedAt)}</div>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;">
+            <div style="background:#dcfce7;color:#166534;border:1px solid #86efac;padding:6px 12px;font-weight:700;font-size:14px;">官方返回：0 条记录</div>
+            ${allowCloseButton ? '<button id="btn-close-empty-evidence" style="padding:6px 10px;border:1px solid #cbd5e1;background:#f8fafc;cursor:pointer;font-size:12px;">关闭</button>' : ""}
+          </div>
+        </div>
+        <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:16px;">
+          <tr><td style="width:200px;padding:7px 10px;border:1px solid #cbd5e1;background:#f8fafc;font-weight:600;">字典版本 / 币制</td><td style="padding:7px 10px;border:1px solid #cbd5e1;">${escapeEvidenceHtml(DICT_VERSION)} / USD (美元)</td></tr>
+          <tr><td style="padding:7px 10px;border:1px solid #cbd5e1;background:#f8fafc;font-weight:600;">统计时间区间</td><td style="padding:7px 10px;border:1px solid #cbd5e1;">${escapeEvidenceHtml(`${year}-${sm} .. ${year}-${em}`)}（monthFlag=${escapeEvidenceHtml(monthFlag === "1" ? "1" : "single")}, selectTableState=${escapeEvidenceHtml(String(selectTableState))}）</td></tr>
+          <tr><td style="padding:7px 10px;border:1px solid #cbd5e1;background:#f8fafc;font-weight:600;">贸易流向 / 分组</td><td style="padding:7px 10px;border:1px solid #cbd5e1;">${escapeEvidenceHtml(`${flow} (${flowSpec.label}, iEType=${flowSpec.iEType}) / ${grouping} (${groupSpec.label}, ${groupSpec.outerFields.join("+")})`)}</td></tr>
+          <tr><td style="padding:7px 10px;border:1px solid #cbd5e1;background:#f8fafc;font-weight:600;">查询税号 (${validHs8.length} 项)</td><td style="padding:7px 10px;border:1px solid #cbd5e1;font-family:monospace;word-break:break-all;">${escapeEvidenceHtml(validHs8.join(", "))}</td></tr>
+          <tr><td style="padding:7px 10px;border:1px solid #cbd5e1;background:#f8fafc;font-weight:600;">查询指纹 (Fingerprint)</td><td style="padding:7px 10px;border:1px solid #cbd5e1;font-family:monospace;word-break:break-all;">${escapeEvidenceHtml(queryFingerprint)}</td></tr>
+          <tr><td style="padding:7px 10px;border:1px solid #cbd5e1;background:#f8fafc;font-weight:600;">官方接口响应摘要 (SHA-256)</td><td style="padding:7px 10px;border:1px solid #cbd5e1;font-family:monospace;word-break:break-all;">${escapeEvidenceHtml(responseSha256 || "")}</td></tr>
+        </table>
+        <div style="font-size:13px;font-weight:600;color:#0b3a6e;margin-bottom:6px;">POST /queryData/getQueryDataListByWhere 官方零结果响应原文摘录</div>
+        <pre style="background:#f8fafc;border:1px solid #cbd5e1;padding:12px;font-size:12px;white-space:pre-wrap;word-break:break-all;margin:0 0 12px 0;">${escapeEvidenceHtml(officialResponseExcerpt || "暂无数据（官方返回 total=0）")}</pre>
+        ${requestParams ? `<div style="font-size:11px;color:#64748b;font-family:monospace;word-break:break-all;">请求参数：${escapeEvidenceHtml(requestParams)}</div>` : ""}
+      </div>
+    `;
+    document.body.appendChild(overlay);
+    if (allowCloseButton) {
+      const closeBtn = document.getElementById("btn-close-empty-evidence");
+      if (closeBtn && typeof closeBtn.addEventListener === "function") {
+        closeBtn.addEventListener("click", () => clearEmptyQueryEvidence());
+      }
+    }
+    if (typeof requestAnimationFrame === "function") {
+      await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    }
+    const mounted = document.getElementById("mdes-empty-evidence-overlay");
+    const mountedFp =
+      mounted && mounted.dataset && mounted.dataset.queryFingerprint
+        ? mounted.dataset.queryFingerprint
+        : mounted && typeof mounted.getAttribute === "function"
+          ? mounted.getAttribute("data-query-fingerprint")
+          : "";
+    const verifiedMounted = Boolean(mounted && mountedFp === queryFingerprint);
+    return {
+      ok: verifiedMounted,
+      rendered: verifiedMounted,
+      officialTotal: 0,
+      queryFingerprint,
+      responseSha256: String(responseSha256 || ""),
+      elementId: "mdes-empty-evidence-overlay"
+    };
+  }
+
+  function clearEmptyQueryEvidence() {
+    if (typeof document === "undefined") return false;
+    const el = document.getElementById("mdes-empty-evidence-overlay");
+    if (el && typeof el.remove === "function") {
+      el.remove();
+      return true;
+    }
+    return false;
   }
 
   /**
@@ -955,14 +1127,19 @@
     grouping,
     hs8,
     stateCandidates = null,
-    currentStartTime = "202408",
+    currentStartTime = null,
     minDelayMs = MIN_REQUEST_INTERVAL_MS,
     maxDelayMs = DEFAULT_MAX_INTERVAL_MS,
     skipPoliteWaitForUnitTest = false
   }) {
     const candidates = stateCandidates || defaultStateCandidatesForYear(year, startMonth, endMonth);
     const activeFetch = getQueryFrameFetch();
+    const useBrowserTimeout =
+      typeof window !== "undefined" &&
+      typeof AbortSignal !== "undefined" &&
+      typeof AbortSignal.timeout === "function";
     let requestCount = 0;
+    let lastTransientReason = null;
     for (const state of candidates) {
       const params = buildAnnualMonthlyParams({
         year,
@@ -984,7 +1161,7 @@
           requestCount += 1;
           let res;
           try {
-            res = await activeFetch("/queryData/getQueryDataListByWhere", {
+            const fetchInit = {
               method: "POST",
               credentials: "include",
               headers: {
@@ -992,13 +1169,32 @@
                 "X-Requested-With": "XMLHttpRequest"
               },
               body: params
-            });
+            };
+            if (useBrowserTimeout) {
+              fetchInit.signal = AbortSignal.timeout(120000);
+            }
+            res = await activeFetch("/queryData/getQueryDataListByWhere", fetchInit);
           } catch (netErr) {
-            return { halt: true, status: 0, reason: `fetch_failed:${String(netErr && netErr.message ? netErr.message : netErr)}` };
+            return {
+              halt: false,
+              ok: false,
+              transientError: true,
+              status: 0,
+              reason: `fetch_failed:${String(netErr && netErr.message ? netErr.message : netErr)}`
+            };
           }
           if (res.status === 412 || res.status === 403 || res.status === 429) {
             return {
               halt: true,
+              status: res.status,
+              reason: `http_${res.status}`
+            };
+          }
+          if (res.status === 502 || res.status === 503 || res.status === 504) {
+            return {
+              halt: false,
+              ok: false,
+              transientError: true,
               status: res.status,
               reason: `http_${res.status}`
             };
@@ -1012,7 +1208,28 @@
           }
           const total = extractTotalFromListResponseText(text);
           if (total !== null) {
-            return { halt: false, ok: true, state, total };
+            let zeroEvidence = null;
+            if (total === 0) {
+              const responseSha256 = await computeSha256Hex(new TextEncoder().encode(text));
+              zeroEvidence = {
+                queryFingerprint: buildZeroQueryFingerprint({
+                  year,
+                  startMonth,
+                  endMonth,
+                  monthFlag,
+                  flow,
+                  grouping,
+                  selectTableState: state,
+                  hs8
+                }),
+                officialTotal: 0,
+                responseSha256,
+                officialResponseExcerpt: extractOfficialResponseExcerpt(text),
+                requestParams: params.toString(),
+                checkedAt: new Date().toISOString()
+              };
+            }
+            return { halt: false, ok: true, state, total, zeroEvidence };
           }
           if (isHtmlErrorResponse(text)) {
             return { halt: true, status: res.status, reason: "html_challenge_or_session_expired" };
@@ -1037,10 +1254,14 @@
           ok: true,
           state: singleProbe.state,
           total: singleProbe.total,
+          zeroEvidence: singleProbe.zeroEvidence ?? null,
           isHtmlBlocked: false,
           circuitBreakRequired: false,
           requestCount
         };
+      }
+      if (singleProbe.transientError) {
+        lastTransientReason = singleProbe.reason;
       }
     }
     return {
@@ -1049,7 +1270,8 @@
       total: null,
       isHtmlBlocked: false,
       circuitBreakRequired: false,
-      reason: "no_state_matched",
+      transientError: Boolean(lastTransientReason),
+      reason: lastTransientReason || "no_state_matched",
       requestCount
     };
   }
@@ -1066,7 +1288,7 @@
     grouping,
     hs8,
     selectTableState = 3,
-    currentStartTime = "202408",
+    currentStartTime = null,
     minDelayMs = MIN_REQUEST_INTERVAL_MS,
     maxDelayMs = DEFAULT_MAX_INTERVAL_MS,
     skipPoliteWaitForUnitTest = false
@@ -1084,24 +1306,46 @@
       currentStartTime,
       forListCheck: false
     });
+    const useBrowserTimeout =
+      typeof window !== "undefined" &&
+      typeof AbortSignal !== "undefined" &&
+      typeof AbortSignal.timeout === "function";
 
     return withSerialFlightLock(
       { minDelayMs, maxDelayMs, skipPoliteWaitForUnitTest },
       async () => {
         const activeFetch = getQueryFrameFetch();
-        const res = await activeFetch("/queryData/downloadQueryData", {
-          method: "POST",
-          credentials: "include",
-          headers: { "Content-Type": "application/x-www-form-urlencoded" },
-          body: params
-        });
+        let res;
+        try {
+          const fetchInit = {
+            method: "POST",
+            credentials: "include",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: params
+          };
+          if (useBrowserTimeout) {
+            fetchInit.signal = AbortSignal.timeout(175000);
+          }
+          res = await activeFetch("/queryData/downloadQueryData", fetchInit);
+        } catch (netErr) {
+          return {
+            ok: false,
+            status: 0,
+            transientError: true,
+            circuitBreakRequired: false,
+            reason: `fetch_failed:${String(netErr && netErr.message ? netErr.message : netErr)}`
+          };
+        }
 
         if (!res.ok) {
+          const isGate = [403, 412, 429].includes(res.status);
+          const isTransient = [502, 503, 504].includes(res.status);
           return {
             ok: false,
             status: res.status,
             reason: `http_${res.status}`,
-            circuitBreakRequired: [403, 412, 429, 502, 503].includes(res.status)
+            transientError: isTransient,
+            circuitBreakRequired: isGate
           };
         }
 
@@ -1202,6 +1446,9 @@
     buildManifest,
     inspectRawCustomsBytes,
     probeCount: probeOfficialCountAndState,
+    buildZeroQueryFingerprint,
+    renderEmptyQueryEvidence,
+    clearEmptyQueryEvidence,
     fetchRawExportBase64,
     buildArchivePaths
   });
@@ -1545,6 +1792,22 @@
       }
 
       if (probe.total === 0) {
+        await renderEmptyQueryEvidence({
+          year,
+          startMonth: sMonth,
+          endMonth: eMonth,
+          monthFlag,
+          flow,
+          grouping,
+          hs8,
+          selectTableState: probe.state,
+          officialTotal: 0,
+          responseSha256: probe.zeroEvidence ? probe.zeroEvidence.responseSha256 : "",
+          officialResponseExcerpt: probe.zeroEvidence ? probe.zeroEvidence.officialResponseExcerpt : "",
+          requestParams: probe.zeroEvidence ? probe.zeroEvidence.requestParams : "",
+          checkedAt: probe.zeroEvidence ? probe.zeroEvidence.checkedAt : null,
+          allowCloseButton: true
+        });
         const emptyManifest = buildManifest({
           month: monthsCovered[0],
           months: monthsCovered,
@@ -1562,6 +1825,8 @@
           grouping,
           batchKey,
           officialTotal: 0,
+          queryFingerprint: probe.zeroEvidence ? probe.zeroEvidence.queryFingerprint : null,
+          officialProbeResponseSha256: probe.zeroEvidence ? probe.zeroEvidence.responseSha256 : null,
           requiredEmptyPngFilename: `${stem}.empty.png`,
           collectedAt: new Date().toISOString()
         };
