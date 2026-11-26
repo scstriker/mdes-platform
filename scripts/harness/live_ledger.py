@@ -69,6 +69,7 @@ class LiveCollectionLedger:
         self.records_by_stem: dict[str, dict[str, Any]] = {}
         self.session_status = "🟢 会话正常（MAX_INFLIGHT=1 单飞串行运行中）"
         self.current_activity = "初始化中..."
+        self.extra_footer_lines: list[str] = []
         self._load_existing()
 
     def _load_existing(self) -> None:
@@ -188,7 +189,7 @@ class LiveCollectionLedger:
                 if all(cnts_by_grp[g] == 0 for g in ("product", "partner", "regime", "region")):
                     recon_status = "⏳ 待采集"
                 elif all(cnts_by_grp[g] > 0 for g in ("product", "partner", "regime", "region")) and len({sums_by_grp[g] for g in ("product", "partner", "regime", "region")}) == 1:
-                    recon_status = "✅ **四分组 $0 严丝合缝**"
+                    recon_status = "✅ **四分组 `$0` 严丝合缝**"
                 else:
                     done_grps = [g for g in ("product", "partner", "regime", "region") if cnts_by_grp[g] > 0]
                     recon_status = f"🔄 采集中（已写入 `{','.join(done_grps)}`）"
@@ -217,6 +218,11 @@ class LiveCollectionLedger:
                     f"`{r['returnedHs8Count']}` / `{r['emptyHs8Count']}` | **`{r['usdDetailSum']}`** | {sha_short} | `{r['completedAt']}` |"
                 )
 
+        try:
+            archive_label = self.archive_dir.resolve().relative_to(self.repo_ledger_path.resolve().parents[1]).as_posix()
+        except Exception:
+            archive_label = self.archive_dir.name
+
         content = "\n".join(
             [
                 "# 海关医疗器械（2022–2026）真站低频串行实采实时进度台账",
@@ -225,7 +231,7 @@ class LiveCollectionLedger:
                 f"- **当前任务阶段**：{self.mode_label}",
                 f"- **会话与运行状态**：{self.session_status}",
                 f"- **最新动作**：{self.current_activity}",
-                f"- **归档目录**：`{self.archive_dir}`",
+                f"- **归档目录**：`{archive_label}`",
                 "- **低频合规参数**：`MAX_INFLIGHT = 1`（全局单飞互斥锁）| `currencyType = usd` | `monthFlag = 1` | 预检间隔 `3.5s–6.5s` | 导出后遵循官网 `13.5s–16.5s` 冷却 | 会话自动保活与失效弹窗提醒",
                 "",
                 "## 一、分年度全局汇总进度（全国 `product` 口径不重复计总额）",
@@ -240,6 +246,7 @@ class LiveCollectionLedger:
                 "",
                 *detail_lines,
                 "",
+                *self.extra_footer_lines,
             ]
         )
 
