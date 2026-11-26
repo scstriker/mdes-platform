@@ -72,8 +72,14 @@ async function readTradeMultipart(c: Context<AppEnv>): Promise<{
 export function tradeRoutes(app: Hono<AppEnv>) {
   app.post("/api/trade/import", async (c) => {
     const parsed = await readTradeMultipart(c);
-    const failHeader = c.env.ENABLE_TEST_HOOKS === "1" && c.req.header("x-test-fail-before-publish") === "1";
-    const preemptHeader = c.env.ENABLE_TEST_HOOKS === "1" && c.req.header("x-test-preempt-release-once") === "1";
+    const hooksEnabled = c.env.ENABLE_TEST_HOOKS === "1";
+    const failHeader = hooksEnabled && c.req.header("x-test-fail-before-publish") === "1";
+    const preemptHeader = hooksEnabled && c.req.header("x-test-preempt-release-once") === "1";
+    const rawDelayMs = hooksEnabled ? c.req.header("x-test-delay-before-import-commit-ms") : undefined;
+    const delayBeforeCommitMs =
+      rawDelayMs && Number.isFinite(Number.parseInt(rawDelayMs, 10)) && Number.parseInt(rawDelayMs, 10) > 0
+        ? Math.min(2000, Number.parseInt(rawDelayMs, 10))
+        : undefined;
     const deferPublish = parseBoolField(parsed.deferPublishField, false);
     const result = await importTradeBatch(c.get("db"), {
       rawManifest: parsed.rawManifest,
@@ -83,6 +89,7 @@ export function tradeRoutes(app: Hono<AppEnv>) {
       deferPublish,
       failBeforePublishCommit: failHeader,
       preemptReleaseOnce: preemptHeader,
+      delayBeforeCommitMs,
     });
     return c.json(result);
   });
@@ -96,6 +103,7 @@ export function tradeRoutes(app: Hono<AppEnv>) {
       return Number.isFinite(n) && n > 0 ? n : undefined;
     };
     const hooksEnabled = c.env.ENABLE_TEST_HOOKS === "1";
+    const rawDelayMs = hooksEnabled ? parseOptPositiveInt(c.req.header("x-test-delay-before-import-commit-ms")) : undefined;
     const result = await importTradeBulkBatch(c.get("db"), {
       rawManifest: parsed.rawManifest,
       file: parsed.file,
@@ -109,16 +117,38 @@ export function tradeRoutes(app: Hono<AppEnv>) {
       maxBatchStmtsOverride: hooksEnabled
         ? parseOptPositiveInt(c.req.header("x-test-bulk-max-stmts"))
         : undefined,
+      delayBeforeCommitMs: rawDelayMs ? Math.min(2000, rawDelayMs) : undefined,
     });
     return c.json(result);
   });
 
   app.post("/api/trade/publish", async (c) => {
     let dictVersion: string | null = textParam(c.req.query("dictVersion")) ?? null;
-    const ct = c.req.header("content-type") || "";
-    if (ct.includes("application/json")) {
-      const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
-      if (typeof body.dictVersion === "string" && body.dictVersion.trim()) {
+    const rawBody = await c.req.text();
+    if (rawBody.trim() !== "") {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(rawBody);
+      } catch {
+        throw new AppError(400, "TRADE_MANIFEST_INVALID", {
+          field: "body",
+          reason: "invalid JSON body",
+        });
+      }
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new AppError(400, "TRADE_MANIFEST_INVALID", {
+          field: "body",
+          reason: "JSON body must be an object",
+        });
+      }
+      const body = parsed as Record<string, unknown>;
+      if (body.dictVersion !== undefined && body.dictVersion !== null) {
+        if (typeof body.dictVersion !== "string" || !body.dictVersion.trim()) {
+          throw new AppError(400, "TRADE_MANIFEST_INVALID", {
+            field: "dictVersion",
+            reason: "dictVersion must be a non-empty string",
+          });
+        }
         dictVersion = body.dictVersion.trim();
       }
     }

@@ -71,6 +71,8 @@ export type ImportTradeBatchOptions = {
   failBeforePublishCommit?: boolean;
   /** 测试钩子：在首次发布提交前模拟另一 Worker 实例抢先写入同 version_seq，验证 CAS 冲突重读重算 */
   preemptReleaseOnce?: boolean;
+  /** 测试钩子：在重叠校验后、原子提交前等待指定毫秒，用于确定性验证并发导入槽位唯一锁 */
+  delayBeforeCommitMs?: number;
 };
 
 export type ImportTradeBulkOptions = {
@@ -85,6 +87,8 @@ export type ImportTradeBulkOptions = {
   failDuringOversizedMonth?: boolean;
   /** 测试钩子：覆写单次 db.batch 语句上限（默认 200），用于单测验证超大单月两阶段原子写入 */
   maxBatchStmtsOverride?: number;
+  /** 测试钩子：在重叠校验后、原子提交前等待指定毫秒，用于确定性验证并发批量导入槽位唯一锁 */
+  delayBeforeCommitMs?: number;
 };
 
 export type PublishTradeMonthsOptions = {
@@ -260,6 +264,78 @@ const INSERT_COVERAGE_CHUNK = `
     json_extract(value, '$.evidenceSha256')
   FROM json_each(?6)
 `;
+
+const INSERT_ACTIVE_HS8_SLOTS = `
+  INSERT INTO trade_active_hs8_slot (dict_version, month, flow, grouping, hs8, scope_key, batch_id)
+  SELECT ?1, ?2, ?3, ?4, value, ?5, ?6
+  FROM json_each(?7)
+`;
+
+function isTradeActiveSlotConflict(err: unknown): boolean {
+  const msg =
+    err instanceof Error ? `${err.message} ${String((err as { cause?: unknown }).cause ?? "")}` : String(err);
+  return (
+    msg.includes("UNIQUE constraint failed: trade_active_hs8_slot") ||
+    (msg.includes("PRIMARY KEY constraint failed") && msg.includes("trade_active_hs8_slot"))
+  );
+}
+
+async function findConflictingSlotBatch(
+  db: D1Database,
+  params: { dictVersion: string; month: string; flow: TradeFlow; grouping: TradeGrouping; hs8: readonly string[] },
+): Promise<{ batch_id: string; scope_key: string; hs8_json: string } | null> {
+  return db
+    .prepare(
+      `SELECT b.batch_id, b.scope_key, b.hs8_json
+       FROM trade_active_hs8_slot s
+       JOIN trade_import_batch b ON b.batch_id = s.batch_id
+       WHERE s.dict_version = ?1
+         AND s.month = ?2
+         AND s.flow = ?3
+         AND s.grouping = ?4
+         AND s.hs8 IN (SELECT value FROM json_each(?5))
+       LIMIT 1`,
+    )
+    .bind(params.dictVersion, params.month, params.flow, params.grouping, JSON.stringify(params.hs8))
+    .first<{ batch_id: string; scope_key: string; hs8_json: string }>();
+}
+
+async function findCompleteReplayBatch(
+  db: D1Database,
+  params: {
+    scopeKey: string;
+    sourceSha256: string;
+    emptyHs8Json: string;
+    confirmedEmptyHs8Json: string;
+    missingHs8Json: string;
+    evidenceJson: string;
+  },
+): Promise<BatchMetaRow | null> {
+  const row = await db
+    .prepare(
+      `SELECT * FROM trade_import_batch
+       WHERE scope_key = ?1
+         AND source_sha256 = ?2
+         AND empty_hs8_json = ?3
+         AND confirmed_empty_hs8_json = ?4
+         AND missing_hs8_json = ?5
+         AND evidence_sha256s_json = ?6
+         AND publish_state IN ('staged', 'published')
+       ORDER BY created_at DESC, rowid DESC
+       LIMIT 1`,
+    )
+    .bind(
+      params.scopeKey,
+      params.sourceSha256,
+      params.emptyHs8Json,
+      params.confirmedEmptyHs8Json,
+      params.missingHs8Json,
+      params.evidenceJson,
+    )
+    .first<BatchMetaRow>();
+  if (!row) return null;
+  return (await isBatchFactsComplete(db, row)) ? row : null;
+}
 
 const INSERT_FACT_CHUNK = `
   INSERT INTO trade_fact (batch_id, dict_version, month, flow, grouping, hs8, item_name, group_code, group_name, usd_scaled, usd_raw, qty1, unit1, qty2, unit2)
@@ -773,44 +849,28 @@ export async function importTradeBatch(
   }
 
   const emptyHs8Json = JSON.stringify(manifest.emptyHs8);
+  const confirmedEmptyHs8Json = JSON.stringify(coverage.confirmedEmpty);
+  const missingHs8Json = JSON.stringify(coverage.missing);
   const evidenceJson = JSON.stringify(evidenceSha256s);
 
-  // 1. 检查相同范围、相同原件、相同覆盖与证据的幂等重放（仅匹配已完整写入的 staged/published 批次）
-  const existingReplayRow = await db
-    .prepare(
-      `SELECT * FROM trade_import_batch
-       WHERE scope_key = ?1
-         AND source_sha256 = ?2
-         AND empty_hs8_json = ?3
-         AND evidence_sha256s_json = ?4
-         AND publish_state IN ('staged', 'published')
-       ORDER BY created_at DESC, rowid DESC
-       LIMIT 1`,
-    )
-    .bind(manifest.scopeKey, sourceSha256, emptyHs8Json, evidenceJson)
-    .first<BatchMetaRow>();
-
-  const existingReplay =
-    existingReplayRow && (await isBatchFactsComplete(db, existingReplayRow)) ? existingReplayRow : null;
-
-  if (existingReplay) {
+  const buildReplayResult = async (replayBatch: BatchMetaRow): Promise<TradeImportResponse> => {
     // 若该批次已被后续新修订替代（superseded_by 非空），或已成功发布，或请求显式延迟发布：直接返回原批次
-    if (existingReplay.superseded_by !== null || existingReplay.publish_state === "published" || options.deferPublish) {
+    if (replayBatch.superseded_by !== null || replayBatch.publish_state === "published" || options.deferPublish) {
       const currentSnap = await db
         .prepare("SELECT release_id FROM trade_current_snapshot WHERE dict_version = ?1 AND period = ?2")
         .bind(manifest.dictVersion, manifest.month)
         .first<{ release_id: string }>();
       return {
-        batchId: existingReplay.batch_id,
-        sourceSha256: existingReplay.source_sha256,
-        evidenceSha256s: JSON.parse(existingReplay.evidence_sha256s_json) as string[],
-        rowCount: existingReplay.row_count,
+        batchId: replayBatch.batch_id,
+        sourceSha256: replayBatch.source_sha256,
+        evidenceSha256s: JSON.parse(replayBatch.evidence_sha256s_json) as string[],
+        rowCount: replayBatch.row_count,
         coverage: {
-          received: JSON.parse(existingReplay.received_hs8_json) as string[],
-          confirmedEmpty: JSON.parse(existingReplay.confirmed_empty_hs8_json) as string[],
-          missing: JSON.parse(existingReplay.missing_hs8_json) as string[],
+          received: JSON.parse(replayBatch.received_hs8_json) as string[],
+          confirmedEmpty: JSON.parse(replayBatch.confirmed_empty_hs8_json) as string[],
+          missing: JSON.parse(replayBatch.missing_hs8_json) as string[],
         },
-        status: existingReplay.publish_state === "published" ? "published" : "staged",
+        status: replayBatch.publish_state === "published" ? "published" : "staged",
         releaseId: currentSnap?.release_id ?? null,
         replayed: true,
       };
@@ -822,20 +882,34 @@ export async function importTradeBatch(
       preemptReleaseOnce: options.preemptReleaseOnce,
     });
     return {
-      batchId: existingReplay.batch_id,
-      sourceSha256: existingReplay.source_sha256,
-      evidenceSha256s: JSON.parse(existingReplay.evidence_sha256s_json) as string[],
-      rowCount: existingReplay.row_count,
+      batchId: replayBatch.batch_id,
+      sourceSha256: replayBatch.source_sha256,
+      evidenceSha256s: JSON.parse(replayBatch.evidence_sha256s_json) as string[],
+      rowCount: replayBatch.row_count,
       coverage: {
-        received: JSON.parse(existingReplay.received_hs8_json) as string[],
-        confirmedEmpty: JSON.parse(existingReplay.confirmed_empty_hs8_json) as string[],
-        missing: JSON.parse(existingReplay.missing_hs8_json) as string[],
+        received: JSON.parse(replayBatch.received_hs8_json) as string[],
+        confirmedEmpty: JSON.parse(replayBatch.confirmed_empty_hs8_json) as string[],
+        missing: JSON.parse(replayBatch.missing_hs8_json) as string[],
       },
       status: pub.published ? "published" : "staged",
       releaseId: pub.releaseId,
       replayed: true,
       reconciliationNote: pub.reconciliationNote,
     };
+  };
+
+  // 1. 检查相同范围、相同原件、相同实际覆盖（含 confirmedEmpty/missing）与证据的幂等重放
+  const existingReplay = await findCompleteReplayBatch(db, {
+    scopeKey: manifest.scopeKey,
+    sourceSha256,
+    emptyHs8Json,
+    confirmedEmptyHs8Json,
+    missingHs8Json,
+    evidenceJson,
+  });
+
+  if (existingReplay) {
+    return buildReplayResult(existingReplay);
   }
 
   // 2. 检查与同月、同流向、同分组既有候选或活跃批次的部分范围重叠（HTTP 409）
@@ -969,25 +1043,76 @@ export async function importTradeBatch(
 
   const supersedeStmts = prevSameScopeBatchId
     ? [
+        db.prepare("DELETE FROM trade_active_hs8_slot WHERE batch_id = ?1").bind(prevSameScopeBatchId),
         db
-          .prepare("UPDATE trade_import_batch SET superseded_by = ?1 WHERE batch_id = ?2")
+          .prepare("UPDATE trade_import_batch SET superseded_by = ?1 WHERE batch_id = ?2 AND superseded_by IS NULL")
           .bind(batchId, prevSameScopeBatchId),
       ]
     : [];
+  const insertSlotStmt = db
+    .prepare(INSERT_ACTIVE_HS8_SLOTS)
+    .bind(
+      manifest.dictVersion,
+      manifest.month,
+      manifest.flow,
+      manifest.grouping,
+      manifest.scopeKey,
+      batchId,
+      JSON.stringify(manifest.hs8),
+    );
 
-  await commitStagedMonthBatch(db, {
-    batchId,
-    initIngestingStmts: buildHeaderStmts("ingesting", "ingesting", "__INGESTING__"),
-    detailStmts,
-    finalizeStmts: [
-      db.prepare("UPDATE import_batch SET status = 'completed' WHERE id = ?1").bind(batchId),
-      db
-        .prepare("UPDATE trade_import_batch SET publish_state = 'staged', superseded_by = NULL WHERE batch_id = ?1")
-        .bind(batchId),
-      ...supersedeStmts,
-    ],
-    allAtomicStmts: [...buildHeaderStmts("completed", "staged", null), ...supersedeStmts, ...detailStmts],
-  });
+  if (options.delayBeforeCommitMs && options.delayBeforeCommitMs > 0) {
+    await new Promise((resolve) => setTimeout(resolve, options.delayBeforeCommitMs));
+  }
+
+  try {
+    await commitStagedMonthBatch(db, {
+      batchId,
+      initIngestingStmts: buildHeaderStmts("ingesting", "ingesting", "__INGESTING__"),
+      detailStmts,
+      finalizeStmts: [
+        ...supersedeStmts,
+        insertSlotStmt,
+        db.prepare("UPDATE import_batch SET status = 'completed' WHERE id = ?1").bind(batchId),
+        db
+          .prepare("UPDATE trade_import_batch SET publish_state = 'staged', superseded_by = NULL WHERE batch_id = ?1")
+          .bind(batchId),
+      ],
+      allAtomicStmts: [
+        ...buildHeaderStmts("completed", "staged", null),
+        ...supersedeStmts,
+        insertSlotStmt,
+        ...detailStmts,
+      ],
+    });
+  } catch (err) {
+    if (isTradeActiveSlotConflict(err)) {
+      const concurrentReplay = await findCompleteReplayBatch(db, {
+        scopeKey: manifest.scopeKey,
+        sourceSha256,
+        emptyHs8Json,
+        confirmedEmptyHs8Json,
+        missingHs8Json,
+        evidenceJson,
+      });
+      if (concurrentReplay && concurrentReplay.superseded_by === null) {
+        return buildReplayResult(concurrentReplay);
+      }
+      const conflict = await findConflictingSlotBatch(db, {
+        dictVersion: manifest.dictVersion,
+        month: manifest.month,
+        flow: manifest.flow,
+        grouping: manifest.grouping,
+        hs8: manifest.hs8,
+      });
+      throw new AppError(409, "TRADE_SCOPE_CONFLICT", {
+        existingBatchId: conflict?.batch_id ?? "concurrent_active_batch",
+        existingHs8: conflict ? (JSON.parse(conflict.hs8_json) as string[]).join(",") : "",
+        requestedHs8: manifest.hs8.join(","),
+      });
+    }
+    throw err;
+  }
 
   if (options.deferPublish) {
     const currentSnap = await db
@@ -1118,7 +1243,19 @@ export async function importTradeBulkBatch(
   let totalRowCount = 0;
   const createdAt = new Date().toISOString();
   const evidenceJson = JSON.stringify(evidenceSha256s);
-  const monthPlans: MonthStagingCommitPlan[] = [];
+  const monthWorkItems: Array<
+    | { kind: "replayed"; batchId: string }
+    | {
+        kind: "commit";
+        month: string;
+        scopeKey: string;
+        monthHs8: string[];
+        emptyHs8Json: string;
+        confirmedEmptyHs8Json: string;
+        missingHs8Json: string;
+        plan: MonthStagingCommitPlan;
+      }
+  > = [];
 
   for (const month of bulkManifest.months) {
     const year = Number(month.slice(0, 4));
@@ -1190,23 +1327,20 @@ export async function importTradeBulkBatch(
     });
     const monthEmptyHs8 = coverage.confirmedEmpty;
     const emptyHs8Json = JSON.stringify(monthEmptyHs8);
+    const confirmedEmptyHs8Json = JSON.stringify(coverage.confirmedEmpty);
+    const missingHs8Json = JSON.stringify(coverage.missing);
 
-    const existingReplayRow = await db
-      .prepare(
-        `SELECT * FROM trade_import_batch
-         WHERE scope_key = ?1
-           AND source_sha256 = ?2
-           AND empty_hs8_json = ?3
-           AND evidence_sha256s_json = ?4
-           AND publish_state IN ('staged', 'published')
-         ORDER BY created_at DESC, rowid DESC
-         LIMIT 1`,
-      )
-      .bind(scopeKey, sourceSha256, emptyHs8Json, evidenceJson)
-      .first<BatchMetaRow>();
+    const existingReplay = await findCompleteReplayBatch(db, {
+      scopeKey,
+      sourceSha256,
+      emptyHs8Json,
+      confirmedEmptyHs8Json,
+      missingHs8Json,
+      evidenceJson,
+    });
 
-    if (existingReplayRow && (await isBatchFactsComplete(db, existingReplayRow))) {
-      batchIds.push(existingReplayRow.batch_id);
+    if (existingReplay) {
+      monthWorkItems.push({ kind: "replayed", batchId: existingReplay.batch_id });
       continue;
     }
 
@@ -1238,7 +1372,6 @@ export async function importTradeBulkBatch(
     }
 
     const batchId = crypto.randomUUID();
-    batchIds.push(batchId);
 
     const detailStmts: D1PreparedStatement[] = [];
     for (const evItem of evidenceCoverageList) {
@@ -1330,8 +1463,8 @@ export async function importTradeBulkBatch(
           JSON.stringify(monthHs8),
           emptyHs8Json,
           JSON.stringify(coverage.received),
-          JSON.stringify(coverage.confirmedEmpty),
-          JSON.stringify(coverage.missing),
+          confirmedEmptyHs8Json,
+          missingHs8Json,
           filename,
           sourceSha256,
           evidenceJson,
@@ -1344,35 +1477,101 @@ export async function importTradeBulkBatch(
 
     const supersedeStmts = prevSameScopeBatchId
       ? [
+          db.prepare("DELETE FROM trade_active_hs8_slot WHERE batch_id = ?1").bind(prevSameScopeBatchId),
           db
-            .prepare("UPDATE trade_import_batch SET superseded_by = ?1 WHERE batch_id = ?2")
+            .prepare("UPDATE trade_import_batch SET superseded_by = ?1 WHERE batch_id = ?2 AND superseded_by IS NULL")
             .bind(batchId, prevSameScopeBatchId),
         ]
       : [];
+    const insertSlotStmt = db
+      .prepare(INSERT_ACTIVE_HS8_SLOTS)
+      .bind(
+        bulkManifest.dictVersion,
+        month,
+        bulkManifest.flow,
+        bulkManifest.grouping,
+        scopeKey,
+        batchId,
+        JSON.stringify(monthHs8),
+      );
 
-    monthPlans.push({
-      batchId,
-      initIngestingStmts: buildHeaderStmts("ingesting", "ingesting", "__INGESTING__"),
-      detailStmts,
-      finalizeStmts: [
-        db.prepare("UPDATE import_batch SET status = 'completed' WHERE id = ?1").bind(batchId),
-        db
-          .prepare("UPDATE trade_import_batch SET publish_state = 'staged', superseded_by = NULL WHERE batch_id = ?1")
-          .bind(batchId),
-        ...supersedeStmts,
-      ],
-      allAtomicStmts: [...buildHeaderStmts("completed", "staged", null), ...supersedeStmts, ...detailStmts],
+    monthWorkItems.push({
+      kind: "commit",
+      month,
+      scopeKey,
+      monthHs8,
+      emptyHs8Json,
+      confirmedEmptyHs8Json,
+      missingHs8Json,
+      plan: {
+        batchId,
+        initIngestingStmts: buildHeaderStmts("ingesting", "ingesting", "__INGESTING__"),
+        detailStmts,
+        finalizeStmts: [
+          ...supersedeStmts,
+          insertSlotStmt,
+          db.prepare("UPDATE import_batch SET status = 'completed' WHERE id = ?1").bind(batchId),
+          db
+            .prepare("UPDATE trade_import_batch SET publish_state = 'staged', superseded_by = NULL WHERE batch_id = ?1")
+            .bind(batchId),
+        ],
+        allAtomicStmts: [
+          ...buildHeaderStmts("completed", "staged", null),
+          ...supersedeStmts,
+          insertSlotStmt,
+          ...detailStmts,
+        ],
+      },
     });
   }
 
-  // 按月独立原子提交：确保单月批次头与全部事实明细同成同败，绝不出现“有头无明细”的残缺月份
+  if (options.delayBeforeCommitMs && options.delayBeforeCommitMs > 0) {
+    await new Promise((resolve) => setTimeout(resolve, options.delayBeforeCommitMs));
+  }
+
+  // 按月独立原子提交：确保单月批次头、槽位锁与全部事实明细同成同败，并发重叠在数据库主键层原子拦截
   let committedMonths = 0;
-  for (const plan of monthPlans) {
-    await commitStagedMonthBatch(db, plan, {
-      maxBatchStmts: options.maxBatchStmtsOverride,
-      failDuringOversizedMonth: options.failDuringOversizedMonth,
-    });
-    committedMonths += 1;
+  for (const item of monthWorkItems) {
+    if (item.kind === "replayed") {
+      batchIds.push(item.batchId);
+      continue;
+    }
+    try {
+      await commitStagedMonthBatch(db, item.plan, {
+        maxBatchStmts: options.maxBatchStmtsOverride,
+        failDuringOversizedMonth: options.failDuringOversizedMonth,
+      });
+      batchIds.push(item.plan.batchId);
+      committedMonths += 1;
+    } catch (err) {
+      if (isTradeActiveSlotConflict(err)) {
+        const concurrentReplay = await findCompleteReplayBatch(db, {
+          scopeKey: item.scopeKey,
+          sourceSha256,
+          emptyHs8Json: item.emptyHs8Json,
+          confirmedEmptyHs8Json: item.confirmedEmptyHs8Json,
+          missingHs8Json: item.missingHs8Json,
+          evidenceJson,
+        });
+        if (concurrentReplay && concurrentReplay.superseded_by === null) {
+          batchIds.push(concurrentReplay.batch_id);
+          continue;
+        }
+        const conflict = await findConflictingSlotBatch(db, {
+          dictVersion: bulkManifest.dictVersion,
+          month: item.month,
+          flow: bulkManifest.flow,
+          grouping: bulkManifest.grouping,
+          hs8: item.monthHs8,
+        });
+        throw new AppError(409, "TRADE_SCOPE_CONFLICT", {
+          existingBatchId: conflict?.batch_id ?? "concurrent_active_batch",
+          existingHs8: conflict ? (JSON.parse(conflict.hs8_json) as string[]).join(",") : "",
+          requestedHs8: item.monthHs8.join(","),
+        });
+      }
+      throw err;
+    }
     if (options.failAfterMonthIndex !== undefined && committedMonths >= options.failAfterMonthIndex) {
       throw new Error(`simulated failure after committing bulk month #${committedMonths}`);
     }
@@ -1395,6 +1594,11 @@ export async function importTradeBulkBatch(
   }
 
   const pub = await publishAllReadyTradeMonths(db, bulkManifest.dictVersion);
+  let allBatchesPublished = false;
+  if (batchIds.length > 0) {
+    const batchStates = await queryBatchesByIds(db, batchIds);
+    allBatchesPublished = batchIds.every((id) => batchStates.get(id)?.publish_state === "published");
+  }
   return {
     dictVersion: bulkManifest.dictVersion,
     months: activeMonths,
@@ -1403,8 +1607,8 @@ export async function importTradeBulkBatch(
     sourceSha256,
     evidenceSha256s,
     totalRowCount,
-    status: pub.published ? "published" : "staged",
-    releaseId: pub.releaseId,
+    status: allBatchesPublished ? "published" : "staged",
+    releaseId: allBatchesPublished ? pub.releaseId : null,
     publishedMonths: pub.publishedMonths,
     reconciliationNotes: pub.reconciliationNotes,
   };
@@ -1498,6 +1702,7 @@ async function attemptPublishAllReadyOnce(
 
   const activeBatchesByMonth = new Map<string, string[]>(prevActiveByMonth);
   const monthsToReconcile: Array<{ month: string; applicableSet: Set<string>; batches: BatchMetaRow[] }> = [];
+  const preReconDuplicateNotes: Record<string, string> = {};
 
   for (const [month, batches] of [...candidatesByMonth.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
     const year = Number(month.slice(0, 4));
@@ -1506,6 +1711,7 @@ async function attemptPublishAllReadyOnce(
     if (applicableSet.size === 0) continue;
 
     let complete = true;
+    const duplicateConflicts: string[] = [];
     for (const flow of TRADE_FLOWS) {
       for (const grouping of TRADE_GROUPINGS) {
         const covered = new Set<string>();
@@ -1516,8 +1722,14 @@ async function attemptPublishAllReadyOnce(
             complete = false;
             break;
           }
-          for (const c of JSON.parse(b.received_hs8_json) as string[]) covered.add(c);
-          for (const c of JSON.parse(b.confirmed_empty_hs8_json) as string[]) covered.add(c);
+          for (const c of JSON.parse(b.received_hs8_json) as string[]) {
+            if (covered.has(c)) duplicateConflicts.push(`${flow}/${grouping}/${c}`);
+            covered.add(c);
+          }
+          for (const c of JSON.parse(b.confirmed_empty_hs8_json) as string[]) {
+            if (covered.has(c)) duplicateConflicts.push(`${flow}/${grouping}/${c}`);
+            covered.add(c);
+          }
         }
         if (!complete) break;
         for (const reqHs8 of applicableSet) {
@@ -1529,6 +1741,10 @@ async function attemptPublishAllReadyOnce(
         if (!complete) break;
       }
       if (!complete) break;
+    }
+    if (duplicateConflicts.length > 0) {
+      preReconDuplicateNotes[month] = `duplicate_active_hs8_coverage: ${[...new Set(duplicateConflicts)].join(", ")}`;
+      continue;
     }
     if (!complete) continue;
 
@@ -1543,7 +1759,7 @@ async function attemptPublishAllReadyOnce(
     monthsToReconcile.push({ month, applicableSet, batches });
   }
 
-  const reconciliationNotes: Record<string, string> = {};
+  const reconciliationNotes: Record<string, string> = { ...preReconDuplicateNotes };
   const newlyPublishedMonths: string[] = [];
   const newlyPublishedBatches: BatchMetaRow[] = [];
   const reconPayloadRows: Array<{
@@ -1946,7 +2162,8 @@ async function attemptPublishMonthOnce(
     .bind(dictVersion, month)
     .all<BatchMetaRow>();
 
-  // 核查 2 个流向 × 4 个分组均无缺采且完整覆盖全部适用 HS8
+  // 核查 2 个流向 × 4 个分组均无缺采、无重复重叠覆盖且完整覆盖全部适用 HS8
+  const duplicateConflicts: string[] = [];
   for (const flow of TRADE_FLOWS) {
     for (const grouping of TRADE_GROUPINGS) {
       const covered = new Set<string>();
@@ -1956,8 +2173,21 @@ async function attemptPublishMonthOnce(
         if (missing.length > 0) {
           return { published: false, releaseId: currentMonthSnap?.release_id ?? null, reconciliationNote: null };
         }
-        for (const c of JSON.parse(b.received_hs8_json) as string[]) covered.add(c);
-        for (const c of JSON.parse(b.confirmed_empty_hs8_json) as string[]) covered.add(c);
+        for (const c of JSON.parse(b.received_hs8_json) as string[]) {
+          if (covered.has(c)) duplicateConflicts.push(`${flow}/${grouping}/${c}`);
+          covered.add(c);
+        }
+        for (const c of JSON.parse(b.confirmed_empty_hs8_json) as string[]) {
+          if (covered.has(c)) duplicateConflicts.push(`${flow}/${grouping}/${c}`);
+          covered.add(c);
+        }
+      }
+      if (duplicateConflicts.length > 0) {
+        return {
+          published: false,
+          releaseId: currentMonthSnap?.release_id ?? null,
+          reconciliationNote: `duplicate_active_hs8_coverage: ${[...new Set(duplicateConflicts)].join(", ")}`,
+        };
       }
       for (const reqHs8 of applicableSet) {
         if (!covered.has(reqHs8)) {

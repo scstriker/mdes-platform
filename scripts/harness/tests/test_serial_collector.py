@@ -64,6 +64,8 @@ class FakeHarnessTransport:
         fail_html_on_call=None,
         empty_png_bytes=None,
         fail_screenshot=False,
+        stale_evidence_fp=None,
+        fail_evidence_sync=False,
         state_candidates=None,
         miss_states=None,
     ):
@@ -72,9 +74,12 @@ class FakeHarnessTransport:
         self.fail_html_on_call = fail_html_on_call
         self.empty_png_bytes = empty_png_bytes if empty_png_bytes is not None else make_valid_png(32, 32)
         self.fail_screenshot = fail_screenshot
+        self.stale_evidence_fp = stale_evidence_fp
+        self.fail_evidence_sync = fail_evidence_sync
         self._state_candidates = state_candidates
         self._miss_states = set(miss_states or [])
         self.calls = []
+        self.evidence_events = []
         self.inflight = 0
         self.max_observed_inflight = 0
 
@@ -93,9 +98,56 @@ class FakeHarnessTransport:
                 return {"ok": False, "state": None, "total": None, "isHtmlBlocked": False, "reason": "no_state_matched"}
             key = (year, start_month, end_month, flow, grouping)
             total = self.counts_by_range.get(key, 12)
-            return {"ok": True, "state": st, "total": total, "isHtmlBlocked": False}
+            zero_ev = None
+            if total == 0:
+                fp = collector.build_zero_query_fingerprint(
+                    year=year,
+                    start_month=start_month,
+                    end_month=end_month,
+                    month_flag=month_flag,
+                    flow=flow,
+                    grouping=grouping,
+                    state=st,
+                    hs8=hs8,
+                )
+                zero_ev = {
+                    "queryFingerprint": fp,
+                    "officialTotal": 0,
+                    "responseSha256": collector.sha256_hex(f"zero:{fp}".encode("utf-8")),
+                    "officialResponseExcerpt": "暂无数据（共查询到 0 条数据）",
+                }
+            return {"ok": True, "state": st, "total": total, "zeroEvidence": zero_ev, "isHtmlBlocked": False}
         finally:
             self._exit()
+
+    def prepare_empty_evidence_view(
+        self, *, year, start_month, end_month, month_flag, flow, grouping, hs8, state, probe=None
+    ):
+        self.evidence_events.append(("prepare", year, start_month, end_month, flow, grouping))
+        if self.fail_evidence_sync:
+            return {"ok": False, "rendered": False, "reason": "dom_sync_failed"}
+        fp = self.stale_evidence_fp or collector.build_zero_query_fingerprint(
+            year=year,
+            start_month=start_month,
+            end_month=end_month,
+            month_flag=month_flag,
+            flow=flow,
+            grouping=grouping,
+            state=state,
+            hs8=hs8,
+        )
+        zero_ev = probe.get("zeroEvidence") if isinstance(probe, dict) and isinstance(probe.get("zeroEvidence"), dict) else {}
+        return {
+            "ok": True,
+            "rendered": True,
+            "officialTotal": 0,
+            "queryFingerprint": fp,
+            "responseSha256": zero_ev.get("responseSha256", ""),
+        }
+
+    def clear_empty_evidence_view(self):
+        self.evidence_events.append(("clear",))
+        return True
 
     def fetch_raw_export(self, *, year, start_month, end_month, month_flag, flow, grouping, hs8, state):
         self._enter("export", year, start_month, end_month, flow, grouping)
@@ -126,6 +178,7 @@ class FakeHarnessTransport:
             self._exit()
 
     def capture_empty_png(self):
+        self.evidence_events.append(("capture",))
         if self.fail_screenshot:
             raise collector.CustomsScreenshotError("Page.captureScreenshot failed: missing screenshot data")
         return self.empty_png_bytes
@@ -417,6 +470,148 @@ class SerialCollectorTests(unittest.TestCase):
         self.assertEqual(res["hs8Count"], 164)
         self.assertGreater(len(sent_expressions), 3)
         self.assertTrue(all(len(json.dumps({"expr": e}).encode("utf-8")) < 40_000 for e in sent_expressions))
+
+    def test_splits_window_at_current_start_time_boundary(self):
+        counts = {
+            (2025, 1, 3, "import", "product"): 3,
+            (2025, 4, 12, "import", "product"): 9,
+        }
+        transport = FakeHarnessTransport(counts)
+        transport.get_portal_start_anchor = lambda: "202504"
+        policy = collector.PoliteRatePolicy(min_delay_sec=3.5, max_delay_sec=4.0, sleep_fn=lambda _: None)
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = collector.SerialCustomsCollector(transport=transport, archive_dir=Path(tmp), rate_policy=policy)
+            outcomes = runner.collect_task(
+                year=2025,
+                start_month=1,
+                end_month=12,
+                flow="import",
+                grouping="product",
+                batch_key="G01",
+                hs8=["90181100"],
+            )
+            self.assertEqual([o["monthRange"] for o in outcomes], ["2025-01..2025-03", "2025-04..2025-12"])
+
+    def test_zero_result_screenshot_requires_synced_query_view_and_rejects_stale_page(self):
+        # [R2 P1-B] 零结果截图前必须同步渲染当前查询条件与官方返回摘要，拒绝历史页面残留截图
+        counts = {(2024, 1, 12, "export", "product"): 0}
+        policy = collector.PoliteRatePolicy(min_delay_sec=3.5, max_delay_sec=4.0, sleep_fn=lambda _: None)
+
+        # (a) 页面指纹仍是上一笔历史查询 -> 必须拒绝落盘与断点
+        stale_transport = FakeHarnessTransport(counts, stale_evidence_fp="202601|2023-01..2023-12|mf=1|import|product|st=2|hs8=90181100")
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+            runner = collector.SerialCustomsCollector(transport=stale_transport, archive_dir=out_dir, rate_policy=policy)
+            with self.assertRaises(collector.CustomsScreenshotError):
+                runner.collect_task(
+                    year=2024,
+                    start_month=1,
+                    end_month=12,
+                    flow="export",
+                    grouping="product",
+                    batch_key="G01",
+                    hs8=["90181100"],
+                )
+            self.assertEqual(list(out_dir.rglob("*.empty.png")), [])
+            self.assertEqual(list(out_dir.rglob("*.manifest.json")), [])
+            self.assertEqual([ev[0] for ev in stale_transport.evidence_events], ["prepare", "clear"])
+
+        # (b) 页面同步失败 -> 必须拒绝落盘
+        fail_sync_transport = FakeHarnessTransport(counts, fail_evidence_sync=True)
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = collector.SerialCustomsCollector(transport=fail_sync_transport, archive_dir=Path(tmp), rate_policy=policy)
+            with self.assertRaises(collector.CustomsScreenshotError):
+                runner.collect_task(
+                    year=2024,
+                    start_month=1,
+                    end_month=12,
+                    flow="export",
+                    grouping="product",
+                    batch_key="G01",
+                    hs8=["90181100"],
+                )
+
+        # (c) 正常同步当前查询视图 -> 顺序必须是 prepare -> capture -> clear，且 meta 写入 queryFingerprint
+        ok_transport = FakeHarnessTransport(counts)
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+            runner = collector.SerialCustomsCollector(transport=ok_transport, archive_dir=out_dir, rate_policy=policy)
+            res = runner.collect_task(
+                year=2024,
+                start_month=1,
+                end_month=12,
+                flow="export",
+                grouping="product",
+                batch_key="G01",
+                hs8=["90181100"],
+            )
+            self.assertEqual(res[0]["status"], "confirmed_empty")
+            self.assertEqual([ev[0] for ev in ok_transport.evidence_events], ["prepare", "capture", "clear"])
+            meta_files = list(out_dir.rglob("*.meta.json"))
+            self.assertEqual(len(meta_files), 1)
+            meta = json.loads(meta_files[0].read_text("utf-8"))
+            self.assertTrue(meta["evidenceViewSynced"])
+            self.assertEqual(
+                meta["queryFingerprint"],
+                "202601|2024-01..2024-12|mf=1|export|product|st=2|hs8=90181100",
+            )
+            self.assertTrue(meta["officialProbeResponseSha256"])
+
+    def test_dict_sha256_is_stable_across_lf_and_crlf_checkouts(self):
+        # [R2 P2-7] Windows autocrlf 将字典检出为 CRLF 时，摘要校验仍精确匹配官方基准值
+        lf_bytes = collector.normalize_line_endings_lf(collector.DEFAULT_DICT_CSV_PATH.read_bytes())
+        crlf_bytes = lf_bytes.replace(b"\n", b"\r\n")
+        self.assertNotEqual(collector.sha256_hex(lf_bytes), collector.sha256_hex(crlf_bytes))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            lf_path = Path(tmp) / "dict_lf.csv"
+            crlf_path = Path(tmp) / "dict_crlf.csv"
+            lf_path.write_bytes(lf_bytes)
+            crlf_path.write_bytes(crlf_bytes)
+
+            b_lf = collector.load_official_dict_batches(lf_path, group_size=20)
+            b_crlf = collector.load_official_dict_batches(crlf_path, group_size=20)
+            self.assertEqual(b_lf, b_crlf)
+            self.assertEqual(sum(len(b["hs8"]) for b in b_crlf), 164)
+
+    def test_latest_complete_month_excludes_subsequent_future_years(self):
+        # [R2 P2-8] --years 2025,2026 --latest-month 2025-10 必须完全跳过 2026 年，绝不查询或登记未来零值
+        self.assertEqual(collector.default_end_month_for_year(2024, "2025-10"), 12)
+        self.assertEqual(collector.default_end_month_for_year(2025, "2025-10"), 10)
+        self.assertEqual(collector.default_end_month_for_year(2026, "2025-10"), 0)
+
+        counts = {
+            (2025, 1, 10, "import", "product"): 5,
+            (2026, 1, 12, "import", "product"): 0,
+        }
+        sleeps = []
+        transport = FakeHarnessTransport(counts)
+        policy = collector.PoliteRatePolicy(
+            min_delay_sec=3.5,
+            max_delay_sec=4.0,
+            year_cooldown_range=(45.0, 60.0),
+            sleep_fn=lambda s: sleeps.append(s),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+            runner = collector.SerialCustomsCollector(
+                transport=transport,
+                archive_dir=out_dir,
+                rate_policy=policy,
+                latest_complete_month="2025-10",
+            )
+            outcomes = runner.run_plan(
+                years=[2025, 2026],
+                batches=[{"batchKey": "G01", "hs8": ["90181100"]}],
+                flows=["import"],
+                groupings=["product"],
+            )
+            self.assertEqual([o["monthRange"] for o in outcomes], ["2025-01..2025-10"])
+            self.assertTrue(all(c[1] == 2025 for c in transport.calls))
+            self.assertFalse((out_dir / "2026").exists())
+            self.assertEqual(list(out_dir.rglob("*_2026_*")), [])
+            # 2026 被跳过后不应触发无效跨年冷却
+            self.assertFalse(any(s >= 45.0 for s in sleeps))
 
 
 if __name__ == "__main__":

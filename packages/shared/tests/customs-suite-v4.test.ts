@@ -654,6 +654,300 @@ describe("G6 / AC-018：china_customs_suite.user.js v4.0 医疗器械 164 码字
       const pilotOnly = importerMod.selectImportableManifestEntries([pilotMf]);
       expect(pilotOnly.selected.map((x) => x.mfPath)).toEqual([pilotMf]);
       expect(pilotOnly.skippedPilot).toHaveLength(0);
+
+      // [R2 P2-6] 部分重叠（试点含 2024-01 与 2024-02，正式仅覆盖 2024-01）绝不可跳过整份试点清单，必须显式报错
+      const partialPilotMf = path.join(pilotDir, "customs_202601_2024_01-02_import_product_PILOT-90181100_r01.manifest.json");
+      fs.writeFileSync(
+        partialPilotMf,
+        JSON.stringify({
+          dictVersion: "202601",
+          months: ["2024-01", "2024-02"],
+          flow: "import",
+          currency: "USD",
+          grouping: "product",
+          hs8: ["90181100"],
+        }),
+      );
+      expect(() => importerMod.selectImportableManifestEntries([partialPilotMf, formalMf])).toThrow(
+        /PILOT_PARTIAL_OVERLAP/,
+      );
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("[R2 P1-B] 零结果预检返回官方响应摘要并通过 renderEmptyQueryEvidence 同步更新页面凭证视图", async () => {
+    for (const scriptPath of [TOP_SUITE_PATH, COLLECTOR_COPY_PATH]) {
+      const code = fs.readFileSync(scriptPath, "utf8");
+      const mountedById = new Map<string, Record<string, unknown>>();
+      const makeDomEl = (tag: string): Record<string, unknown> => {
+        const attrs = new Map<string, string>();
+        const el: Record<string, unknown> = {
+          tagName: tag.toUpperCase(),
+          id: "",
+          style: {},
+          dataset: {},
+          innerHTML: "",
+          children: [] as unknown[],
+          setAttribute(k: string, v: string) {
+            attrs.set(k, v);
+          },
+          getAttribute(k: string) {
+            return attrs.get(k) ?? null;
+          },
+          appendChild(child: Record<string, unknown>) {
+            (this.children as unknown[]).push(child);
+            if (child.id) mountedById.set(String(child.id), child);
+            return child;
+          },
+          remove() {
+            if (this.id) mountedById.delete(String(this.id));
+          },
+          addEventListener() {},
+        };
+        return el;
+      };
+      const fakeBody = makeDomEl("body");
+      const fakeDoc = {
+        readyState: "complete",
+        head: makeDomEl("head"),
+        body: fakeBody,
+        createElement: (tag: string) => makeDomEl(tag),
+        getElementById: (id: string) => mountedById.get(id) ?? null,
+        querySelector: () => null,
+        querySelectorAll: () => [],
+      };
+      const fakeWindow: Record<string, unknown> = { __MDES_HARNESS_HEADLESS_UI__: true };
+      fakeWindow.top = fakeWindow;
+      fakeWindow.self = fakeWindow;
+
+      const zeroHtml = '<input type="hidden" id="totalSize" value="0"><p class="c-666">共查询到 <span>0</span> 条数据</p><div>暂无数据</div>';
+      const sandbox: Record<string, unknown> = {
+        window: fakeWindow,
+        document: fakeDoc,
+        location: { href: "http://stats.customs.gov.cn/indexEn" },
+        TextEncoder,
+        TextDecoder,
+        URLSearchParams,
+        Uint8Array,
+        Uint32Array,
+        DataView,
+        ArrayBuffer,
+        crypto: globalThis.crypto,
+        Buffer,
+        setTimeout,
+        clearTimeout,
+        console,
+        btoa: (str: string) => Buffer.from(str, "binary").toString("base64"),
+        atob: (b64: string) => Buffer.from(b64, "base64").toString("binary"),
+        fetch: async () => new Response(zeroHtml, { status: 200 }),
+      };
+      sandbox.globalThis = sandbox;
+      vm.createContext(sandbox);
+      vm.runInContext(code, sandbox, { filename: path.basename(scriptPath) });
+
+      const bridge = sandbox.__CUSTOMS_SUITE_BRIDGE__ as {
+        probeCount: (opts: Record<string, unknown>) => Promise<{
+          ok: boolean;
+          total: number;
+          state: number;
+          zeroEvidence: {
+            queryFingerprint: string;
+            officialTotal: number;
+            responseSha256: string;
+            officialResponseExcerpt: string;
+            requestParams: string;
+          } | null;
+        }>;
+        renderEmptyQueryEvidence: (opts: Record<string, unknown>) => Promise<{
+          ok: boolean;
+          rendered: boolean;
+          officialTotal: number;
+          queryFingerprint: string;
+        }>;
+        clearEmptyQueryEvidence: () => boolean;
+      };
+
+      const probe = await bridge.probeCount({
+        year: 2024,
+        startMonth: 1,
+        endMonth: 12,
+        monthFlag: "1",
+        flow: "export",
+        grouping: "product",
+        hs8: ["90181100"],
+        stateCandidates: [2],
+        skipPoliteWaitForUnitTest: true,
+      });
+      expect(probe.ok).toBe(true);
+      expect(probe.total).toBe(0);
+      expect(probe.zeroEvidence).not.toBeNull();
+      expect(probe.zeroEvidence!.responseSha256).toMatch(/^[0-9a-f]{64}$/);
+      expect(probe.zeroEvidence!.officialResponseExcerpt).toContain("暂无数据");
+
+      const rendered = await bridge.renderEmptyQueryEvidence({
+        year: 2024,
+        startMonth: 1,
+        endMonth: 12,
+        monthFlag: "1",
+        flow: "export",
+        grouping: "product",
+        hs8: ["90181100"],
+        selectTableState: probe.state,
+        officialTotal: 0,
+        responseSha256: probe.zeroEvidence!.responseSha256,
+        officialResponseExcerpt: probe.zeroEvidence!.officialResponseExcerpt,
+        requestParams: probe.zeroEvidence!.requestParams,
+      });
+      expect(rendered.ok).toBe(true);
+      expect(rendered.rendered).toBe(true);
+      expect(rendered.queryFingerprint).toBe(probe.zeroEvidence!.queryFingerprint);
+
+      const overlay = mountedById.get("mdes-empty-evidence-overlay");
+      expect(overlay).toBeDefined();
+      expect(String(overlay!.innerHTML)).toContain("90181100");
+      expect(String(overlay!.innerHTML)).toContain("2024-01 .. 2024-12");
+      expect(String(overlay!.innerHTML)).toContain(probe.zeroEvidence!.responseSha256);
+
+      expect(bridge.clearEmptyQueryEvidence()).toBe(true);
+      expect(mountedById.has("mdes-empty-evidence-overlay")).toBe(false);
+    }
+  });
+
+  it("[R2 P1-C / P2-5 / P2-7] 归档导入器核验 CSV 摘要与发布最终状态，字典摘要兼容 LF/CRLF 换行", async () => {
+    const importerHref = pathToFileURL(path.resolve(here, "../../../scripts/import-customs-archive.mjs")).href;
+    const importerMod = (await import(importerHref)) as {
+      verifyArchiveEntryIntegrity: (entry: {
+        mfPath: string;
+        manifestObj: Record<string, unknown>;
+        months: string[];
+      }) => { expectedSourceSha256: string; expectedDetailRowCount: number | null };
+      verifyPublishOutcome: (args: {
+        expectedMonths: string[];
+        importedBatchIds?: string[];
+        publishResponse: { status: number; json: Record<string, unknown> };
+        batchesAfterPublish?: Array<{ batchId: string; publishState: string; supersededBy: string | null }> | null;
+      }) => void;
+    };
+
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "mdes-archive-r2-"));
+    try {
+      const stem = "customs_202601_2024_01-01_import_product_G01_r01";
+      const mfPath = path.join(tmpDir, `${stem}.manifest.json`);
+      const csvPath = path.join(tmpDir, `${stem}.raw.csv`);
+      const metaPath = path.join(tmpDir, `${stem}.meta.json`);
+
+      const fullCsv = Buffer.from(
+        "数据年月,商品编码,商品名称,美元\r\n202401,90181100,心电图记录仪,100\r\n202401,90181210,B超,200\r\n",
+        "utf8",
+      );
+      const { createHash } = await import("node:crypto");
+      const fullSha = createHash("sha256").update(fullCsv).digest("hex");
+
+      const manifestObj = {
+        dictVersion: "202601",
+        months: ["2024-01"],
+        flow: "import",
+        currency: "USD",
+        grouping: "product",
+        hs8: ["90181100", "90181210"],
+        probeVerifiedZero: true,
+      };
+      fs.writeFileSync(mfPath, JSON.stringify(manifestObj));
+      fs.writeFileSync(csvPath, fullCsv);
+      fs.writeFileSync(
+        metaPath,
+        JSON.stringify({
+          dictVersion: "202601",
+          months: ["2024-01"],
+          flow: "import",
+          grouping: "product",
+          sha256: fullSha,
+          byteLength: fullCsv.byteLength,
+          inspection: { detailRowCount: 2 },
+        }),
+      );
+
+      // 完整一致的归档文件通过核验
+      const ok = importerMod.verifyArchiveEntryIntegrity({ mfPath, manifestObj, months: ["2024-01"] });
+      expect(ok.expectedSourceSha256).toBe(fullSha);
+      expect(ok.expectedDetailRowCount).toBe(2);
+
+      // [P1-C] 若归档后的 CSV 丢了一行（但仍是合法 CSV），必须因 SHA-256 失配立即拦截
+      const truncatedCsv = Buffer.from("数据年月,商品编码,商品名称,美元\r\n202401,90181100,心电图记录仪,100\r\n", "utf8");
+      fs.writeFileSync(csvPath, truncatedCsv);
+      expect(() =>
+        importerMod.verifyArchiveEntryIntegrity({ mfPath, manifestObj, months: ["2024-01"] }),
+      ).toThrow(/ARCHIVE_INTEGRITY_ERROR/);
+
+      // [P1-C] probeVerifiedZero=true 但缺失 .meta.json 同样拒绝上传
+      fs.rmSync(metaPath);
+      expect(() =>
+        importerMod.verifyArchiveEntryIntegrity({ mfPath, manifestObj, months: ["2024-01"] }),
+      ).toThrow(/ARCHIVE_INTEGRITY_ERROR/);
+
+      // [P2-5] HTTP 200 但缺分组导致未发布、存在对账差异、或批次仍为 staged 均必须抛出非零错误
+      expect(() =>
+        importerMod.verifyPublishOutcome({
+          expectedMonths: ["2024-01", "2024-02"],
+          publishResponse: {
+            status: 200,
+            json: { published: true, publishedMonths: ["2024-01"], reconciliationNotes: {} },
+          },
+        }),
+      ).toThrow(/未发布月份=\[2024-02\]/);
+
+      expect(() =>
+        importerMod.verifyPublishOutcome({
+          expectedMonths: ["2024-01"],
+          publishResponse: {
+            status: 200,
+            json: {
+              published: false,
+              publishedMonths: ["2024-01"],
+              reconciliationNotes: { "2024-01": "import/partner/90181100: diff=10" },
+            },
+          },
+        }),
+      ).toThrow(/对账差异/);
+
+      expect(() =>
+        importerMod.verifyPublishOutcome({
+          expectedMonths: ["2024-01"],
+          importedBatchIds: ["batch-staged"],
+          publishResponse: {
+            status: 200,
+            json: { published: false, publishedMonths: ["2024-01"], reconciliationNotes: {} },
+          },
+          batchesAfterPublish: [{ batchId: "batch-staged", publishState: "staged", supersededBy: null }],
+        }),
+      ).toThrow(/batch-staged/);
+
+      expect(() =>
+        importerMod.verifyPublishOutcome({
+          expectedMonths: ["2024-01"],
+          importedBatchIds: ["batch-pub"],
+          publishResponse: {
+            status: 200,
+            json: { published: true, publishedMonths: ["2024-01"], reconciliationNotes: {} },
+          },
+          batchesAfterPublish: [{ batchId: "batch-pub", publishState: "published", supersededBy: null }],
+        }),
+      ).not.toThrow();
+
+      // [P2-7] 字典摘要在 LF 与 CRLF 换行下均精确匹配 EXPECTED_DICT_SHA256
+      const manifestToolHref = pathToFileURL(path.resolve(here, "../../../scripts/trade-collection-manifest.mjs")).href;
+      const manifestTool = (await import(manifestToolHref)) as {
+        DEFAULT_DICT_PATH: string;
+        loadAndVerifyHsDict202601: (p?: string) => { sha256: string; hs8Count: number };
+      };
+      const lfBytes = fs.readFileSync(manifestTool.DEFAULT_DICT_PATH);
+      const crlfPath = path.join(tmpDir, "hs_dict_crlf.csv");
+      const crlfText = lfBytes.toString("utf8").replace(/\r\n/g, "\n").replace(/\n/g, "\r\n");
+      fs.writeFileSync(crlfPath, crlfText, "utf8");
+      const crlfDict = manifestTool.loadAndVerifyHsDict202601(crlfPath);
+      expect(crlfDict.sha256).toBe(EXPECTED_DICT_SHA256);
+      expect(crlfDict.hs8Count).toBe(164);
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
