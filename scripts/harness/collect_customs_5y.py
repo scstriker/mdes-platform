@@ -30,7 +30,14 @@ from typing import Any, Callable
 SCRIPT_DIR = Path(__file__).resolve().parent
 PLATFORM_ROOT = SCRIPT_DIR.parent.parent
 WORKSPACE_ROOT = PLATFORM_ROOT.parent
-DEFAULT_USERSCRIPT_PATH = WORKSPACE_ROOT / "docs" / "china_customs_suite.user.js"
+REPO_USERSCRIPT_PATH = PLATFORM_ROOT / "docs" / "china_customs_suite.user.js"
+OUTER_USERSCRIPT_PATH = WORKSPACE_ROOT / "docs" / "china_customs_suite.user.js"
+FALLBACK_COLLECTOR_PATH = PLATFORM_ROOT / "scripts" / "china_customs_collector.user.js"
+DEFAULT_USERSCRIPT_PATH = (
+    REPO_USERSCRIPT_PATH
+    if REPO_USERSCRIPT_PATH.exists()
+    else (OUTER_USERSCRIPT_PATH if OUTER_USERSCRIPT_PATH.exists() else FALLBACK_COLLECTOR_PATH)
+)
 DEFAULT_DICT_CSV_PATH = PLATFORM_ROOT / "data" / "hs_dict_202601.csv"
 DEFAULT_ARCHIVE_DIR = PLATFORM_ROOT / "data" / "customs-raw"
 DEFAULT_CHROME_PROFILE_DIR = PLATFORM_ROOT / "apps" / "api" / ".wrangler" / "chrome-customs-profile"

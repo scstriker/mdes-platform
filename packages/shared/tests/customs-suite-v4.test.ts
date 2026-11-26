@@ -5,8 +5,14 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const TOP_SUITE_PATH = path.resolve(here, "../../../../docs/china_customs_suite.user.js");
+const REPO_DOCS_SUITE_PATH = path.resolve(here, "../../../docs/china_customs_suite.user.js");
+const OUTER_SUITE_PATH = path.resolve(here, "../../../../docs/china_customs_suite.user.js");
 const COLLECTOR_COPY_PATH = path.resolve(here, "../../../scripts/china_customs_collector.user.js");
+const TOP_SUITE_PATH = fs.existsSync(REPO_DOCS_SUITE_PATH)
+  ? REPO_DOCS_SUITE_PATH
+  : fs.existsSync(OUTER_SUITE_PATH)
+    ? OUTER_SUITE_PATH
+    : COLLECTOR_COPY_PATH;
 const EXPECTED_DICT_SHA256 = "ab8e97496fbc9500877f02adc61ab214788f79234b9cb1f565a98f77a683a59b";
 
 function loadUserscriptHeadless(scriptPath: string, fetchImpl?: typeof fetch) {
