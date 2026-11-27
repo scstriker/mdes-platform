@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router";
+import { detectCatalogAliasCorrection, V2_SEED_CATALOG_RECORDS } from "@mdes/shared";
 import { IconArrowRight, IconChevronDown, IconChevronUp } from "@tabler/icons-react";
-import { EmptyState, formatNumber, Tag, TextLink } from "@/components/itei";
+import { EmptyState, formatNumber, Notice, Tag, TextLink } from "@/components/itei";
 import { useGlobalSearch, useTradeOverview } from "@/lib/api";
 import {
   buildPublicSearchUrl,
@@ -15,6 +16,8 @@ import { cn } from "@/lib/utils";
 
 const VALID_SCOPE_PARAMS = new Set<PublicScopeParam>([
   "all",
+  "statistics",
+  "markets",
   "products",
   "enterprises",
   "trade",
@@ -31,18 +34,20 @@ function parseScopeParam(raw: string | null): PublicScopeParam {
 }
 
 const SUBPAGE_TABLE_ANCHOR: Record<string, string> = {
-  "/products": "#product-explorer-heading",
-  "/enterprises": "#enterprise-directory-heading",
+  "/statistics": "",
+  "/markets": "",
+  "/products": "",
+  "/enterprises": "",
   "/trade": "#trade-directory-heading",
-  "/reports": "#fig-reports-briefings",
+  "/reports": "",
   "/system": "",
 };
 
 /**
  * 独立全站搜索结果页（/search?q=...&scope=...&item=...）：
- * - 纯粹呈现检索结果列表与结构化档案详情，零宏观装饰大图或统计图表干扰，确保首屏直达命中条目；
- * - 支持在搜索页内按「全部 / 注册与产品 / 企业与机构 / 进出口贸易 / 政策与报告 / 指标目录 / 实时观测」切换分栏；
- * - 点击任意结果条目原地展开完整结构化字段，无需被迫跳转至栏目概览子页。
+ * - 纯粹呈现检索结果列表、一等公民直达链接与结构化档案详情，零宏观装饰大图或统计图表画布干扰；
+ * - 完整合并本地种子与服务端 D1 `v2_hits`（统计成果、产品型号、注册证、机构、政策、标准、来源）；
+ * - 对废止/误写标准号（如 GB 9706.233-2020 -> YY 9706.233-2021）给出显式纠偏横幅。
  */
 export default function GlobalSearchPage() {
   const [params, setParams] = useSearchParams();
@@ -51,11 +56,18 @@ export default function GlobalSearchPage() {
   const focusedItemId = params.get("item") ?? "";
 
   const liveTrade = useTradeOverview(undefined, undefined, true);
-  const { total: benchmarkTotal, allGroups, groups } = useMemo(
-    () => queryAllPublicGrouped(q, liveTrade.data),
-    [q, liveTrade.data],
-  );
   const liveSearch = useGlobalSearch(q, 30, q.length > 0);
+
+  const aliasCorrection = useMemo(
+    () => detectCatalogAliasCorrection(q, V2_SEED_CATALOG_RECORDS),
+    [q],
+  );
+
+  const { total: benchmarkTotal, allGroups, groups } = useMemo(
+    () => queryAllPublicGrouped(q, liveTrade.data, liveSearch.data?.v2_hits),
+    [q, liveTrade.data, liveSearch.data?.v2_hits],
+  );
+
   const liveObsTotal = q ? (liveSearch.data?.observations.total ?? 0) : 0;
   const liveObsItems = useMemo(
     () =>
@@ -105,7 +117,7 @@ export default function GlobalSearchPage() {
     { key: "all", label: "全部结果", count: combinedTotal },
     ...allGroups.map((g) => ({
       key: g.param as PublicScopeParam,
-      label: g.scope === "/system" ? "指标目录" : g.label,
+      label: g.label,
       count: g.items.length,
     })),
     ...(liveObsTotal > 0 || activeScope === "observations"
@@ -113,16 +125,26 @@ export default function GlobalSearchPage() {
       : []),
   ];
 
-  // 将 URL ?item= 命中的目标词条置顶于所属分组首位，确保从下拉联想点击进入时首行即可阅读详情
   function prioritizeFocused(items: readonly SearchSuggestionItem[]): SearchSuggestionItem[] {
     if (!focusedItemId) return [...items];
     const idx = items.findIndex((i) => i.id === focusedItemId);
     if (idx <= 0) return [...items];
     const copy = [...items];
     const [target] = copy.splice(idx, 1);
-    copy.unshift(target);
+    copy.unshift(target!);
     return copy;
   }
+
+  // 若 URL 带有 ?item=xxx，将命中词条所在的分组置于最前，确保 /search?item=rep-ann-28 首屏即见
+  const orderedGroups = useMemo(() => {
+    if (!focusedItemId) return groups;
+    const idx = groups.findIndex((g) => g.items.some((i) => i.id === focusedItemId));
+    if (idx <= 0) return groups;
+    const copy = [...groups];
+    const [target] = copy.splice(idx, 1);
+    copy.unshift(target!);
+    return copy;
+  }, [groups, focusedItemId]);
 
   const singleGroup =
     activeScope !== "all" && activeScope !== "observations"
@@ -133,10 +155,26 @@ export default function GlobalSearchPage() {
     (q.length > 0 && combinedTotal > 0 && combinedTotal <= 4) ||
     (singleGroup !== null && singleGroup.items.length > 0 && singleGroup.items.length <= 3);
 
+  function resolveDirectActionLabel(item: SearchSuggestionItem): string {
+    if (item.scope === "/statistics") return "打开统计工作台";
+    if (item.scope === "/system") return "查看指标规范";
+    if (item.subpageHref?.startsWith("/products/")) return "查看型号详情";
+    if (item.subpageHref?.startsWith("/enterprises/")) return "查看企业档案";
+    if (item.subpageHref?.startsWith("/reports/")) return "阅读报告正文";
+    if (item.subpageHref?.startsWith("/regulation/registrations")) return "前往注册准入核验";
+    if (item.subpageHref?.startsWith("/institutions")) return "前往机构名录核验";
+    if (item.subpageHref?.startsWith("/standards")) return "前往技术标准核验";
+    if (item.subpageHref?.startsWith("/policies")) return "前往产业政策条款";
+    if (item.subpageHref?.startsWith("/sources")) return "前往官方来源核验";
+    if (item.subpageHref?.startsWith("/technologies")) return "查看技术路线";
+    if (item.subpageHref?.startsWith("/markets")) return "前往市场招采核验";
+    return `进入${item.scopeLabel}`;
+  }
+
   function renderResultItem(item: SearchSuggestionItem, isLive = false) {
     const isExpanded = autoExpandAll || expandedIds.has(item.id);
     const isFocused = focusedItemId === item.id;
-    const isSystemProfile = item.scope === "/system" && item.subpageHref?.startsWith("/system/");
+    const directTarget = item.subpageHref;
 
     return (
       <li
@@ -148,15 +186,19 @@ export default function GlobalSearchPage() {
         )}
       >
         <div className="px-3 py-3.5">
-          <button
-            type="button"
-            aria-expanded={isExpanded}
-            onClick={() => toggleExpand(item.id)}
-            className="flex w-full cursor-pointer items-start justify-between gap-4 text-left focus-ring"
-          >
+          <div className="flex flex-wrap items-start justify-between gap-4">
             <div className="grid min-w-0 flex-1 gap-1">
               <div className="flex flex-wrap items-center gap-2">
-                <span className="body font-semibold text-brand-navy">{item.title}</span>
+                {directTarget ? (
+                  <Link
+                    to={directTarget}
+                    className="body font-semibold text-brand-navy hover:underline focus-ring"
+                  >
+                    {item.title}
+                  </Link>
+                ) : (
+                  <span className="body font-semibold text-brand-navy">{item.title}</span>
+                )}
                 <Tag size="sm" tone={isLive ? "success" : "info"}>
                   {item.badge}
                 </Tag>
@@ -165,21 +207,43 @@ export default function GlobalSearchPage() {
                 )}
               </div>
               <p className="body-sm text-ink-muted">{item.subtitle}</p>
-            </div>
-            <span className="mt-1 inline-flex shrink-0 items-center gap-1 caption font-semibold text-link">
-              {isExpanded ? (
-                <>
-                  收起详情
-                  <IconChevronUp size={15} aria-hidden="true" />
-                </>
-              ) : (
-                <>
-                  展开详情
-                  <IconChevronDown size={15} aria-hidden="true" />
-                </>
+              {item.aliasNote && (
+                <p className="caption font-semibold text-warning">{item.aliasNote}</p>
               )}
-            </span>
-          </button>
+            </div>
+
+            <div className="mt-0.5 flex shrink-0 flex-wrap items-center gap-3">
+              {directTarget && (
+                <TextLink
+                  to={directTarget}
+                  className="inline-flex items-center gap-1 caption font-semibold"
+                >
+                  {resolveDirectActionLabel(item)}
+                  <IconArrowRight size={13} aria-hidden="true" />
+                </TextLink>
+              )}
+              {item.fields && item.fields.length > 0 && (
+                <button
+                  type="button"
+                  aria-expanded={isExpanded}
+                  onClick={() => toggleExpand(item.id)}
+                  className="inline-flex cursor-pointer items-center gap-1 caption font-semibold text-ink-muted hover:text-brand-navy focus-ring"
+                >
+                  {isExpanded ? (
+                    <>
+                      收起摘要
+                      <IconChevronUp size={15} aria-hidden="true" />
+                    </>
+                  ) : (
+                    <>
+                      展开摘要
+                      <IconChevronDown size={15} aria-hidden="true" />
+                    </>
+                  )}
+                </button>
+              )}
+            </div>
+          </div>
 
           {isExpanded && item.fields && item.fields.length > 0 && (
             <div className="mt-3 grid gap-3 border-t border-border bg-surface-sunken px-3.5 py-3">
@@ -197,10 +261,10 @@ export default function GlobalSearchPage() {
                   </div>
                 ))}
               </dl>
-              {item.subpageHref && (
+              {directTarget && (
                 <div className="flex flex-wrap items-center justify-end gap-4 border-t border-border pt-2">
-                  <TextLink to={item.subpageHref} className="inline-flex items-center gap-1 body-sm">
-                    {isSystemProfile ? "查看完整指标规范档案" : `在「${item.scopeLabel}」多维筛选表中定位`}
+                  <TextLink to={directTarget} className="inline-flex items-center gap-1 body-sm">
+                    {resolveDirectActionLabel(item)}
                     <IconArrowRight size={14} aria-hidden="true" />
                   </TextLink>
                 </div>
@@ -224,7 +288,7 @@ export default function GlobalSearchPage() {
               <>
                 共命中{" "}
                 <strong className="font-semibold tabular-nums text-ink">{formatNumber(combinedTotal)}</strong>{" "}
-                条记录（基准名录与指标口径{" "}
+                条记录（统计成果、权威名录与指标口径{" "}
                 <span className="tabular-nums text-ink">{formatNumber(benchmarkTotal)}</span> 条
                 {liveSearch.isPending ? (
                   <span> · 同步实时库中…</span>
@@ -237,12 +301,12 @@ export default function GlobalSearchPage() {
                 ）
               </>
             ) : (
-              "覆盖注册产品、重点企业与临床检验机构、海关 HS 税号、政策标准报告、指标口径及实时入库观测记录"
+              "覆盖标准统计成果、产品型号、注册准入、重点企业与检验临床机构、海关 HS 税号、政策标准与官方来源"
             )}
           </p>
         </div>
 
-        {/* 搜索结果页内分栏切换条（点击原地过滤，不跳出搜索页） */}
+        {/* 搜索结果页内分栏切换条 */}
         <div
           role="tablist"
           aria-label="搜索结果领域筛选"
@@ -272,10 +336,28 @@ export default function GlobalSearchPage() {
         </div>
       </header>
 
+      {/* 误写或废止标准/文号纠偏横幅 */}
+      {aliasCorrection && (
+        <Notice
+          tone="warning"
+          title={`编码核验提示：「${aliasCorrection.queried}」现行有效规范条目为 ${aliasCorrection.canonical_code}（${aliasCorrection.canonical_title}）`}
+          action={
+            <TextLink
+              to={`/standards?q=${encodeURIComponent(aliasCorrection.queried)}`}
+              className="body-sm font-semibold"
+            >
+              前往技术标准核验页 →
+            </TextLink>
+          }
+        >
+          {aliasCorrection.explanation}
+        </Notice>
+      )}
+
       {q && combinedTotal === 0 && !liveSearch.isPending ? (
         <EmptyState
           title={`未找到与「${q}」直接匹配的记录`}
-          description="请尝试缩短关键词（如搜器械核心词、企业简称、工程指标编码或 4 位 HS 编码），或直接选择下方热门检索词。"
+          description="请尝试输入产品型号（如 uMR Jupiter）、注册证号、标准号（如 YY 9706.233-2021）或企业机构简称。"
           action={
             <div className="flex flex-wrap justify-center gap-2">
               {hotQueries.map((h) => (
@@ -313,7 +395,7 @@ export default function GlobalSearchPage() {
           {liveObsItems.length === 0 ? (
             <EmptyState
               title="当前检索词未命中实时入库观测记录"
-              description="可切换至「全部结果」查阅各专题名录与指标口径。"
+              description="可切换至「全部结果」查阅各专题名录与标准统计成果。"
             />
           ) : (
             <ul className="divide-y divide-border border-y border-border">
@@ -332,14 +414,18 @@ export default function GlobalSearchPage() {
                 </span>
               </h2>
               <Tag size="sm" tone="neutral">
-                {singleGroup.scope === "/system" ? "指标口径库" : "代表性基准名录"}
+                {singleGroup.scope === "/system"
+                  ? "指标口径库"
+                  : singleGroup.scope === "/statistics"
+                    ? "标准统计对象"
+                    : "权威实体与名录"}
               </Tag>
             </div>
             {q && singleGroup.items.length > 0 && (
               <TextLink
                 to={`${singleGroup.scope}?q=${encodeURIComponent(q)}${SUBPAGE_TABLE_ANCHOR[singleGroup.scope] ?? ""}`}
               >
-                进入{singleGroup.label}专题库深入筛选 →
+                进入{singleGroup.label}深入筛选 →
               </TextLink>
             )}
           </div>
@@ -356,7 +442,7 @@ export default function GlobalSearchPage() {
         </section>
       ) : (
         <div className="grid gap-8">
-          {/* 动态入库观测记录分组（连接 D1 实时数据库） */}
+          {/* 动态入库观测记录分组 */}
           {liveObsTotal > 0 && (
             <section
               id="group-live-observations"
@@ -389,8 +475,8 @@ export default function GlobalSearchPage() {
             </section>
           )}
 
-          {/* 五大专题代表性基准名录与指标目录 */}
-          {groups.map((group) => {
+          {/* 统计成果库、各领域权威实体与指标口径分组 */}
+          {orderedGroups.map((group) => {
             const ordered = prioritizeFocused(group.items);
             return (
               <section
@@ -407,7 +493,11 @@ export default function GlobalSearchPage() {
                       </span>
                     </h2>
                     <Tag size="sm" tone="neutral">
-                      {group.scope === "/system" ? "指标口径库" : "代表性基准名录"}
+                      {group.scope === "/system"
+                        ? "指标口径库"
+                        : group.scope === "/statistics"
+                          ? "标准统计对象"
+                          : "权威实体与名录"}
                     </Tag>
                   </div>
                   <div className="flex flex-wrap items-center gap-4">
@@ -424,7 +514,7 @@ export default function GlobalSearchPage() {
                       <TextLink
                         to={`${group.scope}?q=${encodeURIComponent(q)}${SUBPAGE_TABLE_ANCHOR[group.scope] ?? ""}`}
                       >
-                        进入{group.label}专题库深入筛选 →
+                        进入{group.label}深入筛选 →
                       </TextLink>
                     )}
                   </div>

@@ -1,512 +1,670 @@
-import { useMemo, useState } from "react";
-import { useSearchParams } from "react-router";
-import type { SortingState } from "@tanstack/react-table";
-import { IconArrowRight, IconRotate, IconX } from "@tabler/icons-react";
-import { matchesQuery } from "@mdes/shared";
-import bannerProducts from "@/assets/visuals/banner-products.webp";
-import { DataTable, formatNumber, Tag, TextLink, type DataTableColumn, type TagTone } from "@/components/itei";
-import { PageVisualBanner } from "@/components/layout/page-visual-banner";
-import { StatistaFigure, type StatistaTableColumn } from "@/components/layout/statista-figure";
-import { Button } from "@/components/ui/button";
-import { controlClass } from "@/components/ui/input";
-import type { ChartOption } from "@/lib/charts/echarts";
-import { statistaHorizontalBarOption, statistaTrendWithPartialOption, type ChartTheme } from "@/lib/charts/theme";
-import { cn } from "@/lib/utils";
+import { useMemo } from "react";
+import { Link, Navigate, useLocation, useSearchParams } from "react-router";
+import { IconArrowsLeftRight, IconExternalLink, IconRotate, IconX } from "@tabler/icons-react";
 import {
-  ANNUAL_RECONCILIATION,
-  CATEGORY_OPTIONS,
-  CHANNEL_TABS,
-  ORIGIN_OPTIONS,
-  PRODUCT_EXPLORER_ROWS,
-  PRODUCT_KPIS,
-  REG_TREND_SERIES,
-  TRACK_DISTRIBUTION,
-  type ProductChannel,
-  type ProductExplorerRow,
-} from "./data";
+  matchesQuery,
+  V2_SEED_CATALOG_RECORDS,
+  type CatalogRecord,
+  type ModelParameterItem,
+  type UdiPackageSpec,
+} from "@mdes/shared";
+import {
+  Breadcrumbs,
+  DataTable,
+  Notice,
+  SectionTitle,
+  Tag,
+  TextLink,
+  type DataTableColumn,
+} from "@/components/itei";
+import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { controlClass } from "@/components/ui/input";
+import { Table, TableBody, TableCaption, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { useCatalogList } from "@/lib/api/queries";
+import { cn } from "@/lib/utils";
 
-const PAGE_SIZE = 8;
+const CATEGORY_FILTER_OPTIONS = [
+  { value: "", label: "全部品类" },
+  { value: "mri", label: "磁共振成像 (mri)" },
+  { value: "surgical-robot", label: "手术机器人 (surgical-robot)" },
+] as const;
 
-const VALID_CHANNELS = new Set<ProductChannel>(["all", "reg", "innov", "priority", "udi"]);
+const ENTERPRISE_FILTER_OPTIONS = [
+  { value: "", label: "全部生产企业" },
+  { value: "united-imaging", label: "上海联影医疗科技股份有限公司" },
+  { value: "microport", label: "上海微创医疗机器人（集团）股份有限公司" },
+] as const;
 
-const CHANNEL_TONE: Record<Exclude<ProductChannel, "all">, TagTone> = {
-  innov: "info",
-  priority: "warning",
-  reg: "neutral",
-  udi: "neutral",
+const CATEGORY_LABEL: Record<string, string> = {
+  mri: "医学影像 · 磁共振",
+  "surgical-robot": "有源手术 · 手术机器人",
 };
 
-function parseChannel(raw: string | null): ProductChannel {
-  if (raw && VALID_CHANNELS.has(raw as ProductChannel)) {
-    return raw as ProductChannel;
+function getModelParameters(rec: CatalogRecord): ModelParameterItem[] {
+  const raw = rec.detail?.parameters;
+  return Array.isArray(raw) ? (raw as ModelParameterItem[]) : [];
+}
+
+function getModelUdiPackages(rec: CatalogRecord): UdiPackageSpec[] {
+  const raw = rec.detail?.udi_packages;
+  return Array.isArray(raw) ? (raw as UdiPackageSpec[]) : [];
+}
+
+function renderParamSource(param: ModelParameterItem | undefined) {
+  if (!param) return null;
+  if (param.key === "safety_standard" && param.value.includes("9706")) {
+    return (
+      <div className="flex flex-wrap items-center gap-2 caption text-ink-muted">
+        <TextLink to={`/standards?q=${encodeURIComponent(param.value)}`} className="font-semibold">
+          平台标准详情（{param.value}）
+        </TextLink>
+        {param.source_url && (
+          <a
+            href={param.source_url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-0.5 text-link hover:underline focus-ring"
+          >
+            <span>{param.source_label}</span>
+            <IconExternalLink size={12} aria-hidden="true" />
+          </a>
+        )}
+      </div>
+    );
   }
-  return "all";
+  if (param.source_url) {
+    return (
+      <a
+        href={param.source_url}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="inline-flex items-center gap-1 caption font-semibold text-link hover:underline focus-ring"
+      >
+        <span>{param.source_label}</span>
+        <IconExternalLink size={12} aria-hidden="true" />
+      </a>
+    );
+  }
+  return <span className="caption text-ink-muted">{param.source_label}</span>;
 }
 
-const RECONCILIATION_BY_PERIOD = new Map(ANNUAL_RECONCILIATION.map((r) => [r.year, r]));
-
-const TREND_TABLE_COLUMNS: readonly StatistaTableColumn[] = [
-  { key: "period", title: "统计期间", align: "left" },
-  { key: "domestic", title: "国产首次(件)", align: "right" },
-  { key: "imported", title: "进口首次(件)", align: "right" },
-  { key: "total", title: "合计(件)", align: "right" },
-  { key: "domesticShare", title: "国产占比", align: "right" },
-  { key: "deviation", title: "年报核验偏差", align: "right" },
-];
-
-const TREND_TABLE_ROWS = REG_TREND_SERIES.map((d) => {
-  const total = d.domestic + d.imported;
-  const share = `${((d.domestic / total) * 100).toFixed(1)}%`;
-  const rec = RECONCILIATION_BY_PERIOD.get(d.period);
-  return {
-    period: d.period,
-    domestic: d.domestic.toLocaleString("zh-CN"),
-    imported: d.imported.toLocaleString("zh-CN"),
-    total: total.toLocaleString("zh-CN"),
-    domesticShare: share,
-    deviation: rec ? rec.deviation : "—",
-  };
-});
-
-const TRACK_TABLE_COLUMNS: readonly StatistaTableColumn[] = [
-  { key: "track", title: "重点产品赛道", align: "left" },
-  { key: "domesticValid", title: "国产有效证(件)", align: "right" },
-  { key: "importedValid", title: "进口有效证(件)", align: "right" },
-  { key: "totalValid", title: "合计(件)", align: "right" },
-  { key: "sharePct", title: "存量占比", align: "right" },
-];
-
-const TRACK_TABLE_ROWS = TRACK_DISTRIBUTION.map((d) => {
-  const total = d.domesticValid + d.importedValid;
-  return {
-    track: d.track,
-    domesticValid: d.domesticValid.toLocaleString("zh-CN"),
-    importedValid: d.importedValid.toLocaleString("zh-CN"),
-    totalValid: total.toLocaleString("zh-CN"),
-    sharePct: d.sharePct,
-  };
-});
-
-function regTrendOption(t: ChartTheme): ChartOption {
-  return statistaTrendWithPartialOption(t, {
-    periods: REG_TREND_SERIES.map((d) => d.period),
-    lastIsPartial: true,
-    partialLabel: "前三季累计",
-    series: [
-      {
-        name: "国产首次注册",
-        values: REG_TREND_SERIES.map((d) => d.domestic),
-        colorIndex: 0,
-        showLabels: true,
-      },
-      {
-        name: "进口首次注册",
-        values: REG_TREND_SERIES.map((d) => d.imported),
-        colorIndex: 1,
-        showLabels: true,
-      },
-    ],
-    yMax: 3000,
-  });
-}
-
-function trackDistributionOption(t: ChartTheme): ChartOption {
-  const categories = TRACK_DISTRIBUTION.map((d) => d.track);
-  const values = TRACK_DISTRIBUTION.map((d) => d.domesticValid + d.importedValid);
-  const labels = TRACK_DISTRIBUTION.map((d) => {
-    const total = d.domesticValid + d.importedValid;
-    return `${total.toLocaleString("zh-CN")} 件（${d.sharePct}）`;
-  });
-
-  return statistaHorizontalBarOption(t, {
-    categories,
-    values,
-    labels,
-    highlightTopN: 2,
-    rightPadding: 132,
-  });
-}
-
+/**
+ * 产品型号目录与同品类双型号对比页（/products）：
+ * - 旧准入通道书签（?channel=reg|innov|priority）平滑导向 /regulation/registrations；?channel=udi 留在本页展开包装标识；
+ * - 严格按「一行一个产品型号」建档（如筛选国械注准20223061141 精确返回 uMR Jupiter 与 uMR 880 共 2 个型号，UDI 包装层级内折）；
+ * - 支持勾选同品类任意 2 个型号或通过 ?compare=umr-jupiter,umr-880 打开逐参数及出处并排比较（桌面分列、手机按参数纵排成对展示）。
+ */
 export default function ProductsPage() {
+  const location = useLocation();
   const [searchParams, setSearchParams] = useSearchParams();
-  const q = searchParams.get("q") ?? "";
-  const trimmedQuery = q.trim();
-  const normalizedQuery = trimmedQuery.toLowerCase();
-  const channel = parseChannel(searchParams.get("channel"));
 
-  const [origin, setOrigin] = useState<string>("");
-  const [category, setCategory] = useState<string>("");
-  const [sorting, setSorting] = useState<SortingState>([]);
-  const [pageState, setPageState] = useState<{ key: string; page: number }>({ key: "", page: 0 });
+  const channel = searchParams.get("channel") ?? "";
+  const rawQ = searchParams.get("q") ?? "";
+  const trimmedQ = rawQ.trim();
+  const category = searchParams.get("category") ?? "";
+  const enterprise = searchParams.get("enterprise") ?? "";
+  const cert = searchParams.get("cert")?.trim() ?? "";
+  const compareRaw = searchParams.get("compare") ?? "";
 
-  const updateSearchParam = (key: "q" | "channel", value: string) => {
-    const next = new URLSearchParams(searchParams);
-    if (!value || (key === "channel" && value === "all")) {
-      next.delete(key);
-    } else {
-      next.set(key, value);
-    }
-    setSearchParams(next, { replace: true });
-  };
+  // 旧书签平滑迁移：注册、创新、优先审批转入注册与准入库；旧趋势图锚点转入对应单项统计
+  if (channel === "reg" || channel === "innov" || channel === "priority") {
+    const targetParams = new URLSearchParams();
+    targetParams.set("channel", channel);
+    if (trimmedQ) targetParams.set("q", trimmedQ);
+    return <Navigate to={`/regulation/registrations?${targetParams.toString()}`} replace />;
+  }
+  if (location.hash === "#fig-products-trend" || trimmedQ === "第三类首次注册") {
+    return <Navigate to="/statistics/STAT-REG-CLASS3-TREND" replace />;
+  }
+  if (location.hash === "#fig-products-tracks") {
+    return <Navigate to="/statistics/STAT-REG-PROVINCE-STOCK" replace />;
+  }
 
-  const resetFilters = () => {
-    setOrigin("");
-    setCategory("");
-    const next = new URLSearchParams(searchParams);
-    next.delete("q");
-    next.delete("channel");
-    setSearchParams(next, { replace: true });
-  };
+  const udiViewActive = channel === "udi";
 
-  const channelCounts = useMemo(() => {
-    const counts: Record<ProductChannel, number> = {
-      all: 0,
-      reg: 0,
-      innov: 0,
-      priority: 0,
-      udi: 0,
-    };
-    for (const row of PRODUCT_EXPLORER_ROWS) {
-      if (origin && row.origin !== origin) continue;
-      if (category && row.category !== category) continue;
-      if (
-        normalizedQuery &&
-        !matchesQuery(
-          `${row.certOrCode} ${row.productName} ${row.specAndScope} ${row.registrant} ${row.category} ${row.origin} ${row.originRegion} ${row.channelLabel}`,
-          normalizedQuery,
-        )
-      ) {
-        continue;
-      }
-      counts.all += 1;
-      counts[row.channel] += 1;
-    }
-    return counts;
-  }, [origin, category, normalizedQuery]);
-
-  const filteredRows = useMemo(() => {
-    return PRODUCT_EXPLORER_ROWS.filter((row) => {
-      if (channel !== "all" && row.channel !== channel) return false;
-      if (origin && row.origin !== origin) return false;
-      if (category && row.category !== category) return false;
-      if (!normalizedQuery) return true;
-      return matchesQuery(
-        `${row.certOrCode} ${row.productName} ${row.specAndScope} ${row.registrant} ${row.category} ${row.origin} ${row.originRegion} ${row.channelLabel}`,
-        normalizedQuery,
-      );
-    });
-  }, [channel, origin, category, normalizedQuery]);
-
-  const sortedRows = useMemo(() => {
-    const activeSort = sorting[0];
-    if (!activeSort || activeSort.id !== "approvalDate") return filteredRows;
-    const dir = activeSort.desc ? -1 : 1;
-    return [...filteredRows].sort((a, b) => a.approvalDate.localeCompare(b.approvalDate) * dir);
-  }, [filteredRows, sorting]);
-
-  const filterKey = `${channel}|${origin}|${category}|${normalizedQuery}|${sorting.map((s) => `${s.id}:${s.desc ? "d" : "a"}`).join(",")}`;
-  const rawPage = pageState.key === filterKey ? pageState.page : 0;
-  const maxPage = Math.max(0, Math.ceil(sortedRows.length / PAGE_SIZE) - 1);
-  const safePage = Math.min(rawPage, maxPage);
-  const pagedRows = useMemo(
-    () => sortedRows.slice(safePage * PAGE_SIZE, (safePage + 1) * PAGE_SIZE),
-    [sortedRows, safePage],
+  const selectedCompareSlugs = useMemo(
+    () =>
+      compareRaw
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .slice(0, 2),
+    [compareRaw],
   );
 
-  const hasActiveFilter = channel !== "all" || Boolean(origin) || Boolean(category) || Boolean(normalizedQuery);
+  const combinedApiQuery = [cert, trimmedQ].filter(Boolean).join(" ").trim();
 
-  const explorerColumns = useMemo<DataTableColumn<ProductExplorerRow>[]>(
+  const listQuery = useCatalogList({
+    kind: "model",
+    category: category || undefined,
+    q: combinedApiQuery || undefined,
+  });
+
+  // 全量型号池用于渲染 ?compare= 双型号对照，不受局部搜索词隐藏影响
+  const allModelsQuery = useCatalogList({ kind: "model" });
+
+  const allModels = useMemo<CatalogRecord[]>(() => {
+    if (allModelsQuery.data && allModelsQuery.data.items.length > 0) {
+      return allModelsQuery.data.items;
+    }
+    return V2_SEED_CATALOG_RECORDS.filter((r) => r.kind === "model");
+  }, [allModelsQuery.data]);
+
+  const filteredModels = useMemo<CatalogRecord[]>(() => {
+    const base = listQuery.data
+      ? listQuery.data.items
+      : V2_SEED_CATALOG_RECORDS.filter((r) => {
+          if (r.kind !== "model") return false;
+          if (category && r.category !== category) return false;
+          if (combinedApiQuery) {
+            const hay = `${r.id} ${r.slug} ${r.title} ${r.subtitle} ${r.code ?? ""} ${r.tags.join(" ")} ${JSON.stringify(r.summary_fields)}`;
+            if (!matchesQuery(hay, combinedApiQuery)) return false;
+          }
+          return true;
+        });
+
+    return base.filter((r) => {
+      if (enterprise && String(r.detail?.manufacturer_slug ?? "") !== enterprise) return false;
+      if (cert && String(r.detail?.cert_no ?? "") !== cert) return false;
+      return true;
+    });
+  }, [listQuery.data, category, combinedApiQuery, enterprise, cert]);
+
+  const comparedModels = useMemo<CatalogRecord[]>(() => {
+    return selectedCompareSlugs
+      .map((slug) => allModels.find((m) => m.slug === slug))
+      .filter((m): m is CatalogRecord => Boolean(m));
+  }, [selectedCompareSlugs, allModels]);
+
+  const lockedCompareCategory = comparedModels[0]?.category ?? "";
+
+  const comparisonParameterRows = useMemo(() => {
+    if (comparedModels.length !== 2) return [];
+    const [modelA, modelB] = comparedModels as [CatalogRecord, CatalogRecord];
+    const paramsA = getModelParameters(modelA);
+    const paramsB = getModelParameters(modelB);
+    const keys = Array.from(new Set([...paramsA.map((p) => p.key), ...paramsB.map((p) => p.key)]));
+
+    return keys.map((key) => {
+      const a = paramsA.find((p) => p.key === key);
+      const b = paramsB.find((p) => p.key === key);
+      return {
+        key,
+        label: a?.label ?? b?.label ?? key,
+        a,
+        b,
+      };
+    });
+  }, [comparedModels]);
+
+  function updateParams(updates: Record<string, string | null>) {
+    const next = new URLSearchParams(searchParams);
+    for (const [k, v] of Object.entries(updates)) {
+      if (!v) next.delete(k);
+      else next.set(k, v);
+    }
+    setSearchParams(next, { replace: true });
+  }
+
+  function toggleCompareSlug(slug: string, itemCategory: string | undefined) {
+    const exists = selectedCompareSlugs.includes(slug);
+    let nextSlugs: string[];
+    if (exists) {
+      nextSlugs = selectedCompareSlugs.filter((s) => s !== slug);
+    } else {
+      if (selectedCompareSlugs.length >= 2) return;
+      if (lockedCompareCategory && itemCategory && lockedCompareCategory !== itemCategory) return;
+      nextSlugs = [...selectedCompareSlugs, slug];
+    }
+    updateParams({ compare: nextSlugs.length > 0 ? nextSlugs.join(",") : null });
+  }
+
+  function resetAllFilters() {
+    setSearchParams(new URLSearchParams(), { replace: true });
+  }
+
+  const hasActiveFilter = Boolean(category || enterprise || cert || trimmedQ || udiViewActive);
+
+  const columns = useMemo<DataTableColumn<CatalogRecord>[]>(
     () => [
       {
-        key: "certOrCode",
-        title: "编号/注册证号",
-        type: "code",
-        colClassName: "w-44",
+        key: "compare",
+        title: "对比",
+        colClassName: "w-16",
+        hideOnCard: false,
+        cell: (row) => {
+          const checked = selectedCompareSlugs.includes(row.slug);
+          const incompatible =
+            !checked &&
+            (selectedCompareSlugs.length >= 2 ||
+              (Boolean(lockedCompareCategory) && Boolean(row.category) && lockedCompareCategory !== row.category));
+          return (
+            <Checkbox
+              aria-label={`选择 ${row.code ?? row.title} 加入对比`}
+              checked={checked}
+              disabled={incompatible}
+              onCheckedChange={() => toggleCompareSlug(row.slug, row.category)}
+            />
+          );
+        },
       },
       {
-        key: "productName",
-        title: "产品名称与规格",
+        key: "title",
+        title: "产品名称与规格型号",
         primary: true,
-        cell: (row) => (
-          <div className="grid min-w-0 gap-0.5">
-            <span className="truncate font-semibold text-ink" title={row.productName}>
-              {row.productName}
-            </span>
-            <span className="truncate caption text-ink-muted" title={row.specAndScope}>
-              {row.specAndScope}
-            </span>
-          </div>
-        ),
-      },
-      {
-        key: "channelLabel",
-        title: "准入通道",
-        type: "status",
-        colClassName: "w-28",
-        cell: (row) => (
-          <Tag size="sm" tone={CHANNEL_TONE[row.channel]}>
-            {row.channelLabel}
-          </Tag>
-        ),
+        cell: (row) => {
+          const udiList = getModelUdiPackages(row);
+          const params = getModelParameters(row);
+          const firstParam = params[0];
+          return (
+            <div className="grid min-w-0 gap-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <TextLink to={`/products/${encodeURIComponent(row.slug)}`} className="font-semibold text-brand-navy">
+                  {row.title}
+                </TextLink>
+                {row.subkind && (
+                  <Tag size="sm" tone="info">
+                    {row.subkind}
+                  </Tag>
+                )}
+              </div>
+              <p className="truncate caption text-ink-muted">{row.subtitle}</p>
+              {firstParam && (
+                <p className="caption text-ink">
+                  核心特征：{firstParam.value}（{firstParam.source_label}）
+                </p>
+              )}
+              {udiViewActive && udiList.length > 0 && (
+                <div className="mt-1 grid gap-1 border-l-2 border-brand-sky bg-surface-sunken px-3 py-1.5 caption text-ink">
+                  <span className="font-semibold text-brand-navy">UDI-DI 包装层级（共 {udiList.length} 条）：</span>
+                  {udiList.map((u) => (
+                    <span key={u.udi_di} className="code">
+                      {u.udi_di} · {u.package_level}（{u.spec_note}）
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        },
       },
       {
         key: "category",
-        title: "器械品类",
-        colClassName: "w-32",
-      },
-      {
-        key: "registrant",
-        title: "注册人/产地",
+        title: "所属品类",
         colClassName: "w-40",
         cell: (row) => (
-          <div className="grid min-w-0 gap-0.5">
-            <span className="truncate text-ink" title={row.registrant}>
-              {row.registrant}
-            </span>
-            <span className="truncate caption text-ink-muted">
-              {row.origin} · {row.originRegion}
-            </span>
+          <div className="grid gap-0.5">
+            <span className="body-sm text-ink">{CATEGORY_LABEL[row.category ?? ""] ?? (row.category ?? "—")}</span>
+            {row.category && (
+              <TextLink to={`/markets?category=${encodeURIComponent(row.category)}`} className="caption">
+                查看市场样本 →
+              </TextLink>
+            )}
           </div>
         ),
       },
       {
-        key: "approvalDate",
-        title: "批准/公示日期",
-        type: "code",
-        sortable: true,
-        colClassName: "w-28",
+        key: "manufacturer",
+        title: "制造企业",
+        colClassName: "w-48",
+        cell: (row) => {
+          const mSlug = typeof row.detail?.manufacturer_slug === "string" ? row.detail.manufacturer_slug : "";
+          const mName = typeof row.detail?.manufacturer_name === "string" ? row.detail.manufacturer_name : "—";
+          return mSlug ? (
+            <TextLink to={`/enterprises/${encodeURIComponent(mSlug)}`} className="body-sm font-semibold">
+              {mName}
+            </TextLink>
+          ) : (
+            <span className="body-sm text-ink">{mName}</span>
+          );
+        },
+      },
+      {
+        key: "cert_no",
+        title: "关联注册证与包装数",
+        colClassName: "w-52",
+        cell: (row) => {
+          const certNo = typeof row.detail?.cert_no === "string" ? row.detail.cert_no : "";
+          const udiCount = getModelUdiPackages(row).length;
+          return (
+            <div className="grid gap-0.5">
+              {certNo ? (
+                <TextLink
+                  to={`/regulation/registrations?q=${encodeURIComponent(certNo)}`}
+                  className="code font-semibold"
+                >
+                  {certNo}
+                </TextLink>
+              ) : (
+                <span>—</span>
+              )}
+              <span className="caption text-ink-muted">内折 {udiCount} 条 UDI-DI 包装标识</span>
+            </div>
+          );
+        },
       },
     ],
-    [],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [selectedCompareSlugs, lockedCompareCategory, udiViewActive],
   );
 
   return (
-    <div>
-      {/* Band 1: Page Header & Open 5-Column Rule-Line KPI Strip */}
-      <section className="bg-surface" aria-labelledby="products-page-title">
-        <div className="mx-auto grid w-full max-w-content gap-6 px-4 py-8 md:px-8 md:py-10">
-          <PageVisualBanner
-            titleId="products-page-title"
-            title="注册准入与产品数据库"
-            summary="贯通第三类医疗器械注册证、创新特别审查、优先审批通道与唯一标识（UDI）规格档案，并与国家药监局统计年报交叉核验。"
-            image={bannerProducts}
-            actions={
-              <TextLink to="/system" className="inline-flex items-center gap-1 body">
-                查看审评与产品统计口径
-                <IconArrowRight size={15} aria-hidden="true" />
-              </TextLink>
-            }
-          />
+    <div className="mx-auto grid w-full max-w-content gap-8 px-4 py-8 md:px-8 md:py-10">
+      {/* 页头与准入库分流指引 */}
+      <header className="grid gap-5 border-b border-border pb-6">
+        <Breadcrumbs items={[{ label: "产业总览", href: "/" }, { label: "产品型号库" }]} />
 
-          <div
-            role="region"
-            aria-label="注册与产品核心指标通栏"
-            className="grid grid-cols-2 gap-y-5 border-t-2 border-brand-navy border-b border-border py-4 md:grid-cols-5 md:gap-y-0 md:divide-x md:divide-border md:py-0"
-          >
-            {PRODUCT_KPIS.map((kpi) => (
-              <div key={kpi.label} className="grid content-start gap-1 pr-3 md:px-4 md:py-4 md:first:pl-0 md:last:pr-0">
-                <span className="label text-ink-muted">{kpi.label}</span>
-                <p className="numeral tabular-nums text-brand-navy">
-                  {kpi.value}
-                  <span className="ml-1 body-sm font-normal text-ink-muted">{kpi.unit}</span>
-                </p>
-                <p className="caption text-ink-muted">{kpi.subnote}</p>
-              </div>
-            ))}
+        <div className="flex flex-wrap items-end justify-between gap-4">
+          <div className="grid gap-1.5">
+            <p className="label text-brand-navy">一等公民实体目录 · 按规格型号去重建档</p>
+            <h1 id="products-page-title" className="title-page text-ink">
+              医疗器械产品型号与技术参数库
+            </h1>
+            <p className="body text-ink-muted">
+              目录严格按「一行一个产品型号」组织，将 UDI-DI 最小销售与储运包装标识内折至型号规格区；支持同品类勾选两个型号并排比较参数及审评依据。
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-3">
+            {comparedModels.length < 2 && (
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => updateParams({ compare: "umr-jupiter,umr-880" })}
+              >
+                <IconArrowsLeftRight size={15} aria-hidden="true" />
+                与 uMR 880 并排比较样板
+              </Button>
+            )}
+            {hasActiveFilter && (
+              <Button variant="ghost" size="sm" onClick={resetAllFilters}>
+                <IconRotate size={14} aria-hidden="true" />
+                重置筛选
+              </Button>
+            )}
           </div>
         </div>
-      </section>
 
-      {/* Band 2: Side-by-Side Flagship Statista Infographics（仅在未执行关键词筛选的总览态展示，避免检索时图表压住结果表） */}
-      {!trimmedQuery && (
-        <section className="border-y border-border bg-surface-sunken" aria-labelledby="reg-structure-heading">
-          <div className="mx-auto w-full max-w-content px-4 py-8 md:px-8 md:py-10">
-            <h2 id="reg-structure-heading" className="sr-only">
-              审评准入趋势与重点赛道存量结构分析
-            </h2>
-            <div className="grid gap-6 lg:grid-cols-2">
-              <StatistaFigure
-                id="fig-products-trend"
-                eyebrow="图 1 · 审评准入趋势"
-                title="国产第三类医疗器械首次注册占比五年跃升至 71.2%"
-                subtitle="2021—2026年前三季度 · 境内与进口首次注册获批数量（单位：件）"
-                badge={{ label: "2026Q1-Q3 同比 +9.6%", tone: "info" }}
-                option={regTrendOption}
-                ariaLabel="2021至2026年前三季度国产与进口第三类医疗器械首次注册数量趋势折线图"
-                height={280}
-                tableColumns={TREND_TABLE_COLUMNS}
-                tableRows={TREND_TABLE_ROWS}
-                exportName="products-first-registration-trend"
-                source="国家药监局医疗器械批准证明文件库"
-                note="2026Q1-Q3 为 1–9 月累计值；历年数据与药监统计年报交叉核验偏差均小于 0.5%"
-              />
+        <div className="flex flex-wrap items-center justify-between gap-3 border border-border bg-surface-sunken px-4 py-2.5 body-sm">
+          <span className="text-ink-muted">
+            需检索注册证原文、创新特别审查、优先审批决定或审查指导原则？
+          </span>
+          <div className="flex flex-wrap items-center gap-4">
+            <TextLink to="/regulation/registrations" className="font-semibold">
+              前往注册与准入查询 →
+            </TextLink>
+            <button
+              type="button"
+              onClick={() => updateParams({ channel: udiViewActive ? null : "udi" })}
+              className="cursor-pointer font-semibold text-link hover:underline focus-ring"
+            >
+              {udiViewActive ? "收起列表内 UDI 包装预览" : "在列表内展开 UDI-DI 包装标识"}
+            </button>
+          </div>
+        </div>
 
-              <StatistaFigure
-                id="fig-products-tracks"
-                eyebrow="图 2 · 重点赛道存量结构"
-                title="无源植介入与体外诊断领跑有效三类注册证存量"
-                subtitle="截至 2026年9月末 · 六大重点赛道有效三类注册证规模及占比（单位：件）"
-                badge={{ label: "国产存量占 74.2%", tone: "info" }}
-                option={trackDistributionOption}
-                ariaLabel="六大重点医疗器械产品赛道有效三类注册证规模及占比横向条形图"
-                height={280}
-                tableColumns={TRACK_TABLE_COLUMNS}
-                tableRows={TRACK_TABLE_ROWS}
-                exportName="products-track-distribution"
-                source="国家药监局注册数据库"
-                note="六大赛道合计有效三类注册证 24,680 件，其中境内注册证 18,315 件、进口注册证 6,365 件"
-              />
+        {/* 筛选控件条 */}
+        <div
+          role="region"
+          aria-label="产品型号筛选条"
+          className="grid grid-cols-1 gap-3 border border-border bg-surface p-4 sm:grid-cols-2 lg:grid-cols-4"
+        >
+          <div className="grid gap-1">
+            <label htmlFor="product-category-select" className="label text-ink-muted">
+              产品品类
+            </label>
+            <select
+              id="product-category-select"
+              value={category}
+              onChange={(e) => updateParams({ category: e.target.value || null })}
+              className={cn(controlClass, "h-10")}
+            >
+              {CATEGORY_FILTER_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="grid gap-1">
+            <label htmlFor="product-enterprise-select" className="label text-ink-muted">
+              生产企业
+            </label>
+            <select
+              id="product-enterprise-select"
+              value={enterprise}
+              onChange={(e) => updateParams({ enterprise: e.target.value || null })}
+              className={cn(controlClass, "h-10")}
+            >
+              {ENTERPRISE_FILTER_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="grid gap-1">
+            <label htmlFor="product-cert-input" className="label text-ink-muted">
+              按关联注册证号筛选
+            </label>
+            <input
+              id="product-cert-input"
+              type="search"
+              value={cert}
+              onChange={(e) => updateParams({ cert: e.target.value || null })}
+              placeholder="如 国械注准20223061141"
+              className={cn(controlClass, "h-10")}
+            />
+          </div>
+
+          <div className="grid gap-1">
+            <label htmlFor="product-local-filter" className="label text-ink-muted">
+              型号或技术特征检索
+            </label>
+            <input
+              id="product-local-filter"
+              type="search"
+              value={rawQ}
+              onChange={(e) => updateParams({ q: e.target.value || null })}
+              placeholder="如 uMR Jupiter、5.0T、MT-1000…"
+              className={cn(controlClass, "h-10")}
+            />
+          </div>
+        </div>
+      </header>
+
+      {/* 单选 1 个型号时的待对比提示条 */}
+      {comparedModels.length === 1 && comparedModels[0] && (
+        <Notice
+          tone="info"
+          title={`已选 1/2 个对比型号：${comparedModels[0].title}`}
+          action={
+            <Button variant="secondary" size="sm" onClick={() => updateParams({ compare: null })}>
+              取消选择
+            </Button>
+          }
+        >
+          请在下方目录中再勾选 1 个同属「{CATEGORY_LABEL[comparedModels[0].category ?? ""] ?? comparedModels[0].category}」品类的型号启动逐项参数并排比较。
+        </Notice>
+      )}
+
+      {/* 双型号参数与出处并排比较面板（桌面分列对照、手机按参数纵排成对展示） */}
+      {comparedModels.length === 2 && (
+        <section
+          id="product-comparison-panel"
+          aria-labelledby="product-comparison-heading"
+          className="grid gap-4 border border-border border-t-2 border-t-brand-navy bg-surface p-5"
+        >
+          <div className="flex flex-wrap items-start justify-between gap-3 border-b border-border pb-4">
+            <div className="grid gap-1">
+              <p className="label text-brand-navy">同品类双型号参数与证据对照</p>
+              <h2 id="product-comparison-heading" className="title-sub text-ink">
+                {comparedModels[0]!.code ?? comparedModels[0]!.title} 与{" "}
+                {comparedModels[1]!.code ?? comparedModels[1]!.title} 技术规格对比
+              </h2>
+              <p className="body-sm text-ink-muted">
+                每项技术参数均附独立核验来源（技术审评报告页码、官方产品技术说明或强制性行业标准）。
+              </p>
             </div>
+            <Button variant="secondary" size="sm" onClick={() => updateParams({ compare: null })}>
+              <IconX size={14} aria-hidden="true" />
+              关闭型号对比
+            </Button>
+          </div>
+
+          {/* 桌面端：三列并排比较表 */}
+          <div className="hidden md:block">
+            <Table>
+              <TableCaption className="sr-only">双型号技术参数并排对比表</TableCaption>
+              <TableHeader>
+                <TableRow>
+                  <TableHead className="w-44">参数与核验项</TableHead>
+                  {comparedModels.map((m) => (
+                    <TableHead key={m.slug}>
+                      <div className="grid gap-0.5">
+                        <TextLink to={`/products/${encodeURIComponent(m.slug)}`} className="title-nav text-brand-navy">
+                          {m.title}
+                        </TextLink>
+                        <span className="caption font-normal text-ink-muted">{m.subtitle}</span>
+                      </div>
+                    </TableHead>
+                  ))}
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                <TableRow>
+                  <TableCell className="font-semibold text-ink">制造企业</TableCell>
+                  {comparedModels.map((m) => {
+                    const mSlug = String(m.detail?.manufacturer_slug ?? "");
+                    const mName = String(m.detail?.manufacturer_name ?? "—");
+                    return (
+                      <TableCell key={m.slug}>
+                        {mSlug ? <TextLink to={`/enterprises/${encodeURIComponent(mSlug)}`}>{mName}</TextLink> : mName}
+                      </TableCell>
+                    );
+                  })}
+                </TableRow>
+
+                {comparisonParameterRows.map((row) => (
+                  <TableRow key={row.key}>
+                    <TableCell className="font-semibold text-ink">{row.label}</TableCell>
+                    <TableCell>
+                      <div className="grid gap-1">
+                        <span className="font-semibold text-brand-navy">{row.a?.value ?? "—"}</span>
+                        {renderParamSource(row.a)}
+                      </div>
+                    </TableCell>
+                    <TableCell>
+                      <div className="grid gap-1">
+                        <span className="font-semibold text-brand-navy">{row.b?.value ?? "—"}</span>
+                        {renderParamSource(row.b)}
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                ))}
+
+                <TableRow>
+                  <TableCell className="font-semibold text-ink">关联注册证与受理号</TableCell>
+                  {comparedModels.map((m) => {
+                    const cNo = String(m.detail?.cert_no ?? "");
+                    const accNo = String(m.detail?.review_acceptance_no ?? "");
+                    return (
+                      <TableCell key={m.slug}>
+                        <div className="grid gap-1">
+                          {cNo ? (
+                            <TextLink
+                              to={`/regulation/registrations?q=${encodeURIComponent(cNo)}`}
+                              className="code font-semibold"
+                            >
+                              {cNo}
+                            </TextLink>
+                          ) : (
+                            <span>—</span>
+                          )}
+                          {accNo && <span className="caption text-ink-muted">器审受理号：{accNo}</span>}
+                        </div>
+                      </TableCell>
+                    );
+                  })}
+                </TableRow>
+
+                <TableRow>
+                  <TableCell className="font-semibold text-ink">UDI-DI 包装标识层级</TableCell>
+                  {comparedModels.map((m) => {
+                    const udis = getModelUdiPackages(m);
+                    return (
+                      <TableCell key={m.slug}>
+                        <span className="body-sm text-ink">
+                          共 {udis.length} 条包装标识（
+                          <TextLink to={`/products/${encodeURIComponent(m.slug)}`}>进入详情规格区查看</TextLink>）
+                        </span>
+                      </TableCell>
+                    );
+                  })}
+                </TableRow>
+              </TableBody>
+            </Table>
+          </div>
+
+          {/* 手机端：按参数纵排成对展示（每项参数紧邻展示两个型号的值与来源） */}
+          <div className="grid gap-4 md:hidden">
+            {comparisonParameterRows.map((row) => (
+              <div key={row.key} className="grid gap-2 border-b border-border pb-3 last:border-b-0">
+                <p className="label text-brand-navy">{row.label}</p>
+                <div className="grid gap-2 pl-2">
+                  <div className="grid gap-0.5 border-l-2 border-brand-navy pl-3">
+                    <span className="caption font-semibold text-ink-muted">
+                      {comparedModels[0]!.code ?? comparedModels[0]!.title}
+                    </span>
+                    <span className="body font-semibold text-ink">{row.a?.value ?? "—"}</span>
+                    {renderParamSource(row.a)}
+                  </div>
+                  <div className="grid gap-0.5 border-l-2 border-brand-sky pl-3">
+                    <span className="caption font-semibold text-ink-muted">
+                      {comparedModels[1]!.code ?? comparedModels[1]!.title}
+                    </span>
+                    <span className="body font-semibold text-ink">{row.b?.value ?? "—"}</span>
+                    {renderParamSource(row.b)}
+                  </div>
+                </div>
+              </div>
+            ))}
           </div>
         </section>
       )}
 
-      {/* Band 3: Representative Approvals, Innovation & UDI Directory */}
-      <section className="bg-surface" aria-labelledby="product-explorer-heading">
-        <div className="mx-auto grid w-full max-w-content gap-5 px-4 py-8 md:px-8 md:py-10">
-          <div className="flex flex-wrap items-end justify-between gap-3">
-            <div className="grid gap-1">
-              <h2 id="product-explorer-heading" className="title-sub text-brand-navy">
-                代表性注册批件、创新优先通道与 UDI 规格名录
-              </h2>
-              <p className="caption text-ink-muted">
-                按审评准入通道、境内外来源及重点产品赛道联合筛选；支持通过页面顶部检索栏按注册证号、UDI 编码、产品或注册人实时过滤
-              </p>
-            </div>
-            <div className="flex items-center gap-3">
-              <span className="body-sm tabular-nums text-ink-muted">
-                精选代表性获批与 UDI 档案（共{" "}
-                <strong className="font-semibold text-brand-navy">{formatNumber(filteredRows.length)}</strong> 条）
-              </span>
-              {hasActiveFilter && (
-                <Button variant="ghost" size="sm" onClick={resetFilters}>
-                  <IconRotate size={14} aria-hidden="true" />
-                  重置筛选
-                </Button>
-              )}
-            </div>
+      {/* 产品型号主目录表 */}
+      <section id="product-explorer-heading" aria-labelledby="product-directory-title" className="grid gap-4">
+        <div className="flex flex-wrap items-end justify-between gap-3">
+          <div className="grid gap-1">
+            <SectionTitle level={2} as="h2">
+              <span id="product-directory-title">产品型号名录</span>
+            </SectionTitle>
+            <p className="body-sm text-ink-muted">
+              当前匹配 <strong className="font-semibold tabular-nums text-brand-navy">{filteredModels.length}</strong>{" "}
+              个产品型号
+              {cert ? `（按注册证 ${cert} 聚合去重，UDI-DI 包装条目已归折于各型号规格内）` : ""}。
+            </p>
           </div>
-
-          {/* Channel Underline Tabs */}
-          <div role="tablist" aria-label="准入与产品通道筛选" className="flex flex-wrap gap-5 border-b border-border">
-            {CHANNEL_TABS.map((tab) => {
-              const active = channel === tab.id;
-              return (
-                <button
-                  key={tab.id}
-                  type="button"
-                  role="tab"
-                  aria-selected={active}
-                  onClick={() => updateSearchParam("channel", tab.id)}
-                  className={cn(
-                    "-mb-px inline-flex cursor-pointer items-center gap-1.5 border-b-2 pb-2.5 pt-1 body-sm transition-colors duration-150 focus-ring",
-                    active
-                      ? "border-brand-navy font-semibold text-brand-navy"
-                      : "border-transparent text-ink-muted hover:border-border-strong hover:text-ink",
-                  )}
-                >
-                  <span>{tab.label}</span>
-                  <span className="caption tabular-nums text-ink-muted">({channelCounts[tab.id]})</span>
-                </button>
-              );
-            })}
-          </div>
-
-          {/* Filter Controls Bar (URL ?q= driven by top ScopedSearchBar) */}
-          <div className="flex flex-wrap items-end justify-between gap-3">
-            <div className="flex flex-wrap items-end gap-3">
-              <div className="grid w-40 gap-1 sm:w-44">
-                <label htmlFor="product-origin-select" className="caption font-semibold text-ink-muted">
-                  产品来源
-                </label>
-                <select
-                  id="product-origin-select"
-                  value={origin}
-                  onChange={(e) => setOrigin(e.target.value)}
-                  className={cn(controlClass, "h-10")}
-                >
-                  <option value="">全部来源</option>
-                  {ORIGIN_OPTIONS.map((opt) => (
-                    <option key={opt} value={opt}>
-                      {opt}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div className="grid w-52 gap-1 sm:w-60">
-                <label htmlFor="product-category-select" className="caption font-semibold text-ink-muted">
-                  器械品类赛道
-                </label>
-                <select
-                  id="product-category-select"
-                  value={category}
-                  onChange={(e) => setCategory(e.target.value)}
-                  className={cn(controlClass, "h-10")}
-                >
-                  <option value="">全部品类</option>
-                  {CATEGORY_OPTIONS.map((opt) => (
-                    <option key={opt} value={opt}>
-                      {opt}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div className="grid w-56 gap-1 sm:w-64">
-                <label htmlFor="product-local-filter" className="caption font-semibold text-ink-muted">
-                  本表关键词筛选
-                </label>
-                <input
-                  id="product-local-filter"
-                  type="search"
-                  value={q}
-                  onChange={(e) => updateSearchParam("q", e.target.value)}
-                  placeholder="筛选证号、器械名称或企业…"
-                  className={cn(controlClass, "h-10")}
-                />
-              </div>
-            </div>
-
-            {trimmedQuery && (
-              <div className="flex flex-wrap items-center gap-2 border border-border bg-info-bg px-3 py-1.5">
-                <span className="body-sm text-ink">
-                  当前检索词：<strong className="font-semibold text-brand-navy">「{trimmedQuery}」</strong>
-                </span>
-                <Button variant="secondary" size="sm" onClick={() => updateSearchParam("q", "")}>
-                  <IconX size={14} aria-hidden="true" />
-                  清除检索词
-                </Button>
-              </div>
-            )}
-          </div>
-
-          <DataTable
-            caption="医疗器械代表性注册批件、创新优先审查与UDI规格档案表"
-            columns={explorerColumns}
-            data={pagedRows}
-            getRowId={(r) => r.id}
-            fixedLayout
-            dense
-            sorting={sorting}
-            onSortingChange={setSorting}
-            pagination={
-              sortedRows.length > 0
-                ? {
-                    page: safePage,
-                    pageSize: PAGE_SIZE,
-                    total: sortedRows.length,
-                    onPageChange: (nextPage) => setPageState({ key: filterKey, page: nextPage }),
-                  }
-                : undefined
-            }
-            empty="未找到符合当前准入通道、来源、品类或检索词条件的档案记录。"
-          />
-
-          <p className="border-l-2 border-brand-sky pl-3 caption text-ink-muted">
-            统计口径说明：医疗器械唯一标识（UDI-DI）赋码至最小销售与包装单元，与注册证号呈多对一映射关系（单张高值耗材或吻合器注册证常涵盖数十个规格型号），阅读时请区分产品规格条目数与注册证张数。
-          </p>
+          {cert && (
+            <Button asChild variant="secondary" size="sm">
+              <Link to={`/regulation/registrations?q=${encodeURIComponent(cert)}`}>
+                查看注册证 {cert} 详情 →
+              </Link>
+            </Button>
+          )}
         </div>
+
+        <DataTable
+          caption="医疗器械产品型号名录"
+          columns={columns}
+          data={filteredModels}
+          getRowId={(r) => r.id}
+          loading={listQuery.isLoading && !listQuery.data && filteredModels.length === 0}
+          empty="未找到符合当前品类、生产企业、注册证号或关键词的产品型号记录。"
+        />
       </section>
     </div>
   );

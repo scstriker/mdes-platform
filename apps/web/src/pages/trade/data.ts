@@ -101,7 +101,7 @@ export const TRADE_CR3_RANKING: readonly TradeCr3Point[] = [
     tier: "关键核心部件",
     cr3: 83.6,
     topOrigins: "日本 / 德国 / 美国",
-    hsScope: "9018.9020",
+    hsScope: "9018.9030",
   },
   {
     name: "医用CT球管",
@@ -272,7 +272,7 @@ export const TRADE_CATEGORIES: readonly TradeCategoryRow[] = [
 
 export const HIGH_CONCENTRATION_HS: readonly HighConcentrationHsRow[] = [
   {
-    hsCode: "9018.9020",
+    hsCode: "9018.9030",
     itemName: "电子消化内窥镜及光学成像核心组件",
     category: "医院诊断与治疗设备",
     importUsd: 8.4,

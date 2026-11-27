@@ -1,6 +1,7 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { QueryClientProvider } from "@tanstack/react-query";
+import { NuqsAdapter } from "nuqs/adapters/react-router/v7";
 import { RouterProvider } from "react-router";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { createQueryClient } from "@/app/query-client";
@@ -12,9 +13,11 @@ const queryClient = createQueryClient();
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
-      <TooltipProvider>
-        <RouterProvider router={router} />
-      </TooltipProvider>
+      <NuqsAdapter>
+        <TooltipProvider>
+          <RouterProvider router={router} />
+        </TooltipProvider>
+      </NuqsAdapter>
     </QueryClientProvider>
   </StrictMode>,
 );

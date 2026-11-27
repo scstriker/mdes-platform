@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router";
+import { toStatisticListItem, V2_SEED_STATISTICS } from "@mdes/shared";
+import { IconArrowRight } from "@tabler/icons-react";
 import { DataTable, formatNumber, Notice, Tag, TextLink, type DataTableColumn } from "@/components/itei";
 import { StatistaFigure } from "@/components/layout/statista-figure";
 import { Button } from "@/components/ui/button";
@@ -12,7 +14,7 @@ import {
   type IndicatorPhase,
   type SystemIndicator,
 } from "@/content/system-v3";
-import { ApiError, useAllObservations, useTradeOverview, useTradePeriods } from "@/lib/api";
+import { ApiError, useAllObservations, useStatisticsList, useTradeOverview, useTradePeriods } from "@/lib/api";
 import { statistaHorizontalBarOption, statistaTrendWithPartialOption } from "@/lib/charts/theme";
 import { showDemoChrome } from "@/lib/demo-chrome";
 import { buildSlice, dimensionsOf, resolveSelection } from "@/lib/observations/slice";
@@ -25,9 +27,10 @@ import { HIGH_CONCENTRATION_HS, TRADE_CATEGORIES } from "@/pages/trade/data";
 
 const CHAPTERS = [
   { id: "s-definition", number: "01", label: "定义与问题" },
-  { id: "s-preview", number: "02", label: "统计与数据预览" },
-  { id: "s-caliber", number: "03", label: "口径与边界" },
-  { id: "s-related", number: "04", label: "关联指标" },
+  { id: "s-published-stats", number: "02", label: "发布统计成果" },
+  { id: "s-preview", number: "03", label: "统计与数据预览" },
+  { id: "s-caliber", number: "04", label: "口径与边界" },
+  { id: "s-related", number: "05", label: "关联指标" },
 ] as const;
 
 const RETIRED_SEQS = new Set(["17", "18", "31", "33", "34"]);
@@ -216,6 +219,16 @@ function IndicatorProfile({ meta }: { meta: SystemIndicator }) {
 
   const level1Section = LEVEL1_SECTIONS.find((s) => s.name === meta.level1);
 
+  const publishedStatsQuery = useStatisticsList({ v3_seq: meta.seq });
+  const publishedStats = useMemo(() => {
+    if (publishedStatsQuery.data?.items) {
+      return publishedStatsQuery.data.items;
+    }
+    return V2_SEED_STATISTICS.filter((s) => s.indicator_refs.v3_seqs.includes(meta.seq)).map((s) =>
+      toStatisticListItem(s),
+    );
+  }, [publishedStatsQuery.data, meta.seq]);
+
   const relatedItems = useMemo(
     () =>
       meta.relatedSeqs
@@ -365,15 +378,61 @@ function IndicatorProfile({ meta }: { meta: SystemIndicator }) {
           </div>
         </section>
 
-        {/* 02 统计与数据预览（全量升级为 Statista 级信息图 + 实时库切片自动融合） */}
+        {/* 02 基于本指标发布的统计成果（反向索引） */}
+        <section id="s-published-stats" className="grid scroll-mt-24 gap-4">
+          <SectionHead number="02" title="基于本指标发布的统计成果" />
+          {publishedStats.length === 0 ? (
+            <div className="flex flex-wrap items-center justify-between gap-3 border border-border bg-surface-sunken px-4 py-3 body-sm text-ink-muted">
+              <span>本三级指标暂未单独发布成品统计图卡，可前往对应业务库或标准统计成果库查阅关联数据。</span>
+              <TextLink to="/statistics">浏览全部标准统计成果库 →</TextLink>
+            </div>
+          ) : (
+            <ul className="divide-y divide-border border-y border-border">
+              {publishedStats.map((st) => {
+                const kpiText = st.summary_kpi.headline_value.endsWith("%")
+                  ? st.summary_kpi.headline_value
+                  : `${st.summary_kpi.headline_value} ${st.summary_kpi.unit}`;
+                return (
+                  <li key={st.statistic_id} className="flex flex-wrap items-center justify-between gap-4 py-3.5">
+                    <div className="grid min-w-0 flex-1 gap-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="code font-semibold text-brand-navy">{st.statistic_id}</span>
+                        <Tag size="sm" tone="info">
+                          v{st.version}
+                        </Tag>
+                        <span className="caption text-ink-muted">来源：{st.source_org}</span>
+                      </div>
+                      <Link
+                        to={`/statistics/${encodeURIComponent(st.statistic_id)}`}
+                        className="body font-semibold text-brand-navy hover:underline focus-ring"
+                      >
+                        {st.title}
+                      </Link>
+                      <p className="caption text-ink-muted">{st.subtitle}</p>
+                    </div>
+                    <div className="flex shrink-0 items-center gap-3">
+                      <div className="text-right">
+                        <p className="caption text-ink-muted">{st.summary_kpi.period}</p>
+                        <p className="body-sm font-semibold tabular-nums text-brand-navy">{kpiText}</p>
+                      </div>
+                      <IconArrowRight size={16} className="text-ink-muted" aria-hidden="true" />
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </section>
+
+        {/* 03 统计与数据预览（全量升级为 Statista 级信息图 + 实时库切片自动融合） */}
         <section id="s-preview" className="grid scroll-mt-24 gap-6">
-          <SectionHead number="02" title="统计与数据预览" />
+          <SectionHead number="03" title="统计与数据预览" />
           {meta.seq === "01" ? <Preview01 /> : <DomainStatistaPreview meta={meta} />}
         </section>
 
-        {/* 03 口径说明与禁止推断（精炼去重，移除数据库外键链噪音） */}
+        {/* 04 口径说明与禁止推断（精炼去重，移除数据库外键链噪音） */}
         <section id="s-caliber" className="grid scroll-mt-24 gap-5">
-          <SectionHead number="03" title="口径说明与禁止推断" />
+          <SectionHead number="04" title="口径说明与禁止推断" />
           <dl className="divide-y divide-border border-y border-border">
             <LedgerRow term="唯一记录粒度" value={meta.grain} />
             <LedgerRow
@@ -390,9 +449,9 @@ function IndicatorProfile({ meta }: { meta: SystemIndicator }) {
           </div>
         </section>
 
-        {/* 04 关联指标 */}
+        {/* 05 关联指标 */}
         <section id="s-related" className="grid scroll-mt-24 gap-4">
-          <SectionHead number="04" title="关联协同研判指标" />
+          <SectionHead number="05" title="关联协同研判指标" />
           <DataTable
             caption="关联三级指标目录"
             columns={relatedColumns}
@@ -476,7 +535,7 @@ function Preview01() {
       <div className="grid gap-3">
         <div className="flex flex-wrap items-baseline justify-between gap-3">
           <h3 className="title-nav text-brand-navy">结构化字段抽样预览（代表性记录）</h3>
-          <TextLink to="/products">前往注册与产品库检索全量获批名录 →</TextLink>
+          <TextLink to="/regulation/registrations">前往注册与准入核验库检索 →</TextLink>
         </div>
 
         <Table dense>

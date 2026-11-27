@@ -136,4 +136,38 @@ describe("全站搜索结果页路由契约与后台范围索引", () => {
     expect(item.href).toContain("/search?");
     expect(item.subpageHref).toBe("/system/38");
   });
+
+  it("V2 一等公民统计成果与目录实体支持全站检索直达对应独立详情/查询页", () => {
+    // 1. 产品型号 uMR Jupiter -> /products/umr-jupiter
+    const modelRes = queryAllPublicGrouped("uMR Jupiter");
+    const prodItems = modelRes.groups.find((g) => g.scope === "/products")?.items ?? [];
+    expect(prodItems.some((i) => i.subpageHref === "/products/umr-jupiter")).toBe(true);
+
+    // 2. 注册证 国械注准20223061141 -> /regulation/registrations?q=...
+    const certRes = queryAllPublicGrouped("国械注准20223061141");
+    const certItems = certRes.groups.find((g) => g.scope === "/products")?.items ?? [];
+    expect(certItems.some((i) => i.subpageHref?.startsWith("/regulation/registrations?q="))).toBe(true);
+
+    // 3. 检验机构 湖北省医疗器械质量监督检验研究院 -> /institutions?q=...
+    const instRes = queryAllPublicGrouped("湖北省医疗器械质量监督检验研究院");
+    const instItems = instRes.groups.find((g) => g.scope === "/enterprises")?.items ?? [];
+    expect(instItems.some((i) => i.subpageHref?.startsWith("/institutions?q="))).toBe(true);
+
+    // 4. 技术标准 YY 9706.233-2021 / 磁共振 标准 / 误写别名 GB 9706.233-2020 -> /standards?q=YY%209706.233-2021
+    for (const stdQuery of ["YY 9706.233-2021", "磁共振 标准", "GB 9706.233-2020"]) {
+      const stdRes = queryAllPublicGrouped(stdQuery);
+      const repItems = stdRes.groups.find((g) => g.scope === "/reports")?.items ?? [];
+      expect(repItems.some((i) => i.subpageHref === "/standards?q=YY%209706.233-2021")).toBe(true);
+    }
+
+    // 5. 官方来源 rep-ann-28 -> /sources?id=rep-ann-28
+    const srcRes = queryAllPublicGrouped("rep-ann-28");
+    const srcItems = srcRes.groups.find((g) => g.scope === "/reports")?.items ?? [];
+    expect(srcItems.some((i) => i.id === "rep-ann-28" && i.subpageHref === "/sources?id=rep-ann-28")).toBe(true);
+
+    // 6. 标准统计成果 -> /statistics/:id
+    const statRes = queryAllPublicGrouped("联影医疗研发投入");
+    const statItems = statRes.groups.find((g) => g.scope === "/statistics")?.items ?? [];
+    expect(statItems.some((i) => i.subpageHref === "/statistics/STAT-ENT-UIH-RD-RATIO")).toBe(true);
+  });
 });

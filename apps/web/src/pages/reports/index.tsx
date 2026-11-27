@@ -1,715 +1,580 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { useSearchParams } from "react-router";
-import { IconCheck, IconChevronDown, IconChevronUp, IconCopy, IconX } from "@tabler/icons-react";
-import { matchesQuery } from "@mdes/shared";
-import bannerReports from "@/assets/visuals/banner-reports.webp";
-import { DataTable, Tag, TextLink, type DataTableColumn } from "@/components/itei";
-import { PageVisualBanner } from "@/components/layout/page-visual-banner";
-import { ReportCoverThumb, type ReportCoverVariant } from "@/components/layout/report-cover-thumb";
-import { StatistaFigure } from "@/components/layout/statista-figure";
-import { statistaHorizontalBarOption } from "@/lib/charts/theme";
-import { cn } from "@/lib/utils";
+import { useMemo } from "react";
+import { Link, Navigate, useSearchParams } from "react-router";
+import { IconArrowRight, IconExternalLink, IconRotate } from "@tabler/icons-react";
 import {
-  ANNUAL_REPORTS_ROWS,
-  BRIEFING_LEDGER,
-  GUIDELINE_ROWS,
-  GUIDELINE_TRACK_DISTRIBUTION,
-  POLICY_CLAUSE_ROWS,
-  POLICY_TOPIC_DISTRIBUTION,
-  REPORTS_SUMMARY_STRIP,
-  STANDARD_CATALOG_ROWS,
-  type AnnualReportRow,
-  type GuidelineCategory,
-  type GuidelineRow,
-  type PolicyClauseRow,
-  type PolicyLevel,
-  type ReportTabKey,
-  type StandardRow,
-} from "./data";
+  detectCatalogAliasCorrection,
+  matchesQuery,
+  V2_SEED_CATALOG_RECORDS,
+  type CatalogRecord,
+  type ReportChapterSpec,
+} from "@mdes/shared";
+import {
+  Breadcrumbs,
+  DataTable,
+  Descriptions,
+  Notice,
+  SectionTitle,
+  Tag,
+  TextLink,
+  type DataTableColumn,
+} from "@/components/itei";
+import { ReportCoverThumb } from "@/components/layout/report-cover-thumb";
+import { Button } from "@/components/ui/button";
+import { controlClass } from "@/components/ui/input";
+import { useCatalogList } from "@/lib/api/queries";
+import { cn } from "@/lib/utils";
 
-const VALID_TABS: readonly ReportTabKey[] = ["briefings", "policies", "guidelines", "standards"];
-const POLICY_LEVELS: readonly ("全部" | PolicyLevel)[] = ["全部", "国家级部委", "重点省市"];
-const GUIDELINE_CATEGORIES: readonly ("全部" | GuidelineCategory)[] = [
-  "全部",
-  "有源手术与机器人",
-  "医学影像",
-  "人工智能软件",
-  "植介入与耗材",
-  "体外诊断",
-];
-const PAGE_SIZE = 8;
-
-function parseTab(raw: string | null): ReportTabKey {
-  if (raw && (VALID_TABS as readonly string[]).includes(raw)) {
-    return raw as ReportTabKey;
-  }
-  return "briefings";
-}
-
-function coverVariantFor(series: string): ReportCoverVariant {
-  return series.includes("季度") ? "quarterly" : "domestic";
-}
-
-function coverLabelFor(series: string): string {
-  if (series.includes("季度")) return "季度报告";
-  if (series.includes("供应链")) return "供应链";
-  if (series.includes("审评")) return "审评标准";
-  if (series.includes("准入")) return "准入复盘";
-  if (series.includes("年报")) return "企业年报";
-  if (series.includes("政策")) return "政策跟踪";
-  return series.slice(0, 4);
-}
-
+/**
+ * MDES 研究报告出版物目录（/reports）：
+ * - 默认视图：左侧呈现最新一期（2026 年第 3 期）标题、发布日期、统计覆盖期与核心结论，右侧列示章节及锁定的统计快照版本；下接归档期次列表；
+ * - 旧书签兼容：
+ *   - ?tab=policies -> /policies
+ *   - ?tab=guidelines -> /regulation/registrations?subkind=guideline
+ *   - ?tab=standards -> 在原地址清晰提供「官方年报 (/sources)」与「技术标准 (/standards)」两个专用入口，并支持本页即时检索预览。
+ */
 export default function ReportsPage() {
   const [searchParams, setSearchParams] = useSearchParams();
-  const explicitTab = searchParams.get("tab");
-  const requestedTab = parseTab(explicitTab);
-  const rawQuery = searchParams.get("q")?.trim() ?? "";
-  const q = rawQuery.toLowerCase();
+  const explicitTab = searchParams.get("tab") ?? "";
+  const rawQuery = searchParams.get("q") ?? "";
+  const trimmedQ = rawQuery.trim();
+  const periodFilter = searchParams.get("period") ?? "";
+  const categoryFilter = searchParams.get("category") ?? "";
 
-  // 默认全部收起长结论，实现一屏纵览全部 6 篇智库代表性成果
-  const [expandedIds, setExpandedIds] = useState<Set<string>>(() => new Set());
-  const [copiedId, setCopiedId] = useState<string | null>(null);
-  const [policyLevel, setPolicyLevel] = useState<"全部" | PolicyLevel>("全部");
-  const [guidelineCat, setGuidelineCat] = useState<"全部" | GuidelineCategory>("全部");
-  const [page, setPage] = useState(0);
-
-  function setTab(nextTab: ReportTabKey) {
-    const next = new URLSearchParams(searchParams);
-    if (nextTab === "briefings" && !rawQuery) next.delete("tab");
-    else next.set("tab", nextTab);
-    setSearchParams(next, { replace: true });
+  if (explicitTab === "policies") {
+    return <Navigate to={`/policies${trimmedQ ? `?q=${encodeURIComponent(trimmedQ)}` : ""}`} replace />;
+  }
+  if (explicitTab === "guidelines") {
+    return (
+      <Navigate
+        to={`/regulation/registrations?subkind=guideline${trimmedQ ? `&q=${encodeURIComponent(trimmedQ)}` : ""}`}
+        replace
+      />
+    );
   }
 
-  function clearQuery() {
-    const next = new URLSearchParams(searchParams);
-    next.delete("q");
-    setSearchParams(next, { replace: true });
-  }
+  const isLegacyStandardsBookmark = explicitTab === "standards";
 
-  const toggleExpand = useCallback((id: string) => {
-    setExpandedIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  }, []);
+  const reportsQuery = useCatalogList(
+    {
+      kind: "report",
+      period: periodFilter || undefined,
+      category: categoryFilter || undefined,
+      q: trimmedQ || undefined,
+    },
+    !isLegacyStandardsBookmark,
+  );
+  const allReportsQuery = useCatalogList({ kind: "report" }, !isLegacyStandardsBookmark);
 
-  const copyCitation = useCallback(async (id: string, text: string) => {
-    try {
-      await navigator.clipboard.writeText(text);
-      setCopiedId(id);
-      window.setTimeout(() => setCopiedId((curr) => (curr === id ? null : curr)), 1800);
-    } catch {
-      // 忽略受限剪贴板环境异常
+  const sourcesQuery = useCatalogList({ kind: "source", q: trimmedQ || undefined }, isLegacyStandardsBookmark);
+  const standardsQuery = useCatalogList({ kind: "standard", q: trimmedQ || undefined }, isLegacyStandardsBookmark);
+
+  const allReports = useMemo<CatalogRecord[]>(() => {
+    if (allReportsQuery.data && allReportsQuery.data.items.length > 0) {
+      return allReportsQuery.data.items;
     }
-  }, []);
+    return V2_SEED_CATALOG_RECORDS.filter((r) => r.kind === "report");
+  }, [allReportsQuery.data]);
 
-  // 各分栏过滤（统一响应顶部 <ScopedSearchBar /> 驱动的 URL ?q=，与全站共用多词项匹配规则）
-  const filteredBriefings = useMemo(
-    () =>
-      BRIEFING_LEDGER.filter(
-        (b) => !q || matchesQuery(`${b.title} ${b.series} ${b.summary} ${b.keyFindings.join(" ")}`, q),
-      ),
-    [q],
+  const latestIssue = useMemo<CatalogRecord | undefined>(
+    () => allReports.find((r) => r.slug === "mdes-2026q3-high-end-imaging-report") ?? allReports[0],
+    [allReports],
   );
 
-  const filteredPolicies = useMemo(
-    () =>
-      POLICY_CLAUSE_ROWS.filter((p) => {
-        if (policyLevel !== "全部" && p.level !== policyLevel) return false;
-        if (!q) return true;
-        return matchesQuery(`${p.docNo} ${p.title} ${p.agency} ${p.topic} ${p.level} ${p.clauseSummary}`, q);
-      }),
-    [policyLevel, q],
-  );
-
-  const filteredGuidelines = useMemo(
-    () =>
-      GUIDELINE_ROWS.filter((g) => {
-        if (guidelineCat !== "全部" && g.category !== guidelineCat) return false;
-        if (!q) return true;
-        return matchesQuery(`${g.noticeNo} ${g.title} ${g.category} ${g.classCode} ${g.reviewPoints}`, q);
-      }),
-    [guidelineCat, q],
-  );
-
-  const filteredAnnuals = useMemo(
-    () =>
-      ANNUAL_REPORTS_ROWS.filter(
-        (a) => !q || matchesQuery(`${a.reportTitle} ${a.publisher} ${a.latestIssue} ${a.reconciliationScope}`, q),
-      ),
-    [q],
-  );
-
-  const filteredStandards = useMemo(
-    () =>
-      STANDARD_CATALOG_ROWS.filter(
-        (s) => !q || matchesQuery(`${s.stdNo} ${s.stdName} ${s.scope} ${s.nature} ${s.status} ${s.keyClause}`, q),
-      ),
-    [q],
-  );
-
-  const tabCounts: Record<ReportTabKey, number> = {
-    briefings: filteredBriefings.length,
-    policies: filteredPolicies.length,
-    guidelines: filteredGuidelines.length,
-    standards: filteredAnnuals.length + filteredStandards.length,
-  };
-
-  // 未显式指定 tab 且默认分栏无命中时（如从全站搜索深链进入 /reports?q=GB+9706.1），自动落入首个有命中的分栏
-  const activeTab: ReportTabKey =
-    !explicitTab && q && tabCounts[requestedTab] === 0
-      ? (VALID_TABS.find((k) => tabCounts[k] > 0) ?? requestedTab)
-      : requestedTab;
-
-  useEffect(() => {
-    setPage(0);
-  }, [activeTab, q, policyLevel, guidelineCat]);
-
-  // 当激活分栏命中 0 条，但兄弟分栏有命中时，提供智能跨 Tab 检索引导
-  const fallbackSiblingTab = useMemo(() => {
-    if (!q || tabCounts[activeTab] > 0) return null;
-    const labels: Record<ReportTabKey, string> = {
-      briefings: "季度与专题报告",
-      policies: "国家及地方政策条款",
-      guidelines: "注册审查指导原则",
-      standards: "监管年报与技术标准",
-    };
-    for (const k of VALID_TABS) {
-      if (k !== activeTab && tabCounts[k] > 0) {
-        return { key: k, label: labels[k], count: tabCounts[k] };
+  const archiveReports = useMemo<CatalogRecord[]>(() => {
+    if (reportsQuery.data) {
+      return reportsQuery.data.items;
+    }
+    return V2_SEED_CATALOG_RECORDS.filter((r) => {
+      if (r.kind !== "report") return false;
+      if (periodFilter && !(r.period === periodFilter || (r.period ?? "").startsWith(periodFilter))) return false;
+      if (categoryFilter && r.category !== categoryFilter) return false;
+      if (trimmedQ) {
+        const hay = `${r.id} ${r.slug} ${r.title} ${r.subtitle} ${r.code ?? ""} ${r.tags.join(" ")} ${JSON.stringify(r.detail)}`;
+        if (!matchesQuery(hay, trimmedQ)) return false;
       }
+      return true;
+    });
+  }, [reportsQuery.data, periodFilter, categoryFilter, trimmedQ]);
+
+  const legacySources = useMemo<CatalogRecord[]>(() => {
+    if (sourcesQuery.data) return sourcesQuery.data.items;
+    return V2_SEED_CATALOG_RECORDS.filter((r) => {
+      if (r.kind !== "source") return false;
+      if (!trimmedQ) return true;
+      return matchesQuery(`${r.id} ${r.code ?? ""} ${r.title} ${r.subtitle} ${r.tags.join(" ")}`, trimmedQ);
+    });
+  }, [sourcesQuery.data, trimmedQ]);
+
+  const legacyStandards = useMemo<CatalogRecord[]>(() => {
+    if (standardsQuery.data) return standardsQuery.data.items;
+    const allSeedStds = V2_SEED_CATALOG_RECORDS.filter((r) => r.kind === "standard");
+    if (!trimmedQ) return allSeedStds;
+    return allSeedStds.filter((r) =>
+      matchesQuery(
+        `${r.id} ${r.code ?? ""} ${r.title} ${r.subtitle} ${r.tags.join(" ")} ${(r.legacy_aliases ?? []).join(" ")}`,
+        trimmedQ,
+      ),
+    );
+  }, [standardsQuery.data, trimmedQ]);
+
+  const stdAliasCorrection = useMemo(
+    () =>
+      standardsQuery.data?.alias_correction ??
+      detectCatalogAliasCorrection(
+        trimmedQ,
+        V2_SEED_CATALOG_RECORDS.filter((r) => r.kind === "standard"),
+      ),
+    [standardsQuery.data, trimmedQ],
+  );
+
+  function updateParams(updates: Record<string, string | null>) {
+    const next = new URLSearchParams(searchParams);
+    for (const [k, v] of Object.entries(updates)) {
+      if (!v) next.delete(k);
+      else next.set(k, v);
     }
-    return null;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [q, activeTab, filteredBriefings.length, filteredPolicies.length, filteredGuidelines.length, filteredAnnuals.length, filteredStandards.length]);
+    setSearchParams(next, { replace: true });
+  }
 
-  const policyChartCols = [
-    { key: "topic", title: "政策主题方向" },
-    { key: "count", title: "条款数量(份)", align: "right" as const },
-    { key: "share", title: "占比", align: "right" as const },
-    { key: "focusMeasures", title: "核心政策工具" },
-  ];
-
-  const guidelineChartCols = [
-    { key: "track", title: "技术审评赛道" },
-    { key: "count", title: "指导原则(份)", align: "right" as const },
-    { key: "share", title: "占比", align: "right" as const },
-    { key: "classScope", title: "典型器械范围" },
-  ];
-
-  const policyColumns: DataTableColumn<PolicyClauseRow>[] = useMemo(
+  const sourceColumns = useMemo<DataTableColumn<CatalogRecord>[]>(
     () => [
-      { key: "docNo", title: "发文字号", type: "code", colClassName: "w-44" },
+      { key: "code", title: "来源编号", type: "code", colClassName: "w-40" },
       {
         key: "title",
-        title: "政策文件与核心医疗装备条款",
+        title: "官方年报与公报名称",
         primary: true,
-        cell: (r) => (
-          <div className="grid min-w-0 gap-0.5">
-            <span className="font-semibold text-brand-navy">{r.title}</span>
-            <span className="line-clamp-1 caption text-ink-muted">{r.clauseSummary}</span>
-          </div>
-        ),
-      },
-      { key: "agency", title: "发文机关", colClassName: "w-36" },
-      {
-        key: "level",
-        title: "层级与主题",
-        type: "status",
-        colClassName: "w-40",
-        cell: (r) => (
-          <Tag size="sm" tone={r.level === "国家级部委" ? "info" : "neutral"}>
-            {r.topic}
-          </Tag>
-        ),
-      },
-      { key: "publishDate", title: "发布日期", type: "code", colClassName: "w-28" },
-    ],
-    [],
-  );
-
-  const guidelineColumns: DataTableColumn<GuidelineRow>[] = useMemo(
-    () => [
-      { key: "noticeNo", title: "通告号", type: "code", colClassName: "w-32" },
-      {
-        key: "title",
-        title: "审查指导原则与技术审评要点",
-        primary: true,
-        cell: (r) => (
-          <div className="grid min-w-0 gap-0.5">
-            <span className="font-semibold text-brand-navy">{r.title}</span>
-            <span className="line-clamp-1 caption text-ink-muted">{r.reviewPoints}</span>
-          </div>
-        ),
-      },
-      {
-        key: "category",
-        title: "技术赛道",
-        type: "status",
-        colClassName: "w-40",
-        cell: (r) => (
-          <Tag size="sm" tone="info">
-            {r.category}
-          </Tag>
-        ),
-      },
-      { key: "classCode", title: "分类编码", type: "code", colClassName: "w-24" },
-      {
-        key: "versionStatus",
-        title: "版本效力",
-        colClassName: "w-24",
-        cell: (r) => <span className="body-sm text-ink-muted">{r.versionStatus}</span>,
-      },
-    ],
-    [],
-  );
-
-  const standardColumns: DataTableColumn<StandardRow>[] = useMemo(
-    () => [
-      { key: "stdNo", title: "标准编号", type: "code", colClassName: "w-40" },
-      {
-        key: "stdName",
-        title: "标准名称与安全性能核心要求",
-        primary: true,
-        cell: (r) => (
-          <div className="grid min-w-0 gap-0.5">
-            <span className="font-semibold text-brand-navy">{r.stdName}</span>
-            <span className="line-clamp-1 caption text-ink-muted">{r.keyClause}</span>
-          </div>
-        ),
-      },
-      {
-        key: "nature",
-        title: "标准属性",
-        type: "status",
-        colClassName: "w-32",
-        cell: (r) => (
-          <Tag size="sm" tone={r.nature.startsWith("强制性") ? "warning" : "neutral"}>
-            {r.nature}
-          </Tag>
-        ),
-      },
-      { key: "scope", title: "适用领域", colClassName: "w-40" },
-    ],
-    [],
-  );
-
-  const annualColumns: DataTableColumn<AnnualReportRow>[] = useMemo(
-    () => [
-      {
-        key: "reportTitle",
-        title: "权威年度报告与统计公报",
-        primary: true,
-        cell: (r) => (
-          <div className="grid min-w-0 gap-0.5">
-            <TextLink to={`/system/${r.seq}`} className="font-semibold">
-              {r.reportTitle}
+        cell: (row) => (
+          <div className="grid gap-0.5">
+            <TextLink to={`/sources?q=${encodeURIComponent(row.code ?? row.slug)}`} className="font-semibold text-brand-navy">
+              {row.title}
             </TextLink>
-            <span className="line-clamp-1 caption text-ink-muted">{r.reconciliationScope}</span>
+            <span className="caption text-ink-muted">{row.subtitle}</span>
           </div>
         ),
       },
-      { key: "publisher", title: "发布部门", colClassName: "w-40" },
-      { key: "latestIssue", title: "最新基准期", colClassName: "w-36" },
+      { key: "period", title: "发布期次", type: "code", colClassName: "w-32" },
+    ],
+    [],
+  );
+
+  const standardColumns = useMemo<DataTableColumn<CatalogRecord>[]>(
+    () => [
       {
-        key: "coverageLabel",
-        title: "核验用途",
-        type: "status",
-        colClassName: "w-32",
-        cell: (r) => (
-          <Tag size="sm" tone="info">
-            {r.coverageLabel}
-          </Tag>
+        key: "code",
+        title: "标准编号",
+        type: "code",
+        colClassName: "w-44",
+        cell: (row) => (
+          <TextLink to={`/standards?q=${encodeURIComponent(row.code ?? row.slug)}`} className="code font-semibold">
+            {row.code ?? row.id}
+          </TextLink>
         ),
+      },
+      {
+        key: "title",
+        title: "现行标准名称与实施说明",
+        primary: true,
+        cell: (row) => (
+          <div className="grid gap-0.5">
+            <span className="font-semibold text-ink">{row.title}</span>
+            <span className="caption text-ink-muted">{row.subtitle}</span>
+          </div>
+        ),
+      },
+      {
+        key: "subkind",
+        title: "标准性质",
+        colClassName: "w-40",
+        cell: (row) => <Tag size="sm" tone="warning">{row.subkind ?? "技术标准"}</Tag>,
       },
     ],
     [],
   );
 
-  const TAB_ITEMS: readonly { key: ReportTabKey; label: string }[] = [
-    { key: "briefings", label: "季度与专题报告" },
-    { key: "policies", label: "国家及地方政策条款" },
-    { key: "guidelines", label: "注册审查指导原则" },
-    { key: "standards", label: "监管年报与技术标准" },
-  ];
+  // 旧书签 /reports?tab=standards 专用分流与双库索引视图
+  if (isLegacyStandardsBookmark) {
+    return (
+      <div className="mx-auto grid w-full max-w-content gap-8 px-4 py-8 md:px-8 md:py-10">
+        <header className="grid gap-4 border-b border-border pb-6">
+          <Breadcrumbs
+            items={[
+              { label: "产业总览", href: "/" },
+              { label: "研究报告", href: "/reports" },
+              { label: "官方年报与技术标准入口" },
+            ]}
+          />
+
+          <h1 className="title-page text-ink">官方年报与技术标准资料查询入口</h1>
+
+          <Notice tone="info" title="原「监管年报与技术标准」合表已拆分为两个独立资料查询入口">
+            为保障正式统计公报与强制性/推荐性技术标准各自按规范字段检索，请根据核查对象进入下方专用入口；您也可以在本页直接筛选并打开目标记录。
+          </Notice>
+
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="grid content-between gap-3 border border-border border-t-2 border-t-brand-navy bg-surface p-5">
+              <div className="grid gap-1">
+                <p className="label text-brand-navy">独立资料入口一</p>
+                <h2 className="title-sub text-ink">官方年报</h2>
+                <p className="body-sm text-ink-muted">
+                  收录国家药监局《医疗器械注册工作报告》、工信部运行公报及上市公司经审计年度报告原文定位。
+                </p>
+              </div>
+              <Button asChild variant="primary" className="w-fit">
+                <Link to={`/sources${trimmedQ ? `?q=${encodeURIComponent(trimmedQ)}` : ""}`}>
+                  进入官方年报库（/sources）
+                  <IconArrowRight aria-hidden="true" />
+                </Link>
+              </Button>
+            </div>
+
+            <div className="grid content-between gap-3 border border-border border-t-2 border-t-brand-navy bg-surface p-5">
+              <div className="grid gap-1">
+                <p className="label text-brand-navy">独立资料入口二</p>
+                <h2 className="title-sub text-ink">技术标准</h2>
+                <p className="body-sm text-ink-muted">
+                  按标准编号核查现行有效强制性国标/行标（如 YY 9706.233-2021）、实施日期、替代关系及全国标准平台登记页。
+                </p>
+              </div>
+              <Button asChild variant="primary" className="w-fit">
+                <Link to={`/standards${trimmedQ ? `?q=${encodeURIComponent(trimmedQ)}` : ""}`}>
+                  进入技术标准库（/standards）
+                  <IconArrowRight aria-hidden="true" />
+                </Link>
+              </Button>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-end justify-between gap-3 pt-2">
+            <div className="grid w-72 gap-1">
+              <label htmlFor="reports-local-filter" className="label text-ink-muted">
+                筛选年报或标准编号
+              </label>
+              <input
+                id="reports-local-filter"
+                type="search"
+                value={rawQuery}
+                onChange={(e) => updateParams({ q: e.target.value || null })}
+                placeholder="如 YY 9706.233-2021、注册工作报告…"
+                className={cn(controlClass, "h-10")}
+              />
+            </div>
+            <TextLink to="/reports" className="body-sm font-semibold">
+              ← 返回 MDES 研究报告出版物目录
+            </TextLink>
+          </div>
+        </header>
+
+        {stdAliasCorrection && (
+          <Notice tone="warning" title={`标准编号纠偏提示：现行有效版次为 ${stdAliasCorrection.canonical_code}`}>
+            {stdAliasCorrection.explanation}{" "}
+            <TextLink to={`/standards?q=${encodeURIComponent(stdAliasCorrection.canonical_code)}`} inline>
+              打开 {stdAliasCorrection.canonical_code} 标准详情
+            </TextLink>
+          </Notice>
+        )}
+
+        <section aria-labelledby="legacy-sources-heading" className="grid gap-3">
+          <SectionTitle level={2} as="h2">
+            <span id="legacy-sources-heading">官方年报与正式来源索引</span>
+          </SectionTitle>
+          <DataTable
+            caption="官方年报与正式来源目录"
+            columns={sourceColumns}
+            data={legacySources}
+            getRowId={(r) => r.id}
+          />
+        </section>
+
+        <section aria-labelledby="legacy-standards-heading" className="grid gap-3 border-t border-border pt-6">
+          <SectionTitle level={2} as="h2">
+            <span id="legacy-standards-heading">技术标准现行版次索引</span>
+          </SectionTitle>
+          <DataTable
+            caption="医疗器械技术标准目录"
+            columns={standardColumns}
+            data={legacyStandards}
+            getRowId={(r) => r.id}
+          />
+        </section>
+      </div>
+    );
+  }
+
+  const latestChapters: ReportChapterSpec[] = Array.isArray(latestIssue?.detail?.chapters)
+    ? (latestIssue.detail.chapters as ReportChapterSpec[])
+    : [];
+  const latestIssueLabel =
+    typeof latestIssue?.detail?.issue_label === "string" ? latestIssue.detail.issue_label : "2026 年第 3 期";
+  const latestPublishedDate =
+    typeof latestIssue?.detail?.published_date === "string" ? latestIssue.detail.published_date : "2026-11-15";
+  const latestCoveragePeriod =
+    typeof latestIssue?.detail?.coverage_period === "string" ? latestIssue.detail.coverage_period : "2022–2026 年 10 月";
+  const latestConclusion =
+    typeof latestIssue?.detail?.core_conclusion === "string" ? latestIssue.detail.core_conclusion : "";
+
+  const hasFilters = Boolean(trimmedQ || periodFilter || categoryFilter);
 
   return (
-    <div className="mx-auto grid w-full max-w-content gap-10 px-4 py-8 md:px-8 md:py-10">
-      {/* Band 1：智库页头 + 4 列核心文献规模条 */}
-      <div className="grid gap-6">
-        <PageVisualBanner
-          title="研究报告、政策法规与技术标准库"
-          summary="汇集本所季度运行监测报告、专题研判简报，以及国家级部委与重点省市产业政策条款、注册审查指导原则与现行强制性/推荐性标准。"
-          image={bannerReports}
-          actions={<TextLink to="/system#l1-pol">查看政策与技术标准统计口径 →</TextLink>}
-        />
+    <div className="mx-auto grid w-full max-w-content gap-8 px-4 py-8 md:px-8 md:py-10">
+      {/* 顶部标题与原始资料库导航条 */}
+      <header className="grid gap-4 border-b border-border pb-6">
+        <Breadcrumbs items={[{ label: "产业总览", href: "/" }, { label: "研究报告" }]} />
 
-        <div className="grid grid-cols-2 border-t-2 border-t-brand-navy border-b border-border lg:grid-cols-4 lg:divide-x lg:divide-border">
-          {REPORTS_SUMMARY_STRIP.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              onClick={() => setTab(item.id as ReportTabKey)}
-              className="grid cursor-pointer content-between gap-1 px-3 py-3.5 text-left transition-colors hover:bg-surface-sunken focus-ring-inset lg:px-4 lg:first:pl-1"
-            >
-              <span className="body-sm font-semibold text-ink-muted">{item.label}</span>
-              <div>
-                <span className="inline-flex items-baseline gap-1 tabular-nums">
-                  <span className="numeral text-brand-navy">{item.value}</span>
-                  {item.unit && <span className="caption text-ink-muted">{item.unit}</span>}
-                </span>
-                <p className="mt-0.5 caption text-ink-muted">{item.subline}</p>
-              </div>
-            </button>
-          ))}
+        <div className="flex flex-wrap items-end justify-between gap-4">
+          <div className="grid gap-1.5">
+            <p className="label text-brand-navy">MDES 按期出版物 · 章节引用永久锁定单项统计版本快照</p>
+            <h1 className="title-page text-ink">医疗器械产业研究报告与专题出版物</h1>
+            <p className="body text-ink-muted">
+              每期报告固定发布日期、统计覆盖期与引用快照版本；后续统计修订在新版本独立发布，确保已出版报告的引文与图表读数长期稳定可复核。
+            </p>
+          </div>
         </div>
-      </div>
 
-      {/* Band 2：双栏 Statista 级政策主题与审评指导原则构成信息图（关键词筛选态自动收起，优先呈现匹配文献） */}
-      {!rawQuery && (
-        <section aria-label="政策焦点与技术规范结构概览" className="grid gap-6 lg:grid-cols-2">
-          <StatistaFigure
-            id="fig-reports-policy"
-            eyebrow="图 1 · 产业政策主题结构"
-            title="设备更新改造与创新审评准入成为国家及地方政策首要着力点"
-            subtitle="截至 2026年9月 · 418 份国家级部委及重点省市医疗器械政策主题分布（单位：份）"
-            badge={{ label: "收录有效政策 418 份", tone: "info" }}
-            ariaLabel="国家及地方医疗器械政策主题分布横向条形图"
-            height={256}
-            option={(t) =>
-              statistaHorizontalBarOption(t, {
-                categories: POLICY_TOPIC_DISTRIBUTION.map((d) => d.topic),
-                values: POLICY_TOPIC_DISTRIBUTION.map((d) => d.count),
-                labels: POLICY_TOPIC_DISTRIBUTION.map((d) => d.barLabel),
-                highlightTopN: 2,
-                rightPadding: 108,
-              })
-            }
-            tableColumns={policyChartCols}
-            tableRows={POLICY_TOPIC_DISTRIBUTION as unknown as Record<string, string | number>[]}
-            exportName="policy-topic-distribution"
-            source="国务院各部委及重点省市人民政府公开公报"
-            note="单份综合政策按核心医疗装备支持条款主方向归类统计"
-          />
+        <div className="flex flex-wrap items-center justify-between gap-3 border border-border bg-surface-sunken px-4 py-2.5 body-sm">
+          <span className="text-ink-muted">查阅未加工的政策文件、审查指导原则、技术标准或官方年报原文？</span>
+          <div className="flex flex-wrap items-center gap-4">
+            <TextLink to="/policies" className="font-semibold">
+              产业政策 (/policies)
+            </TextLink>
+            <TextLink to="/regulation/registrations?subkind=guideline" className="font-semibold">
+              审查指导原则
+            </TextLink>
+            <TextLink to="/standards" className="font-semibold">
+              技术标准 (/standards)
+            </TextLink>
+            <TextLink to="/sources" className="font-semibold">
+              官方年报 (/sources)
+            </TextLink>
+          </div>
+        </div>
+      </header>
 
-          <StatistaFigure
-            id="fig-reports-guidelines"
-            eyebrow="图 2 · 审评指导原则赛道分布"
-            title="植介入耗材、体外诊断与医学影像合计占现行指导原则逾七成"
-            subtitle="截至 2026年9月 · 506 份现行医疗器械注册审查指导原则技术领域构成（单位：份）"
-            badge={{ label: "现行有效 506 份", tone: "info" }}
-            ariaLabel="医疗器械注册审查指导原则技术赛道分布横向条形图"
-            height={256}
-            option={(t) =>
-              statistaHorizontalBarOption(t, {
-                categories: GUIDELINE_TRACK_DISTRIBUTION.map((d) => d.track),
-                values: GUIDELINE_TRACK_DISTRIBUTION.map((d) => d.count),
-                labels: GUIDELINE_TRACK_DISTRIBUTION.map((d) => d.barLabel),
-                highlightTopN: 3,
-                rightPadding: 108,
-              })
-            }
-            tableColumns={guidelineChartCols}
-            tableRows={GUIDELINE_TRACK_DISTRIBUTION as unknown as Record<string, string | number>[]}
-            exportName="guideline-track-distribution"
-            source="国家药监局医疗器械技术审评中心（CMDE）"
-            note="覆盖全部 22 个《医疗器械分类目录》子目录及 6840 体外诊断试剂"
-          />
+      {/* 首屏焦点：最新一期核心结论（左） + 章节目录与锁定版本（右） */}
+      {latestIssue && !trimmedQ && (
+        <section
+          aria-labelledby="latest-issue-heading"
+          className="grid gap-8 border border-border border-t-2 border-t-brand-navy bg-surface p-6 lg:grid-cols-12"
+        >
+          <div className="grid content-between gap-5 lg:col-span-7">
+            <div className="grid gap-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <Tag tone="info">最新出版 · {latestIssueLabel}</Tag>
+                <span className="code text-ink-muted">{latestIssue.code}</span>
+              </div>
+
+              <h2 id="latest-issue-heading" className="title-section text-ink">
+                <Link
+                  to={`/reports/${encodeURIComponent(latestIssue.slug)}`}
+                  className="hover:text-brand-navy hover:underline focus-ring"
+                >
+                  {latestIssue.title}
+                </Link>
+              </h2>
+
+              <Descriptions
+                columns={2}
+                items={[
+                  { term: "发布日期", value: latestPublishedDate },
+                  { term: "统计覆盖期", value: latestCoveragePeriod },
+                ]}
+              />
+
+              <div className="border-l-4 border-brand-red bg-surface-sunken px-4 py-3">
+                <p className="label text-brand-navy">本期核心结论</p>
+                <p className="mt-1 body text-ink">{latestConclusion}</p>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-3">
+              <Button asChild variant="primary">
+                <Link to={`/reports/${encodeURIComponent(latestIssue.slug)}`}>
+                  阅读完整章节与统计图卡
+                  <IconArrowRight aria-hidden="true" />
+                </Link>
+              </Button>
+            </div>
+          </div>
+
+          <div className="grid content-start gap-3 border-t border-border pt-5 lg:col-span-5 lg:border-t-0 lg:border-l lg:pt-0 lg:pl-6">
+            <p className="label text-brand-navy">本期章节目录与锁定统计版本</p>
+            <ol className="divide-y divide-border border-y border-border">
+              {latestChapters.map((ch, idx) => (
+                <li key={ch.chapter_no} className="grid gap-1.5 py-3.5">
+                  <div className="flex items-baseline justify-between gap-2">
+                    <TextLink
+                      to={`/reports/${encodeURIComponent(latestIssue.slug)}#ch-${idx + 1}`}
+                      className="body font-semibold text-brand-navy"
+                    >
+                      {ch.chapter_no} · {ch.title}
+                    </TextLink>
+                  </div>
+                  <p className="line-clamp-2 caption text-ink-muted">{ch.judgment}</p>
+                  <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+                    {ch.pinned_statistics.map((ps) => (
+                      <TextLink
+                        key={`${ps.statistic_id}-${ps.version}`}
+                        to={`/statistics/${encodeURIComponent(ps.statistic_id)}?v=${encodeURIComponent(ps.version)}`}
+                        className="code caption font-semibold"
+                      >
+                        {ps.statistic_id}@{ps.version}
+                      </TextLink>
+                    ))}
+                  </div>
+                </li>
+              ))}
+            </ol>
+          </div>
         </section>
       )}
 
-      {/* Band 3：四分栏智库文献与法规标准检索台 */}
-      <section id="fig-reports-briefings" aria-label="研究报告与法规标准目录" className="grid gap-5">
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border">
-          <div role="tablist" aria-label="文献类别切换" className="flex flex-wrap gap-6">
-            {TAB_ITEMS.map((item) => {
-              const active = activeTab === item.key;
-              return (
-                <button
-                  key={item.key}
-                  role="tab"
-                  type="button"
-                  aria-selected={active}
-                  onClick={() => setTab(item.key)}
-                  className={cn(
-                    "-mb-px cursor-pointer border-b-2 py-2.5 button transition-colors focus-ring",
-                    active
-                      ? "border-brand-navy text-brand-navy"
-                      : "border-transparent text-ink-muted hover:text-ink",
-                  )}
-                >
-                  {item.label}
-                  {q && <span className="ml-1.5 caption tabular-nums">({tabCounts[item.key]})</span>}
-                </button>
-              );
-            })}
+      {/* 往期与全部报告归档列表 */}
+      <section id="fig-reports-briefings" aria-labelledby="reports-archive-heading" className="grid gap-5">
+        <div className="flex flex-wrap items-end justify-between gap-4 border-b border-border pb-4">
+          <div className="grid gap-1">
+            <SectionTitle level={2} as="h2">
+              <span id="reports-archive-heading">出版物期次归档</span>
+            </SectionTitle>
+            <p className="body-sm text-ink-muted">
+              共 <strong className="font-semibold tabular-nums text-brand-navy">{archiveReports.length}</strong>{" "}
+              期正式发布报告 · 按专题领域、出版期次或关键词检索。
+            </p>
           </div>
 
-          <div className="flex flex-wrap items-center gap-3 pb-1.5">
-            <label htmlFor="reports-local-filter" className="sr-only">
-              本表关键词筛选
-            </label>
-            <input
-              id="reports-local-filter"
-              type="search"
-              value={searchParams.get("q") ?? ""}
-              onChange={(e) => {
-                const next = new URLSearchParams(searchParams);
-                if (e.target.value.trim()) next.set("q", e.target.value);
-                else next.delete("q");
-                setSearchParams(next, { replace: true });
-              }}
-              placeholder="筛选本表报告、字号或标准号…"
-              className="h-9 w-52 rounded-sm border border-border-strong bg-surface px-3 body-sm text-ink outline-none focus:border-brand-navy"
-            />
-            {rawQuery && (
-              <button
-                type="button"
-                onClick={clearQuery}
-                className="inline-flex cursor-pointer items-center gap-1 body-sm font-semibold text-link hover:underline focus-ring"
+          <div className="flex flex-wrap items-end gap-3">
+            <div className="grid w-40 gap-1">
+              <label htmlFor="reports-period-select" className="caption font-semibold text-ink-muted">
+                出版期次
+              </label>
+              <select
+                id="reports-period-select"
+                value={periodFilter}
+                onChange={(e) => updateParams({ period: e.target.value || null })}
+                className={cn(controlClass, "h-9 body-sm")}
               >
-                <IconX size={15} aria-hidden="true" />
-                清除
-              </button>
+                <option value="">全部期次</option>
+                <option value="2026Q3">2026Q3（第 3 期）</option>
+                <option value="2026Q2">2026Q2（第 2 期）</option>
+              </select>
+            </div>
+
+            <div className="grid w-44 gap-1">
+              <label htmlFor="reports-category-select" className="caption font-semibold text-ink-muted">
+                专题方向
+              </label>
+              <select
+                id="reports-category-select"
+                value={categoryFilter}
+                onChange={(e) => updateParams({ category: e.target.value || null })}
+                className={cn(controlClass, "h-9 body-sm")}
+              >
+                <option value="">全部专题</option>
+                <option value="医学影像专题">医学影像专题</option>
+                <option value="进出口与供应链">进出口与供应链</option>
+              </select>
+            </div>
+
+            <div className="grid w-56 gap-1">
+              <label htmlFor="reports-local-filter" className="caption font-semibold text-ink-muted">
+                检索报告题目或结论
+              </label>
+              <input
+                id="reports-local-filter"
+                type="search"
+                value={rawQuery}
+                onChange={(e) => updateParams({ q: e.target.value || null })}
+                placeholder="如 磁共振、联影、集中度…"
+                className={cn(controlClass, "h-9 body-sm")}
+              />
+            </div>
+
+            {hasFilters && (
+              <Button variant="ghost" size="sm" onClick={() => setSearchParams(new URLSearchParams(), { replace: true })}>
+                <IconRotate size={14} aria-hidden="true" />
+                重置
+              </Button>
             )}
           </div>
         </div>
 
-        {/* 跨 Tab 检索引导（解决原图5搜指导原则/标准词在默认报告 Tab 显示 0 条死胡同的问题） */}
-        {fallbackSiblingTab && (
-          <div className="flex flex-wrap items-center justify-between gap-3 border border-border bg-info-bg px-4 py-3 body-sm text-ink">
-            <span>
-              当前分栏未命中「{rawQuery}」，但在<strong>「{fallbackSiblingTab.label}」</strong>中匹配到{" "}
-              <strong className="tabular-nums text-brand-navy">{fallbackSiblingTab.count}</strong> 条记录。
-            </span>
-            <button
-              type="button"
-              onClick={() => setTab(fallbackSiblingTab.key)}
-              className="cursor-pointer font-semibold text-brand-navy underline hover:text-link focus-ring"
-            >
-              切换至{fallbackSiblingTab.label}查看 →
-            </button>
+        {archiveReports.length === 0 ? (
+          <div className="border border-border bg-surface-sunken p-6 body text-ink-muted">
+            未找到符合当前筛选条件的出版报告。若需检索标准编号或政策文号，请前往{" "}
+            <TextLink to={`/standards${trimmedQ ? `?q=${encodeURIComponent(trimmedQ)}` : ""}`} inline>
+              技术标准库
+            </TextLink>{" "}
+            或{" "}
+            <TextLink to={`/policies${trimmedQ ? `?q=${encodeURIComponent(trimmedQ)}` : ""}`} inline>
+              产业政策库
+            </TextLink>
+            。
           </div>
-        )}
+        ) : (
+          <ul className="divide-y divide-border border-y border-border">
+            {archiveReports.map((rep) => {
+              const rd = rep.detail ?? {};
+              const issueLabel = typeof rd.issue_label === "string" ? rd.issue_label : (rep.period ?? "");
+              const pubDate = typeof rd.published_date === "string" ? rd.published_date : "";
+              const cov = typeof rd.coverage_period === "string" ? rd.coverage_period : "";
+              const conclusion = typeof rd.core_conclusion === "string" ? rd.core_conclusion : rep.subtitle;
+              const chapters = Array.isArray(rd.chapters) ? (rd.chapters as ReportChapterSpec[]) : [];
 
-        {/* 分栏 1：季度与专题报告（默认收起长结论，一屏清晰纵览全部代表作） */}
-        {activeTab === "briefings" && (
-          <div className="grid gap-3">
-            <div className="flex flex-wrap items-baseline justify-between gap-2">
-              <h2 className="title-sub text-ink">季度运行监测报告与专题研判简报</h2>
-              <span className="caption text-ink-muted">
-                共 {filteredBriefings.length} 篇代表性成果 · 点击「展开核心结论」可查阅研判要点与标准引用格式
-              </span>
-            </div>
+              return (
+                <li key={rep.id} className="flex flex-col gap-4 py-5 sm:flex-row sm:items-start">
+                  <ReportCoverThumb
+                    variant={rep.slug.includes("2026q3") ? "quarterly" : "domestic"}
+                    label={issueLabel || "研究专报"}
+                    className="shrink-0"
+                  />
+                  <div className="grid min-w-0 flex-1 gap-2">
+                    <div className="flex flex-wrap items-center gap-2 caption text-ink-muted">
+                      <Tag size="sm" tone="info">
+                        {issueLabel}
+                      </Tag>
+                      {rep.category && <Tag size="sm">{rep.category}</Tag>}
+                      {pubDate && <span className="code">发布于 {pubDate}</span>}
+                      {cov && <span>· 覆盖期 {cov}</span>}
+                    </div>
 
-            {filteredBriefings.length === 0 ? (
-              <p className="border-y border-border py-8 text-center body text-ink-muted">
-                未找到匹配的专题报告，请尝试其他关键词或切换上方政策/指导原则分栏。
-              </p>
-            ) : (
-              <ul className="divide-y divide-border border-y border-border">
-                {filteredBriefings.map((item) => {
-                  const isOpen = expandedIds.has(item.id);
-                  return (
-                    <li key={item.id} className="py-4">
-                      <div className="flex flex-col gap-4 sm:flex-row sm:items-start">
-                        <ReportCoverThumb
-                          variant={coverVariantFor(item.series)}
-                          label={coverLabelFor(item.series)}
-                          className="shrink-0"
-                        />
-                        <div className="grid min-w-0 flex-1 gap-1.5">
-                          <div className="flex flex-wrap items-center justify-between gap-2">
-                            <div className="flex flex-wrap items-center gap-2">
-                              <span className="code text-ink-muted">{item.date}</span>
-                              <Tag size="sm" tone="info">
-                                {item.series}
-                              </Tag>
-                            </div>
-                            <button
-                              type="button"
-                              aria-expanded={isOpen}
-                              onClick={() => toggleExpand(item.id)}
-                              className="inline-flex cursor-pointer items-center gap-1 body-sm font-semibold text-link hover:underline focus-ring"
+                    <h3 className="title-sub text-brand-navy">
+                      <Link
+                        to={`/reports/${encodeURIComponent(rep.slug)}`}
+                        className="hover:underline focus-ring"
+                      >
+                        {rep.title}
+                      </Link>
+                    </h3>
+
+                    <p className="body-sm text-ink">{conclusion}</p>
+
+                    <div className="flex flex-wrap items-center justify-between gap-3 pt-1 body-sm">
+                      <div className="flex flex-wrap items-center gap-2 caption text-ink-muted">
+                        <span>共 {chapters.length} 章 · 锁定统计：</span>
+                        {chapters
+                          .flatMap((c) => c.pinned_statistics)
+                          .map((ps) => (
+                            <TextLink
+                              key={`${rep.id}-${ps.statistic_id}-${ps.version}`}
+                              to={`/statistics/${encodeURIComponent(ps.statistic_id)}?v=${encodeURIComponent(ps.version)}`}
+                              className="code font-semibold"
                             >
-                              {isOpen ? (
-                                <>
-                                  收起核心结论
-                                  <IconChevronUp size={15} aria-hidden="true" />
-                                </>
-                              ) : (
-                                <>
-                                  展开核心结论与引用
-                                  <IconChevronDown size={15} aria-hidden="true" />
-                                </>
-                              )}
-                            </button>
-                          </div>
-
-                          <h3 className="title-nav text-brand-navy">{item.title}</h3>
-                          <p className="body-sm text-ink-muted">{item.summary}</p>
-
-                          {isOpen && (
-                            <div className="mt-2 grid gap-3 border-l-2 border-brand-sky bg-surface-sunken px-4 py-3">
-                              <div className="grid gap-1">
-                                <p className="label text-brand-navy">核心研判发现</p>
-                                <ul className="grid gap-1 body-sm text-ink">
-                                  {item.keyFindings.map((f, idx) => (
-                                    <li key={idx}>· {f}</li>
-                                  ))}
-                                </ul>
-                              </div>
-
-                              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 caption text-ink-muted">
-                                <span className="font-semibold text-ink">关联指标口径：</span>
-                                {item.citedIndicators.map((ci) => (
-                                  <TextLink key={ci.label} to={ci.href}>
-                                    {ci.label}
-                                  </TextLink>
-                                ))}
-                              </div>
-
-                              <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-2 caption text-ink-muted">
-                                <span className="min-w-0 flex-1">文献引用：{item.citation}</span>
-                                <button
-                                  type="button"
-                                  onClick={() => copyCitation(item.id, item.citation)}
-                                  className="inline-flex shrink-0 cursor-pointer items-center gap-1 font-semibold text-link hover:underline focus-ring"
-                                >
-                                  {copiedId === item.id ? (
-                                    <>
-                                      <IconCheck size={14} aria-hidden="true" />
-                                      已复制引用
-                                    </>
-                                  ) : (
-                                    <>
-                                      <IconCopy size={14} aria-hidden="true" />
-                                      复制标准引用
-                                    </>
-                                  )}
-                                </button>
-                              </div>
-                            </div>
-                          )}
-                        </div>
+                              {ps.statistic_id}@{ps.version}
+                            </TextLink>
+                          ))}
                       </div>
-                    </li>
-                  );
-                })}
-              </ul>
-            )}
-          </div>
-        )}
 
-        {/* 分栏 2：国家及地方政策条款 */}
-        {activeTab === "policies" && (
-          <div className="grid gap-4">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div className="flex flex-wrap gap-2" role="group" aria-label="政策发文层级筛选">
-                {POLICY_LEVELS.map((lv) => (
-                  <button
-                    key={lv}
-                    type="button"
-                    aria-pressed={policyLevel === lv}
-                    onClick={() => setPolicyLevel(lv)}
-                    className={cn(
-                      "cursor-pointer border px-3 py-1 body-sm font-semibold transition-colors focus-ring",
-                      policyLevel === lv
-                        ? "border-brand-navy bg-brand-navy text-on-brand"
-                        : "border-border bg-surface text-ink hover:border-brand-navy",
-                    )}
-                  >
-                    {lv}
-                  </button>
-                ))}
-              </div>
-              <span className="caption text-ink-muted">精选代表性条款 {filteredPolicies.length} 份</span>
-            </div>
-
-            <DataTable
-              caption="国家及地方医疗器械政策条款目录"
-              columns={policyColumns}
-              data={filteredPolicies.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE)}
-              getRowId={(r) => r.id}
-              pagination={
-                filteredPolicies.length > PAGE_SIZE
-                  ? { page, pageSize: PAGE_SIZE, total: filteredPolicies.length, onPageChange: setPage }
-                  : undefined
-              }
-            />
-          </div>
-        )}
-
-        {/* 分栏 3：注册审查指导原则 */}
-        {activeTab === "guidelines" && (
-          <div className="grid gap-4">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div className="flex flex-wrap gap-2" role="group" aria-label="技术审评赛道筛选">
-                {GUIDELINE_CATEGORIES.map((cat) => (
-                  <button
-                    key={cat}
-                    type="button"
-                    aria-pressed={guidelineCat === cat}
-                    onClick={() => setGuidelineCat(cat)}
-                    className={cn(
-                      "cursor-pointer border px-3 py-1 body-sm font-semibold transition-colors focus-ring",
-                      guidelineCat === cat
-                        ? "border-brand-navy bg-brand-navy text-on-brand"
-                        : "border-border bg-surface text-ink hover:border-brand-navy",
-                    )}
-                  >
-                    {cat}
-                  </button>
-                ))}
-              </div>
-              <span className="caption text-ink-muted">精选代表性指导原则 {filteredGuidelines.length} 份</span>
-            </div>
-
-            <DataTable
-              caption="医疗器械注册审查指导原则目录"
-              columns={guidelineColumns}
-              data={filteredGuidelines.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE)}
-              getRowId={(r) => r.id}
-              pagination={
-                filteredGuidelines.length > PAGE_SIZE
-                  ? { page, pageSize: PAGE_SIZE, total: filteredGuidelines.length, onPageChange: setPage }
-                  : undefined
-              }
-            />
-          </div>
-        )}
-
-        {/* 分栏 4：监管年报与现行标准 */}
-        {activeTab === "standards" && (
-          <div className="grid gap-8">
-            <div className="grid gap-3">
-              <h2 className="title-sub text-brand-navy">官方统计年报与行业运行公报索引</h2>
-              <DataTable
-                caption="医疗器械监管与行业统计年报目录"
-                columns={annualColumns}
-                data={filteredAnnuals}
-                getRowId={(r) => r.seq}
-              />
-            </div>
-
-            <div className="grid gap-3">
-              <h2 className="title-sub text-brand-navy">现行强制性与推荐性医疗器械标准目录</h2>
-              <DataTable
-                caption="医疗器械国家标准与行业标准目录"
-                columns={standardColumns}
-                data={filteredStandards.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE)}
-                getRowId={(r) => r.stdNo}
-                pagination={
-                  filteredStandards.length > PAGE_SIZE
-                    ? { page, pageSize: PAGE_SIZE, total: filteredStandards.length, onPageChange: setPage }
-                    : undefined
-                }
-              />
-            </div>
-          </div>
+                      <TextLink
+                        to={`/reports/${encodeURIComponent(rep.slug)}`}
+                        className="inline-flex items-center gap-1 font-semibold"
+                      >
+                        <span>打开完整报告</span>
+                        <IconExternalLink size={14} aria-hidden="true" />
+                      </TextLink>
+                    </div>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
         )}
       </section>
     </div>
