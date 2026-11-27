@@ -6,7 +6,13 @@
 import { buildImportStatements, importObservations } from "../../src/import";
 import app from "../../src/worker";
 
-type Env = { DB: D1Database; IMPORT_MAX_ROWS?: string };
+type Env = {
+  DB: D1Database;
+  IMPORT_MAX_ROWS?: string;
+  ENABLE_TEST_HOOKS?: string;
+  ENABLE_TRADE_WRITE?: string;
+  TRADE_WRITE_TOKEN?: string;
+};
 
 export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {

@@ -58,7 +58,31 @@ export function migrationStatements(): string[] {
 
 let seq = 0;
 
-export async function startHarness({ maxRows = 5000, withDb = true, migrate = true, seed = true } = {}) {
+export async function startHarness({
+  maxRows = 5000,
+  withDb = true,
+  migrate = true,
+  seed = true,
+  enableTradeWrite = true,
+  tradeWriteToken,
+}: {
+  maxRows?: number;
+  withDb?: boolean;
+  migrate?: boolean;
+  seed?: boolean;
+  enableTradeWrite?: boolean;
+  tradeWriteToken?: string;
+} = {}) {
+  const bindings: Record<string, string> = {
+    IMPORT_MAX_ROWS: String(maxRows),
+    ENABLE_TEST_HOOKS: "1",
+  };
+  if (enableTradeWrite) {
+    bindings.ENABLE_TRADE_WRITE = "1";
+  }
+  if (tradeWriteToken !== undefined) {
+    bindings.TRADE_WRITE_TOKEN = tradeWriteToken;
+  }
   const mf = new Miniflare({
     cf: false,
     modules: true,
@@ -66,7 +90,7 @@ export async function startHarness({ maxRows = 5000, withDb = true, migrate = tr
     compatibilityDate: "2026-07-01",
     compatibilityFlags: ["nodejs_compat"],
     d1Databases: withDb ? { DB: `mdes-test-${process.pid}-${++seq}` } : undefined,
-    bindings: { IMPORT_MAX_ROWS: String(maxRows), ENABLE_TEST_HOOKS: "1" },
+    bindings,
   });
   await mf.ready;
 
@@ -81,7 +105,8 @@ export async function startHarness({ maxRows = 5000, withDb = true, migrate = tr
         headers: { ...(init.headers as Record<string, string>), "content-type": encoded.headers.get("content-type")! },
       };
     }
-    const res = await mf.dispatchFetch(`http://localhost${p}`, next as never);
+    const targetUrl = /^https?:\/\//i.test(p) ? p : `http://localhost${p}`;
+    const res = await mf.dispatchFetch(targetUrl, next as never);
     return res as unknown as Response;
   };
   const post = (p: string, body: unknown) =>
@@ -109,11 +134,14 @@ export async function startHarness({ maxRows = 5000, withDb = true, migrate = tr
     queryWithMeta,
     reset: async () => {
       await sql([
+        "delete from trade_publish_staged_observation",
+        "delete from trade_publish_staged_snapshot",
         "delete from trade_current_snapshot",
         "delete from trade_period_snapshot",
         "delete from trade_release",
         "delete from trade_reconciliation_log",
         "delete from trade_active_scope",
+        "delete from trade_active_hs8_slot",
         "delete from trade_batch_evidence",
         "delete from trade_hs_coverage",
         "delete from trade_fact",

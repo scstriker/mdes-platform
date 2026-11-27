@@ -6,8 +6,8 @@ import { defineConfig } from "@playwright/test";
  *   API 8788 → wrangler dev，数据在 apps/api/.wrangler/e2e（每次启动时删掉重建、迁移并灌指标），
  *   Web 5174（VITE_API_BASE 指向 8788）。不需要 Docker。运行：npm run e2e
  */
-const API_PORT = 8788;
-const WEB_PORT = 5174;
+const API_PORT = Number(process.env.E2E_API_PORT || 8788);
+const WEB_PORT = Number(process.env.E2E_WEB_PORT || 5174);
 
 const API_BASE = `http://127.0.0.1:${API_PORT}`;
 
@@ -32,7 +32,7 @@ export default defineConfig({
         "node -e \"require('fs').rmSync('.wrangler/e2e',{recursive:true,force:true})\"",
         "npx wrangler d1 migrations apply mdes --local --persist-to .wrangler/e2e",
         "npx tsx src/seed.ts --persist-to .wrangler/e2e",
-        `npx wrangler dev --port ${API_PORT} --ip 127.0.0.1 --persist-to .wrangler/e2e`,
+        `npx wrangler dev --port ${API_PORT} --ip 127.0.0.1 --persist-to .wrangler/e2e --var ENABLE_TRADE_WRITE:1`,
       ].join(" && "),
       cwd: "../api",
       url: `${API_BASE}/api/health`,

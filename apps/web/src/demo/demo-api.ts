@@ -289,6 +289,8 @@ async function handle(method: string, url: URL, body: BodyInit | null | undefine
       groupingTotals: null,
       concentration: null,
       trend: [],
+      annualTrend: [],
+      narrativeSummary: null,
       categories: [],
       partners: [],
       regimes: [],

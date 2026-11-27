@@ -102,4 +102,7 @@ Indexes: `(indicator_id, period)`, `(batch_id)`.
 2. 两个流向、四个分组都覆盖当期清单后生成月快照。季度和年度只在所需月份齐备时生成，累计值使用从一月至截止月的连续月份。修订已发布月份时，重算该月所属期间及以其为上年同期的比较值。
 3. 在短 D1 事务中切换已校验的快照和对应 TRD 派生观测值。发布时校验计算所基于的上一版本，若已有另一修订先发布，基于最新版本重算。读取端能看见旧版或新版中的一个完整版本。
 
-迁移追加在 `0001_init.sql` 之后。已有观测值继续保留原批次；新生成的 `TRD-001/002/005/006/007` 记录标明来源与发布版本，修订时只替换对应的派生记录。字段传输和错误约定见 [API](API.md)，发布决策见 [ADR-004](decisions/ADR-004-trade-publication.md)。
+迁移追加在 `0001_init.sql` 之后（现包含 `0002_trade_schema.sql` 至 `0007_trade_hs_2022_2026_applicability.sql`）：
+- `0007_trade_hs_2022_2026_applicability.sql` 登记 `202601` 字典在 `2022–2026` 各年度税则适用性（`2022` 年 `90189080` 手术机器人标为 `applicable = 0` 并附 `2023 年自 90189099 析出增列` 依据，`2022` 年适用 163 码，`2023–2026` 适用全量 164 码）；
+- `trade_current_snapshot.payload_json` 与 `trade_period_snapshot.payload_json` 同步物化 `totals.{totalUsd, totalYoyPct}`、跨年序列 `annualTrend`、`hsItems[].{importQty1YoyPct, exportQty1YoyPct}` 及确定性研判文段 `narrativeSummary`，使门户与报告导出保持 `O(1)` 单行主键读取；
+- 已有观测值继续保留原批次；新生成的 `TRD-001/002/005/006/007` 记录标明来源与发布版本，修订时只替换对应的派生记录。大跨度多期间发布通过 `0008_trade_publish_staging.sql`（`trade_publish_staged_snapshot`、`trade_publish_staged_observation`）先分批暂存完整结果，再于单次原子事务内切换 `trade_release`、`trade_active_scope`、`trade_current_snapshot`（含同步全库跨年趋势）与 `observation`；并发导入通过 `0009_trade_import_slot_uniqueness.sql`（`trade_active_hs8_slot` 主键 `(dict_version, month, flow, grouping, hs8)`）在数据库层原子阻止重复或重叠覆盖。字段传输和错误约定见 [API](API.md)，发布决策见 [ADR-004](decisions/ADR-004-trade-publication.md)。

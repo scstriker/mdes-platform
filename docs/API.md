@@ -192,7 +192,15 @@ Returns：
 
 有效请求返回 HTTP 200，包含 `batchId`、`sourceSha256`、`rowCount`、`coverage` 和 `status`。有 CSV 时 `sourceSha256` 为 CSV 原件摘要，附加证据摘要随批次保存。`coverage` 使用三个 HS8 数组：`received`、`confirmedEmpty`、`missing`。批次已接收而全月尚未齐备时为 `staged`，整月成功发布后为 `published`。相同范围、内容与覆盖声明的重传返回原批次；重传历史批次保留当前已发布版本。已发布范围收到修订时，按该覆盖集合整体替换。通用观测值 CSV 沿用原入口。
 
-清单、编码或单位不符合约定时返回 HTTP 400，标出字段或 CSV 行号；修订与既有批次范围部分重叠时返回 HTTP 409 并指出冲突覆盖范围。校验失败时保留当前已发布结果。本期仅在本地管理环境启用写入。
+清单、编码或单位不符合约定时返回 HTTP 400，标出字段或 CSV 行号；修订与既有批次范围部分重叠时返回 HTTP 409 并指出冲突覆盖范围。校验失败时保留当前已发布结果。本期写入路由（`POST /api/trade/import`、`POST /api/trade/import-bulk`、`POST /api/trade/publish`）默认关闭，公开部署返回 HTTP 403 `TRADE_WRITE_DISABLED`；仅在受控本地管理环境显式开启 `ENABLE_TRADE_WRITE=1`（且为本机回环地址）或配置 `TRADE_WRITE_TOKEN` 并携带有效管理令牌时允许写入。`GET /api/trade/batches` 支持 `batchIds` 逗号分隔精确批量回查终态。
+
+### POST /api/trade/import-bulk
+
+用于接收 `monthFlag="1"` 年度/多月分列海关原始 CSV（或整窗无记录截图）并按 `数据年月` 自动无损拆解为单月候选批次，所有拆解出的月度批次共享母文件 `sourceSha256`。`multipart/form-data` 包含 `manifest`（支持 `months: string[]` 与 `probeVerifiedZero?: boolean`）、`file`、可选 `emptyEvidence` 及 `deferPublish`（默认 `true`，仅暂存不触发逐月重算）。自动按当年 `trade_hs_year_applicability` 过滤当年适用税号集。
+
+### POST /api/trade/publish
+
+Body：`{ "dictVersion": "202601" }`（可选）。扫描指定字典下全部已完成双流向四分组覆盖且对账一致的暂存月份，执行 **1 次** 全周期（月度、季度、YTD、完整年度）快照生成与 `trade_release` 乐观锁切换，返回 `{ dictVersion, published, releaseId, newlyPublishedMonths, publishedMonths, availablePeriods, reconciliationNotes }`。
 
 ### GET /api/trade/overview
 
@@ -202,8 +210,8 @@ Returns：
 | --- | --- |
 | `status`、`period`、`source`、`dictVersion`、`releaseId` | 状态为 `published`，来源为 `china_customs`。同一期间的图表、详情与导出引用同一发布版本。 |
 | `coverage`、`sourceBatches` | 实际覆盖月份和税号数。列出来源批次标识及原件摘要，可在本地档案定位原件。 |
-| `totals`、`trend`、`categories` | 返回期间、进口美元金额、出口美元金额、差额和同期变化率。分类按 HS8 所属一级类别汇总。金额值先保持原始精度，页面最后换算为亿美元。 |
-| `partners`、`concentration`、`regimes`、`regions`、`hsItems` | 按海关原码和来源名称提供伙伴、方式及注册地分布；税号、品类及全篮子集中度区分流向。不可计算的同比或集中度为 `null`。 |
+| `totals`、`trend`、`annualTrend`、`narrativeSummary`、`categories` | `totals` 返回进口、出口、进出口总额（`totalUsd`）、差额及各自可比同比；`trend` 为期内月度序列；`annualTrend` 为跨年年度/YTD 序列（含 `isPartial` 与同窗口期同比）；`narrativeSummary` 为区分相邻期“同比”与跨多年“区间变化”的确定性研判文段。 |
+| `partners`、`concentration`、`regimes`、`regions`、`hsItems` | 按海关原码和来源名称提供伙伴、方式及注册地分布；`hsItems` 含同单位第一数量同比（`importQty1YoyPct` / `exportQty1YoyPct`，异构单位返回 `null`）。 |
 
 例如，以下是 AC-013 单码隔离库的**目标响应节选**。其中的金额来自验收金标准。同比百分数约定 `25` 表示 25%，基期未知时用 `null`。
 
@@ -215,11 +223,13 @@ Returns：
   "totals": {
     "importUsd": 20375226,
     "exportUsd": 89723246,
+    "totalUsd": 110098472,
     "balanceUsd": 69348020,
     "importYoyPct": null,
-    "exportYoyPct": null
+    "exportYoyPct": null,
+    "totalYoyPct": null
   }
 }
 ```
 
-查询只读取已发布快照。收件样例与归档方式见[海关原件采集规程](海关原件采集规程.md)，发布前后各接口的可见结果见[后端功能设计](贸易后端功能设计.md)。验收使用 AC-013 至 AC-017。
+查询只读取已发布快照。收件样例与归档方式见[海关原件采集规程](海关原件采集规程.md)，发布前后各接口的可见结果见[后端功能设计](贸易后端功能设计.md)。验收使用 AC-013 至 AC-021。
