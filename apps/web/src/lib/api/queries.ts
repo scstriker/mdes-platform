@@ -1,6 +1,14 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "./endpoints";
-import type { CsvWriteMode, ObservationQuery, Phase, TradeImportManifest } from "./types";
+import type {
+  CatalogKind,
+  CatalogQuery,
+  CsvWriteMode,
+  ObservationQuery,
+  Phase,
+  StatisticListQuery,
+  TradeImportManifest,
+} from "./types";
 
 /** 查询键集中管理，导入成功后按前缀失效 */
 export const queryKeys = {
@@ -12,12 +20,18 @@ export const queryKeys = {
   observations: (params: ObservationQuery) => ["observations", params] as const,
   search: (q: string, limit = 12) => ["search", q, limit] as const,
   batches: ["batches"] as const,
-  tradeOverview: (period = "", dictVersion = "") => ["trade", "overview", period, dictVersion] as const,
+  tradeOverview: (period = "", dictVersion = "", releaseId = "") =>
+    ["trade", "overview", period, dictVersion, releaseId] as const,
   tradePeriods: (dictVersion = "") => ["trade", "periods", dictVersion] as const,
   tradeBatches: (params: { dictVersion?: string; month?: string; flow?: string; grouping?: string } = {}) =>
     ["trade", "batches", params] as const,
   tradeCoverage: (params: { dictVersion?: string; year?: string; fromMonth?: string; toMonth?: string } = {}) =>
     ["trade", "coverage", params] as const,
+  statistics: (params: StatisticListQuery = {}) => ["statistics", "list", params] as const,
+  statisticDetail: (id: string, v = "") => ["statistics", "detail", id, v] as const,
+  statisticVersions: (id: string) => ["statistics", "versions", id] as const,
+  catalog: (params: CatalogQuery = {}) => ["catalog", "list", params] as const,
+  catalogDetail: (kind: string, slug: string) => ["catalog", "detail", kind, slug] as const,
 };
 
 export const useHealth = () => useQuery({ queryKey: queryKeys.health, queryFn: ({ signal }) => api.health({ signal }) });
@@ -90,13 +104,39 @@ export const useGlobalSearch = (q: string, limit = 12, enabled = true) => {
   });
 };
 
-export const useTradeOverview = (period?: string, dictVersion?: string, enabled = true) =>
-  useQuery({
-    queryKey: queryKeys.tradeOverview(period ?? "", dictVersion ?? ""),
-    queryFn: ({ signal }) => api.tradeOverview({ period: period || undefined, dictVersion: dictVersion || undefined }, { signal }),
+export function useTradeOverview(
+  period?: string,
+  dictVersion?: string,
+  releaseIdOrEnabled?: string | boolean,
+  enabledOrReleaseId?: boolean | string,
+) {
+  const releaseId =
+    typeof releaseIdOrEnabled === "string"
+      ? releaseIdOrEnabled
+      : typeof enabledOrReleaseId === "string"
+        ? enabledOrReleaseId
+        : undefined;
+  const enabled =
+    typeof releaseIdOrEnabled === "boolean"
+      ? releaseIdOrEnabled
+      : typeof enabledOrReleaseId === "boolean"
+        ? enabledOrReleaseId
+        : true;
+  return useQuery({
+    queryKey: queryKeys.tradeOverview(period ?? "", dictVersion ?? "", releaseId ?? ""),
+    queryFn: ({ signal }) =>
+      api.tradeOverview(
+        {
+          period: period || undefined,
+          dictVersion: dictVersion || undefined,
+          releaseId: releaseId || undefined,
+        },
+        { signal },
+      ),
     enabled,
     retry: false,
   });
+}
 
 export const useTradePeriods = (dictVersion?: string, enabled = true) =>
   useQuery({
@@ -125,6 +165,43 @@ export const useTradeCoverage = (
     enabled,
   });
 
+export const useStatisticsList = (params: StatisticListQuery = {}, enabled = true) =>
+  useQuery({
+    queryKey: queryKeys.statistics(params),
+    queryFn: ({ signal }) => api.statistics(params, { signal }),
+    placeholderData: keepPreviousData,
+    enabled,
+  });
+
+export const useStatisticDetail = (id: string | undefined, v?: string, enabled = true) =>
+  useQuery({
+    queryKey: queryKeys.statisticDetail(id ?? "", v ?? ""),
+    queryFn: ({ signal }) => api.statisticDetail(id!, { v: v || undefined }, { signal }),
+    enabled: enabled && Boolean(id),
+  });
+
+export const useStatisticVersions = (id: string | undefined, enabled = true) =>
+  useQuery({
+    queryKey: queryKeys.statisticVersions(id ?? ""),
+    queryFn: ({ signal }) => api.statisticVersions(id!, { signal }),
+    enabled: enabled && Boolean(id),
+  });
+
+export const useCatalogList = (params: CatalogQuery = {}, enabled = true) =>
+  useQuery({
+    queryKey: queryKeys.catalog(params),
+    queryFn: ({ signal }) => api.catalog(params, { signal }),
+    placeholderData: keepPreviousData,
+    enabled,
+  });
+
+export const useCatalogDetail = (kind: CatalogKind | undefined, slug: string | undefined, enabled = true) =>
+  useQuery({
+    queryKey: queryKeys.catalogDetail(kind ?? "", slug ?? ""),
+    queryFn: ({ signal }) => api.catalogDetail(kind!, slug!, { signal }),
+    enabled: enabled && Boolean(kind) && Boolean(slug),
+  });
+
 export function useImportCsv() {
   const qc = useQueryClient();
   return useMutation({
@@ -147,7 +224,7 @@ export function useImportTrade() {
       emptyEvidences?: File[];
     }) => api.importTrade(payload),
     onSuccess: () => {
-      for (const key of [["trade"], ["observations"], ["indicators"], ["indicator"], ["stats"], ["batches"], ["search"]]) {
+      for (const key of [["trade"], ["statistics"], ["observations"], ["indicators"], ["indicator"], ["stats"], ["batches"], ["search"]]) {
         qc.invalidateQueries({ queryKey: key });
       }
     },
