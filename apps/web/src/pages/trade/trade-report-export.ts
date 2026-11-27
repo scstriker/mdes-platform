@@ -7,7 +7,8 @@ import {
   type TradeReportEmbeddedCharts,
 } from "@mdes/shared";
 import type { ChartOption } from "@/lib/charts/echarts";
-import { readChartTheme, type ChartTheme } from "@/lib/charts/theme";
+import { PUBLICATION_LIGHT_THEME } from "@/lib/charts/publication-theme";
+import type { ChartTheme } from "@/lib/charts/theme";
 import { downloadText } from "@/lib/download";
 import {
   buildCategoryDonutOption,
@@ -27,31 +28,8 @@ export type TradeReportExportOptions = {
   theme?: ChartTheme;
 };
 
-const FALLBACK_EXPORT_THEME: ChartTheme = {
-  series: ["var(--chart-1)", "var(--chart-2)", "var(--chart-3)", "var(--chart-4)", "var(--chart-5)"],
-  emphasis: "var(--chart-3)",
-  brandNavy: "var(--brand-navy)",
-  brandSky: "var(--brand-sky)",
-  brandRed: "var(--brand-red)",
-  infoBg: "var(--info-bg)",
-  surfaceSunken: "var(--surface-sunken)",
-  ink: "var(--ink)",
-  muted: "var(--ink-muted)",
-  border: "var(--border)",
-  borderStrong: "var(--border-strong)",
-  surface: "var(--surface-raised)",
-  fontFamily: "sans-serif",
-};
-
-function resolveExportTheme(explicit?: ChartTheme): ChartTheme {
-  if (explicit) return explicit;
-  if (typeof document !== "undefined" && document.documentElement) {
-    const cssTheme = readChartTheme(document.documentElement);
-    if (cssTheme.ink && cssTheme.series[0]) {
-      return cssTheme;
-    }
-  }
-  return FALLBACK_EXPORT_THEME;
+export function resolveExportTheme(explicit?: ChartTheme): ChartTheme {
+  return explicit ?? PUBLICATION_LIGHT_THEME;
 }
 
 /**
