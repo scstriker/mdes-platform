@@ -2622,18 +2622,25 @@ function computeAffectedPeriods(
 
 type QtyAccumulator = {
   hasValue: boolean;
+  hasMissing: boolean;
   mixed: boolean;
   unit: string | null;
   sum: number;
 };
 
 function createQtyAcc(): QtyAccumulator {
-  return { hasValue: false, mixed: false, unit: null, sum: 0 };
+  return { hasValue: false, hasMissing: false, mixed: false, unit: null, sum: 0 };
 }
 
 function addQty(acc: QtyAccumulator, val: number | null, unit: string | null) {
-  if (val === null) return;
-  const normUnit = unit ?? "";
+  if (val === null) {
+    acc.hasMissing = true;
+    return;
+  }
+  const normUnit = unit?.trim() ?? "";
+  if (!normUnit) {
+    acc.hasMissing = true;
+  }
   if (!acc.hasValue) {
     acc.hasValue = true;
     acc.unit = normUnit || null;
@@ -2650,10 +2657,16 @@ function addQty(acc: QtyAccumulator, val: number | null, unit: string | null) {
 function finalizeQty(acc: QtyAccumulator): TradeQuantityStat {
   if (!acc.hasValue) return { value: null, unit: null };
   if (acc.mixed) return { value: null, unit: "MIXED" };
+  if (acc.hasMissing) return { value: null, unit: acc.unit };
   return { value: roundMetric(acc.sum, 4), unit: acc.unit };
 }
 
-function computeSameUnitQtyYoyPct(curr: TradeQuantityStat, prior: TradeQuantityStat | undefined): number | null {
+function computeSameUnitQtyYoyPct(
+  curr: TradeQuantityStat,
+  prior: TradeQuantityStat | undefined,
+  opts?: { currHasMissing?: boolean; priorHasMissing?: boolean },
+): number | null {
+  if (opts?.currHasMissing || opts?.priorHasMissing) return null;
   if (!prior || curr.value === null || prior.value === null || prior.value <= 0) return null;
   if (!curr.unit || !prior.unit || curr.unit === "MIXED" || prior.unit === "MIXED" || curr.unit !== prior.unit) {
     return null;
@@ -3135,10 +3148,20 @@ function buildPeriodSnapshot(ctx: {
       exportYoyPct: isComparable ? computeYoyPct(exp, priorHsExp.get(item.hs8) ?? 0n) : null,
       importQty1: currImpQty1,
       importQty2: finalizeQty(q.imp2),
-      importQty1YoyPct: isComparable ? computeSameUnitQtyYoyPct(currImpQty1, priorImpQty1) : null,
+      importQty1YoyPct: isComparable
+        ? computeSameUnitQtyYoyPct(currImpQty1, priorImpQty1, {
+            currHasMissing: q.imp1.hasMissing,
+            priorHasMissing: pq?.imp1.hasMissing,
+          })
+        : null,
       exportQty1: currExpQty1,
       exportQty2: finalizeQty(q.exp2),
-      exportQty1YoyPct: isComparable ? computeSameUnitQtyYoyPct(currExpQty1, priorExpQty1) : null,
+      exportQty1YoyPct: isComparable
+        ? computeSameUnitQtyYoyPct(currExpQty1, priorExpQty1, {
+            currHasMissing: q.exp1.hasMissing,
+            priorHasMissing: pq?.exp1.hasMissing,
+          })
+        : null,
       importConcentration: computeConcentration(
         hImpMap ? [...hImpMap.entries()].map(([partnerCode, v]) => ({ partnerCode, usdScaled: v.usd })) : [],
         imp,

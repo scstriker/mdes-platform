@@ -1093,4 +1093,121 @@ describe("PR #4 独立审查后端缺陷回归验证（P1-1 / P1-2 / P1-5 / P2-7
     expect(Number(dataCols[13])).toBe(5000); // Col N = 出口额(美元)
     expect(Number(dataCols[16])).toBe(3000); // Col Q = 顺差
   }, 30_000);
+
+  it("[R4 P2-1] 本期或基期有交易月份缺报第一数量时，数量同比返回 null 而非错误百分比；真零交易月不受误杀", async () => {
+    const dictVer = "PR4-R4-P21-QTY-YOY";
+    await h.sql([
+      `INSERT INTO trade_dict_meta (dict_version, source_filename, source_sha256, hs8_count, hs6_count, category_count, scope_mode)
+       VALUES ('${dictVer}', 'r4_p21.csv', '${"5".repeat(64)}', 2, 2, 2, 'pilot')`,
+      `INSERT INTO trade_hs_dict (dict_version, hs8, hs6, item_name, category_id, category_name, category_order, seq_no) VALUES
+       ('${dictVer}', '${HS_ECG}', '901811', '心电图记录仪', 'cat-01', '医用诊断装备', 1, 1),
+       ('${dictVer}', '${HS_ROBOT}', '901890', '手术机器人', 'cat-02', '治疗装备', 2, 2)`,
+    ]);
+
+    const buildQtyCsv = (
+      grouping: "product" | "partner" | "regime" | "region",
+      rows: Array<{ ym: string; hs8: string; name: string; usd: number; qty1: number | null; unit1: string | null }>,
+    ) => {
+      if (grouping === "product") {
+        return [
+          "数据年月,商品编码,商品名称,第一数量,第一计量单位,美元",
+          ...rows.map((r) => `${r.ym},${r.hs8},${r.name},${r.qty1 ?? ""},${r.unit1 ?? ""},${r.usd}`),
+        ].join("\r\n") + "\r\n";
+      }
+      const header =
+        grouping === "partner"
+          ? "数据年月,商品编码,商品名称,贸易伙伴编码,贸易伙伴名称,美元"
+          : grouping === "regime"
+            ? "数据年月,商品编码,商品名称,贸易方式编码,贸易方式名称,美元"
+            : "数据年月,商品编码,商品名称,收发货人注册地编码,收发货人注册地名称,美元";
+      const code = grouping === "partner" ? "502,美国" : grouping === "regime" ? "10,一般贸易" : "3100,上海市";
+      return [header, ...rows.map((r) => `${r.ym},${r.hs8},${r.name},${code},${r.usd}`)].join("\r\n") + "\r\n";
+    };
+
+    // 2023-01 & 2023-02：
+    //   HS_ECG  进口 = (10台, 10台), 出口 = (10台, 缺报) -> 测试「基期缺报出口数量」
+    //   HS_ROBOT 进口 = (10台, 10台), 出口 = (10台, 10台) -> 2024-02 进口真实零交易（无行），测试不误杀
+    // 2024-01 & 2024-02：
+    //   HS_ECG  进口 = (10台, 缺报) -> 测试「本期缺报进口数量」（旧代码误算 -50%），出口 = (10台, 10台)
+    //   HS_ROBOT 进口 = (10台, 真实无交易 confirmed_empty) -> 进口数量同比应正常为 -50%
+    const datasets: Record<
+      "2023" | "2024",
+      Record<"import" | "export", Array<{ ym: string; hs8: string; name: string; usd: number; qty1: number | null; unit1: string | null }>>
+    > = {
+      "2023": {
+        import: [
+          { ym: "202301", hs8: HS_ECG, name: "心电图记录仪", usd: 1000, qty1: 10, unit1: "台" },
+          { ym: "202302", hs8: HS_ECG, name: "心电图记录仪", usd: 1000, qty1: 10, unit1: "台" },
+          { ym: "202301", hs8: HS_ROBOT, name: "手术机器人", usd: 2000, qty1: 10, unit1: "台" },
+          { ym: "202302", hs8: HS_ROBOT, name: "手术机器人", usd: 2000, qty1: 10, unit1: "台" },
+        ],
+        export: [
+          { ym: "202301", hs8: HS_ECG, name: "心电图记录仪", usd: 1000, qty1: 10, unit1: "台" },
+          { ym: "202302", hs8: HS_ECG, name: "心电图记录仪", usd: 1000, qty1: null, unit1: null },
+          { ym: "202301", hs8: HS_ROBOT, name: "手术机器人", usd: 2000, qty1: 10, unit1: "台" },
+          { ym: "202302", hs8: HS_ROBOT, name: "手术机器人", usd: 2000, qty1: 10, unit1: "台" },
+        ],
+      },
+      "2024": {
+        import: [
+          { ym: "202401", hs8: HS_ECG, name: "心电图记录仪", usd: 1000, qty1: 10, unit1: "台" },
+          { ym: "202402", hs8: HS_ECG, name: "心电图记录仪", usd: 1000, qty1: null, unit1: null },
+          { ym: "202401", hs8: HS_ROBOT, name: "手术机器人", usd: 2000, qty1: 10, unit1: "台" },
+        ],
+        export: [
+          { ym: "202401", hs8: HS_ECG, name: "心电图记录仪", usd: 1000, qty1: 10, unit1: "台" },
+          { ym: "202402", hs8: HS_ECG, name: "心电图记录仪", usd: 1000, qty1: 10, unit1: "台" },
+          { ym: "202401", hs8: HS_ROBOT, name: "手术机器人", usd: 2000, qty1: 10, unit1: "台" },
+          { ym: "202402", hs8: HS_ROBOT, name: "手术机器人", usd: 2000, qty1: 10, unit1: "台" },
+        ],
+      },
+    };
+
+    for (const yr of ["2023", "2024"] as const) {
+      const months = [`${yr}-01`, `${yr}-02`];
+      for (const flow of ["import", "export"] as const) {
+        for (const grouping of ["product", "partner", "regime", "region"] as const) {
+          const res = await h.request(
+            "/api/trade/import-bulk",
+            buildBulkMultipart({
+              manifest: {
+                dictVersion: dictVer,
+                months,
+                flow,
+                currency: "USD",
+                grouping,
+                hs8: [HS_ECG, HS_ROBOT],
+                probeVerifiedZero: true,
+              },
+              csvText: buildQtyCsv(grouping, datasets[yr][flow]),
+            }),
+          );
+          expect(res.status).toBe(200);
+        }
+      }
+    }
+
+    expect((await h.post("/api/trade/publish", { dictVersion: dictVer })).status).toBe(200);
+    const ov = (await (
+      await h.request(`/api/trade/overview?dictVersion=${dictVer}&period=2024-YTD-02`)
+    ).json()) as TradeOverviewPublished;
+    expect(ov.status).toBe("published");
+
+    const ecg = ov.hsItems.find((x) => x.hs8 === HS_ECG)!;
+    const robot = ov.hsItems.find((x) => x.hs8 === HS_ROBOT)!;
+
+    // 本期 2024-02 有交易但进口数量缺报 => importQty1YoyPct 必须为 null（绝非 -50）
+    expect(ecg.importQty1YoyPct).toBeNull();
+    expect(ecg.importQty1.value).toBeNull();
+    expect(ecg.importYoyPct).toBe(0);
+
+    // 基期 2023-02 有交易但出口数量缺报 => exportQty1YoyPct 必须为 null
+    expect(ecg.exportQty1YoyPct).toBeNull();
+    expect(ecg.exportQty1).toEqual({ value: 20, unit: "台" });
+
+    // HS_ROBOT 2024-02 真实无交易（confirmed_empty）=> 进口数量同比应精确为 -50%
+    expect(robot.importQty1).toEqual({ value: 10, unit: "台" });
+    expect(robot.importQty1YoyPct).toBe(-50);
+    expect(robot.exportQty1YoyPct).toBe(0);
+  }, 30_000);
 });

@@ -701,6 +701,220 @@ class SerialCollectorTests(unittest.TestCase):
         for dim in ("product", "regime", "region", "partner"):
             self.assertEqual([b["batchKey"] for b in batches_by_grouping[dim]], ["G01"])
 
+    def test_reprobe_zero_rejects_nonempty_csv_and_switches_to_empty_evidence_flow(self):
+        # [R4 P1-2] 1) verify_exported_csv 传入 expected_total=0 与非空 123 美元明细时必须拒绝
+        nonempty_123_csv = (
+            "数据年月,商品编码,商品名称,美元\r\n"
+            "202401,90181100,心电图记录仪,123\r\n"
+        ).encode("utf-8")
+        with self.assertRaises(collector.CustomsExportVerificationError) as ctx:
+            collector.verify_exported_csv(
+                nonempty_123_csv,
+                expected_total=0,
+                months_covered=["2024-01"],
+                requested_hs8=["90181100"],
+                flow="import",
+                grouping="product",
+            )
+        self.assertIn("probe_total=0", str(ctx.exception))
+
+        # 2) 首次预检返回 1 行、导出失败（或行数不符），重预检返回 0 行 -> 必须转入零结果截图取证流程，不再下载/接收旧 CSV
+        class ReprobeToZeroTransport(FakeHarnessTransport):
+            def __init__(self):
+                super().__init__({}, empty_png_bytes=make_valid_png(32, 32))
+                self.probe_seq = 0
+                self.export_calls = 0
+
+            def probe_count(self, *, year, start_month, end_month, month_flag, flow, grouping, hs8, state_candidates=None):
+                self._enter("probe", year, start_month, end_month, flow, grouping)
+                try:
+                    self.probe_seq += 1
+                    st = state_candidates[0] if state_candidates else 2
+                    if self.probe_seq == 1:
+                        return {"ok": True, "state": st, "total": 1, "zeroEvidence": None, "isHtmlBlocked": False}
+                    fp = collector.build_zero_query_fingerprint(
+                        year=year,
+                        start_month=start_month,
+                        end_month=end_month,
+                        month_flag=month_flag,
+                        flow=flow,
+                        grouping=grouping,
+                        state=st,
+                        hs8=hs8,
+                    )
+                    return {
+                        "ok": True,
+                        "state": st,
+                        "total": 0,
+                        "zeroEvidence": {
+                            "queryFingerprint": fp,
+                            "officialTotal": 0,
+                            "responseSha256": collector.sha256_hex(b"zero"),
+                            "officialResponseExcerpt": "暂无数据",
+                        },
+                        "isHtmlBlocked": False,
+                    }
+                finally:
+                    self._exit()
+
+            def fetch_raw_export(self, *, year, start_month, end_month, month_flag, flow, grouping, hs8, state):
+                self._enter("export", year, start_month, end_month, flow, grouping)
+                try:
+                    self.export_calls += 1
+                    if self.export_calls == 1:
+                        # 首次导出返回非预期空/错行触发重试
+                        return {"ok": False, "reason": "stale_server_cache", "transientError": False}
+                    # 若 bug 仍在，重预检为 0 后还会调用这里拿到旧 123 美元明细
+                    return {
+                        "ok": True,
+                        "base64": base64.b64encode(nonempty_123_csv).decode("ascii"),
+                        "byteLength": len(nonempty_123_csv),
+                        "sha256": collector.sha256_hex(nonempty_123_csv),
+                        "state": state,
+                    }
+                finally:
+                    self._exit()
+
+        transport = ReprobeToZeroTransport()
+        policy = collector.PoliteRatePolicy(min_delay_sec=3.5, max_delay_sec=4.0, sleep_fn=lambda _: None)
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+            runner = collector.SerialCustomsCollector(transport=transport, archive_dir=out_dir, rate_policy=policy)
+            outcomes = runner.collect_task(
+                year=2024,
+                start_month=1,
+                end_month=1,
+                flow="import",
+                grouping="product",
+                batch_key="G01",
+                hs8=["90181100"],
+            )
+            self.assertEqual(outcomes[0]["status"], "confirmed_empty")
+            self.assertEqual(transport.export_calls, 1)
+            self.assertEqual(list(out_dir.rglob("*.raw.csv")), [])
+            self.assertEqual(len(list(out_dir.rglob("*.empty.png"))), 1)
+            self.assertEqual([ev[0] for ev in transport.evidence_events], ["prepare", "capture", "clear"])
+
+    def test_checkpoint_skip_requires_valid_meta_and_artifact_digest(self):
+        # [R4 P2-3] 断点与 .manifest.json/.raw.csv 仍在但 .meta.json 缺失或原件摘要不匹配时，绝不可跳过必须重采恢复
+        counts = {(2024, 1, 1, "import", "product"): 2}
+        transport = FakeHarnessTransport(counts)
+        policy = collector.PoliteRatePolicy(min_delay_sec=3.5, max_delay_sec=4.0, sleep_fn=lambda _: None)
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+            runner = collector.SerialCustomsCollector(transport=transport, archive_dir=out_dir, rate_policy=policy)
+            first = runner.collect_task(
+                year=2024,
+                start_month=1,
+                end_month=1,
+                flow="import",
+                grouping="product",
+                batch_key="G01",
+                hs8=["90181100"],
+            )
+            self.assertEqual(first[0]["status"], "received")
+            csv_path = Path(first[0]["csvPath"])
+            meta_path = csv_path.with_name(csv_path.name.replace(".raw.csv", ".meta.json"))
+            self.assertTrue(meta_path.exists())
+
+            # 正常三件套完整且摘要匹配 -> 命中断点跳过
+            skipped = runner.collect_task(
+                year=2024,
+                start_month=1,
+                end_month=1,
+                flow="import",
+                grouping="product",
+                batch_key="G01",
+                hs8=["90181100"],
+            )
+            self.assertEqual(skipped[0]["status"], "skipped_checkpoint")
+
+            # 删除 .meta.json -> 绝不跳过，必须重采并恢复 .meta.json
+            meta_path.unlink()
+            restored_meta = runner.collect_task(
+                year=2024,
+                start_month=1,
+                end_month=1,
+                flow="import",
+                grouping="product",
+                batch_key="G01",
+                hs8=["90181100"],
+            )
+            self.assertEqual(restored_meta[0]["status"], "received")
+            self.assertTrue(meta_path.exists())
+
+            # 篡改 .raw.csv（导致与 .meta.json 中 sha256 不一致）-> 绝不跳过，必须重采修复
+            csv_path.write_bytes(csv_path.read_bytes()[:-5])
+            restored_csv = runner.collect_task(
+                year=2024,
+                start_month=1,
+                end_month=1,
+                flow="import",
+                grouping="product",
+                batch_key="G01",
+                hs8=["90181100"],
+            )
+            self.assertEqual(restored_csv[0]["status"], "received")
+            meta_obj = json.loads(meta_path.read_text("utf-8"))
+            self.assertEqual(collector.sha256_hex(csv_path.read_bytes()), meta_obj["sha256"])
+
+    def test_live_ledger_preserves_d1_publish_verification_section_on_rerun(self):
+        # [R4 P2-4] 重跑正式采集调用 set_status() / record_batch() 时，必须保留第四节 D1 发布核验记录且不重复追加
+        from live_ledger import LiveCollectionLedger
+
+        sec4 = (
+            "## 四、本地持久化 D1 真实入库与单次向量化发布终态核验\n\n"
+            "| 核验维度 | 实际核验值 | 结论 |\n"
+            "| --- | --- | --- |\n"
+            "| 单次原子发布版本 (`trade_release`) | `1` 条（`releaseId = 20bd2985-105c-4927-982a-cbd68a71562b`） | ✅ 单版本原子切换 |\n"
+            "| 已发布查询期间快照 (`trade_current_snapshot`) | **`139` 个期间** | ✅ 全周期就绪 |"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            arch_dir = Path(tmp) / "archive"
+            ledger_md = Path(tmp) / "docs" / "ledger.md"
+
+            first_ledger = LiveCollectionLedger(archive_dir=arch_dir, repo_ledger_path=ledger_md)
+            first_ledger.record_batch(
+                stem="customs_202601_2024_01-12_import_product_G01_r01",
+                dict_version="202601",
+                year=2024,
+                month_range="2024-01..2024-12",
+                months_count=12,
+                flow="import",
+                grouping="product",
+                batch_key="G01",
+                requested_hs8_count=1,
+                select_table_state=2,
+                official_probe_total=12,
+                status="received",
+                encoding_name="gb18030",
+                byte_length=512,
+                detail_row_count=12,
+                returned_hs8_count=1,
+                empty_hs8_count=0,
+                usd_detail_sum="12,345",
+                sha256="a" * 64,
+            )
+            # 模拟归档后人工/脚本在 Markdown 末尾追加第四节 D1 核验表
+            ledger_md.write_text(ledger_md.read_text("utf-8").rstrip("\n") + "\n\n" + sec4 + "\n", encoding="utf-8")
+
+            # 重跑正式采集：新实例调用 set_status()（即便所有批次命中断点）不得抹掉第四节
+            rerun_ledger = LiveCollectionLedger(archive_dir=arch_dir, repo_ledger_path=ledger_md)
+            rerun_ledger.set_status(session_status="🟢 会话健康已验证", current_activity="重跑全量断点检查")
+            rerun_ledger.set_status(session_status="✅ 当前计划阶段采集完成", current_activity="本轮共完成 1 项归档单元")
+
+            final_md = ledger_md.read_text("utf-8")
+            self.assertEqual(final_md.count("## 四、本地持久化 D1 真实入库与单次向量化发布终态核验"), 1)
+            self.assertIn("20bd2985-105c-4927-982a-cbd68a71562b", final_md)
+            self.assertIn("139` 个期间", final_md)
+            self.assertTrue((arch_dir / "_ledger_post_sections.md").exists())
+
+            # 即使 Markdown 意外被删，从持久化的 _ledger_post_sections.md 仍能自动恢复第四节
+            ledger_md.unlink()
+            recovered = LiveCollectionLedger(archive_dir=arch_dir, repo_ledger_path=ledger_md)
+            recovered.set_status(session_status="🟢 恢复渲染")
+            self.assertIn("20bd2985-105c-4927-982a-cbd68a71562b", ledger_md.read_text("utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()

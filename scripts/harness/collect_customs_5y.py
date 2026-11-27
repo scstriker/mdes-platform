@@ -322,7 +322,15 @@ def verify_exported_csv(
             f"out_of_range_months_in_export:{','.join(sorted(out_of_range_months))}"
         )
 
-    if expected_total > 0 and detail_row_count != expected_total and (detail_row_count + summary_row_count) != expected_total:
+    if expected_total < 0:
+        raise CustomsExportVerificationError(f"invalid_expected_total:{expected_total}")
+
+    if expected_total == 0:
+        if detail_row_count != 0 or summary_row_count != 0:
+            raise CustomsExportVerificationError(
+                f"row_count_mismatch:exported={detail_row_count},summary={summary_row_count},probe_total=0"
+            )
+    elif detail_row_count != expected_total and (detail_row_count + summary_row_count) != expected_total:
         raise CustomsExportVerificationError(
             f"row_count_mismatch:exported={detail_row_count},summary={summary_row_count},probe_total={expected_total}"
         )
@@ -657,70 +665,145 @@ class SerialCustomsCollector:
 
         _assert_no_archive_scope_conflict()
 
-        if task_key in self.completed_keys:
+        def _extract_meta_hs8_scope(meta_obj: dict[str, Any]) -> list[str] | None:
+            raw_req = meta_obj.get("requestedHs8")
+            if isinstance(raw_req, list) and raw_req:
+                return sorted({str(c).strip() for c in raw_req if str(c).strip()})
+            raw_hs = meta_obj.get("hs8")
+            if isinstance(raw_hs, list) and raw_hs:
+                return sorted({str(c).strip() for c in raw_hs if str(c).strip()})
+            insp = meta_obj.get("inspection")
+            if isinstance(insp, dict):
+                ret = insp.get("returnedHs8")
+                unret = insp.get("unreturnedHs8")
+                if isinstance(ret, list) or isinstance(unret, list):
+                    combined = {
+                        str(c).strip()
+                        for c in [*(ret if isinstance(ret, list) else []), *(unret if isinstance(unret, list) else [])]
+                        if str(c).strip()
+                    }
+                    if combined:
+                        return sorted(combined)
+            fp = meta_obj.get("queryFingerprint")
+            if isinstance(fp, str):
+                m_fp = re.search(r"\|hs8=([0-9,]+)$", fp.strip())
+                if m_fp:
+                    parsed_fp = sorted({c.strip() for c in m_fp.group(1).split(",") if c.strip()})
+                    if parsed_fp:
+                        return parsed_fp
+            return None
+
+        def _is_archived_task_valid_on_disk() -> bool:
             mf_path = target_dir / f"{stem}.manifest.json"
-            csv_exists = (target_dir / f"{stem}.raw.csv").exists()
-            png_exists = (target_dir / f"{stem}.empty.png").exists()
-            disk_valid = False
-            if mf_path.exists() and (csv_exists or png_exists):
-                try:
-                    existing_mf = json.loads(mf_path.read_text(encoding="utf-8"))
-                    existing_hs8 = sorted(str(c).strip() for c in (existing_mf.get("hs8") or []) if str(c).strip())
-                    disk_valid = existing_hs8 == sorted_hs8
-                except Exception:
-                    disk_valid = False
-            if disk_valid:
+            meta_path = target_dir / f"{stem}.meta.json"
+            csv_path = target_dir / f"{stem}.raw.csv"
+            png_path = target_dir / f"{stem}.empty.png"
+            has_csv = csv_path.exists()
+            has_png = png_path.exists()
+            if not (mf_path.exists() and meta_path.exists() and (has_csv or has_png)):
+                return False
+            try:
+                existing_mf = json.loads(mf_path.read_text(encoding="utf-8"))
+                existing_meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            except Exception:
+                return False
+            if not isinstance(existing_mf, dict) or not isinstance(existing_meta, dict):
+                return False
+            if (
+                existing_mf.get("dictVersion") != DICT_VERSION
+                or existing_mf.get("flow") != flow
+                or existing_mf.get("grouping") != grouping
+            ):
+                return False
+            existing_months = existing_mf.get("months")
+            if not isinstance(existing_months, list):
+                single_m = existing_mf.get("month")
+                existing_months = [single_m] if single_m else []
+            if [str(m) for m in existing_months] != months_covered:
+                return False
+            existing_hs8 = sorted(str(c).strip() for c in (existing_mf.get("hs8") or []) if str(c).strip())
+            if existing_hs8 != sorted_hs8:
+                return False
+            meta_hs8 = _extract_meta_hs8_scope(existing_meta)
+            if meta_hs8 != sorted_hs8:
+                return False
+
+            if has_csv:
+                expected_sha = str(existing_meta.get("sha256") or "").strip().lower()
+                if not re.fullmatch(r"[0-9a-f]{64}", expected_sha):
+                    return False
+                csv_bytes = csv_path.read_bytes()
+                if sha256_hex(csv_bytes) != expected_sha:
+                    return False
+                if existing_meta.get("byteLength") is not None and len(csv_bytes) != int(existing_meta["byteLength"]):
+                    return False
+                return True
+
+            expected_png_sha = str(existing_meta.get("emptyPngSha256") or "").strip().lower()
+            if not re.fullmatch(r"[0-9a-f]{64}", expected_png_sha):
+                return False
+            png_bytes = png_path.read_bytes()
+            if sha256_hex(png_bytes) != expected_png_sha:
+                return False
+            try:
+                validate_evidence_png(png_bytes)
+            except Exception:
+                return False
+            return True
+
+        if task_key in self.completed_keys:
+            if _is_archived_task_valid_on_disk():
                 self.log(f"[skip-checkpoint] {task_key}")
                 return [{"status": "skipped_checkpoint", "monthRange": month_range_label}]
-            self.log(f"[stale-checkpoint] Archived artifact missing for {stem}; re-collecting...")
+            self.log(f"[stale-checkpoint] Archived artifact or metadata missing/corrupted for {stem}; re-collecting...")
             self.completed_keys.discard(task_key)
 
         month_flag = "1"
-        probe: dict[str, Any] = {}
-        for attempt in range(3):
-            probe = self._probe_count_serial(
-                year=year,
-                start_month=start_month,
-                end_month=end_month,
-                month_flag=month_flag,
-                flow=flow,
-                grouping=grouping,
-                hs8=hs8,
-            )
-            if not probe.get("transientError") or attempt >= 2:
-                break
-            self.log(
-                f"[transient-retry] Probe {month_range_label} {flow}/{grouping} {batch_key} hit {probe.get('reason')}, resting 22s before retry {attempt + 1}/2..."
-            )
-            self.rate_policy.sleep_fn(22.0)
-            if callable(keepalive_fn):
-                keepalive_fn()
 
-        if probe.get("isHtmlBlocked") or probe.get("circuitBreakRequired"):
-            reason_str = str(probe.get("reason") or "html_or_waf_challenge")
-            self._save_checkpoint(halted_reason="html_or_waf_challenge")
-            if self.ledger is not None:
-                self.ledger.set_status(
-                    session_status=f"🔴 会话需人工重输验证码（已保存断点：`{reason_str}`）",
-                    current_activity=f"预检 `{month_range_label} {flow}/{grouping} {batch_key}` 触发会话门禁，已暂停等待解锁",
+        def _probe_with_retries(stage_label: str) -> dict[str, Any]:
+            res: dict[str, Any] = {}
+            for attempt in range(3):
+                res = self._probe_count_serial(
+                    year=year,
+                    start_month=start_month,
+                    end_month=end_month,
+                    month_flag=month_flag,
+                    flow=flow,
+                    grouping=grouping,
+                    hs8=hs8,
                 )
-            if callable(self.on_session_expired):
-                self.on_session_expired(reason_str)
-            raise CustomsCircuitBreakError(
-                f"Circuit breaker tripped during probe ({month_range_label} {flow}/{grouping}): {reason_str}"
-            )
+                if not res.get("transientError") or attempt >= 2:
+                    break
+                self.log(
+                    f"[transient-retry] {stage_label} {month_range_label} {flow}/{grouping} {batch_key} hit {res.get('reason')}, resting 22s before retry {attempt + 1}/2..."
+                )
+                self.rate_policy.sleep_fn(22.0)
+                if callable(keepalive_fn):
+                    keepalive_fn()
 
-        if not probe.get("ok"):
-            self._save_checkpoint(halted_reason=f"probe_failed:{probe.get('reason')}")
-            raise CustomsCircuitBreakError(f"Probe failed without valid count: {probe}")
+            if res.get("isHtmlBlocked") or res.get("circuitBreakRequired"):
+                reason_str = str(res.get("reason") or "html_or_waf_challenge")
+                self._save_checkpoint(halted_reason="html_or_waf_challenge")
+                if self.ledger is not None:
+                    self.ledger.set_status(
+                        session_status=f"🔴 会话需人工重输验证码（已保存断点：`{reason_str}`）",
+                        current_activity=f"{stage_label} `{month_range_label} {flow}/{grouping} {batch_key}` 触发会话门禁，已暂停等待解锁",
+                    )
+                if callable(self.on_session_expired):
+                    self.on_session_expired(reason_str)
+                raise CustomsCircuitBreakError(
+                    f"Circuit breaker tripped during {stage_label} ({month_range_label} {flow}/{grouping}): {reason_str}"
+                )
 
-        total = int(probe["total"])
-        state = int(probe["state"])
+            if not res.get("ok"):
+                self._save_checkpoint(halted_reason=f"probe_failed:{res.get('reason')}")
+                raise CustomsCircuitBreakError(f"{stage_label} failed without valid count: {res}")
+            return res
 
-        if total >= MAX_SAFE_ROWS:
+        def _bisect_if_possible(current_total: int) -> list[dict[str, Any]] | None:
             if start_month < end_month:
                 mid = (start_month + end_month) // 2
-                self.log(f"[bisect-months] {month_range_label} total={total} >= {MAX_SAFE_ROWS} -> {start_month}..{mid} & {mid+1}..{end_month}")
+                self.log(f"[bisect-months] {month_range_label} total={current_total} >= {MAX_SAFE_ROWS} -> {start_month}..{mid} & {mid+1}..{end_month}")
                 left = self.collect_task(
                     year=year,
                     start_month=start_month,
@@ -765,8 +848,9 @@ class SerialCustomsCollector:
                     keepalive_fn=keepalive_fn,
                 )
                 return left + right
+            return None
 
-        if total == 0:
+        def _archive_zero_result_evidence(zero_probe: dict[str, Any], zero_state: int) -> list[dict[str, Any]]:
             _assert_no_archive_scope_conflict()
             expected_fp = build_zero_query_fingerprint(
                 year=year,
@@ -775,7 +859,7 @@ class SerialCustomsCollector:
                 month_flag=month_flag,
                 flow=flow,
                 grouping=grouping,
-                state=state,
+                state=zero_state,
                 hs8=hs8,
             )
             prepare_view = getattr(self.transport, "prepare_empty_evidence_view", None)
@@ -785,7 +869,7 @@ class SerialCustomsCollector:
                 raise CustomsScreenshotError(
                     "Transport does not implement prepare_empty_evidence_view; refusing to capture unverified stale page screenshot"
                 )
-            zero_ev = probe.get("zeroEvidence") if isinstance(probe.get("zeroEvidence"), dict) else {}
+            zero_ev = zero_probe.get("zeroEvidence") if isinstance(zero_probe.get("zeroEvidence"), dict) else {}
             try:
                 sync_res = prepare_view(
                     year=year,
@@ -795,8 +879,8 @@ class SerialCustomsCollector:
                     flow=flow,
                     grouping=grouping,
                     hs8=hs8,
-                    state=state,
-                    probe=probe,
+                    state=zero_state,
+                    probe=zero_probe,
                 )
                 if (
                     not isinstance(sync_res, dict)
@@ -878,7 +962,7 @@ class SerialCustomsCollector:
                     grouping=grouping,
                     batch_key=batch_key,
                     requested_hs8_count=len(hs8),
-                    select_table_state=state,
+                    select_table_state=zero_state,
                     official_probe_total=0,
                     status="confirmed_empty",
                     encoding_name="png",
@@ -891,36 +975,35 @@ class SerialCustomsCollector:
                 )
             return [{"status": "confirmed_empty", "monthRange": month_range_label, "sha256": png_sha}]
 
+        probe = _probe_with_retries("预检")
+        total = int(probe["total"])
+        state = int(probe["state"])
+
+        if total >= MAX_SAFE_ROWS:
+            bisected = _bisect_if_possible(total)
+            if bisected is not None:
+                return bisected
+
+        if total == 0:
+            return _archive_zero_result_evidence(probe, state)
+
         raw_bytes = b""
         actual_sha = ""
         verified: dict[str, Any] = {}
         for verify_try in range(3):
             if verify_try > 0:
-                re_probe = self._probe_count_serial(
-                    year=year,
-                    start_month=start_month,
-                    end_month=end_month,
-                    month_flag=month_flag,
-                    flow=flow,
-                    grouping=grouping,
-                    hs8=hs8,
-                )
-                if re_probe.get("isHtmlBlocked") or re_probe.get("circuitBreakRequired"):
-                    reason_str = str(re_probe.get("reason") or "html_or_waf_challenge")
-                    self._save_checkpoint(halted_reason="html_or_waf_challenge")
-                    if self.ledger is not None:
-                        self.ledger.set_status(
-                            session_status=f"🔴 会话需人工重输验证码（已保存断点：`{reason_str}`）",
-                            current_activity=f"重预检 `{month_range_label} {flow}/{grouping} {batch_key}` 触发会话门禁，已暂停等待解锁",
-                        )
-                    if callable(self.on_session_expired):
-                        self.on_session_expired(reason_str)
-                    raise CustomsCircuitBreakError(
-                        f"Circuit breaker tripped during re-probe ({month_range_label} {flow}/{grouping}): {reason_str}"
+                re_probe = _probe_with_retries("重预检")
+                total = int(re_probe["total"])
+                state = int(re_probe["state"])
+                if total == 0:
+                    self.log(
+                        f"[reprobe-zero] Re-probe on {month_range_label} {flow}/{grouping} {batch_key} returned total=0; switching to verified zero-result evidence flow."
                     )
-                if re_probe.get("ok"):
-                    total = int(re_probe["total"])
-                    state = int(re_probe["state"])
+                    return _archive_zero_result_evidence(re_probe, state)
+                if total >= MAX_SAFE_ROWS:
+                    bisected = _bisect_if_possible(total)
+                    if bisected is not None:
+                        return bisected
 
             export_res: dict[str, Any] = {}
             for attempt in range(3):

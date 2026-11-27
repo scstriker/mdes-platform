@@ -369,29 +369,47 @@ export function verifyArchiveEntryIntegrity(entry) {
 }
 
 /**
- * 分块精确回查本次导入的全部 batchId 在发布后的真实状态，禁止忽略查不到的 ID 或吞掉接口错误。
+ * 分块精确回查本次导入的全部 batchId 在发布后的真实状态（含多跳 supersededBy 替代链终态），禁止忽略查不到的 ID 或吞掉接口错误。
  */
 export async function fetchImportedBatchesAfterPublish(client, dictVersion, importedBatchIds) {
-  const uniqueIds = [...new Set(importedBatchIds.map((id) => String(id).trim()).filter(Boolean))];
-  if (uniqueIds.length === 0) return [];
-  const allItems = [];
+  const initialIds = [...new Set(importedBatchIds.map((id) => String(id).trim()).filter(Boolean))];
+  if (initialIds.length === 0) return [];
+  const fetchedIds = new Set();
+  const byId = new Map();
+  let pendingIds = initialIds;
   const CHUNK = 50;
-  for (let i = 0; i < uniqueIds.length; i += CHUNK) {
-    const slice = uniqueIds.slice(i, i + CHUNK);
-    const url = `/api/trade/batches?dictVersion=${encodeURIComponent(dictVersion)}&batchIds=${encodeURIComponent(slice.join(","))}`;
-    const res = await client.sendJson(url);
-    if (!res || res.status !== 200 || !Array.isArray(res.json?.items)) {
-      throw new Error(
-        `查询导入批次发布终态失败 (chunk ${i / CHUNK + 1}): HTTP ${res?.status ?? "unknown"} ${JSON.stringify(res?.json ?? null)}`,
-      );
+  let chunkSeq = 0;
+
+  while (pendingIds.length > 0) {
+    const nextWave = new Set();
+    for (let i = 0; i < pendingIds.length; i += CHUNK) {
+      const slice = pendingIds.slice(i, i + CHUNK);
+      for (const id of slice) fetchedIds.add(id);
+      chunkSeq += 1;
+      const url = `/api/trade/batches?dictVersion=${encodeURIComponent(dictVersion)}&batchIds=${encodeURIComponent(slice.join(","))}`;
+      const res = await client.sendJson(url);
+      if (!res || res.status !== 200 || !Array.isArray(res.json?.items)) {
+        throw new Error(
+          `查询导入批次发布终态失败 (chunk ${chunkSeq}): HTTP ${res?.status ?? "unknown"} ${JSON.stringify(res?.json ?? null)}`,
+        );
+      }
+      for (const item of res.json.items) {
+        if (item && typeof item.batchId === "string" && item.batchId.trim()) {
+          byId.set(item.batchId.trim(), item);
+          const nextId = typeof item.supersededBy === "string" ? item.supersededBy.trim() : "";
+          if (nextId && !fetchedIds.has(nextId)) {
+            nextWave.add(nextId);
+          }
+        }
+      }
     }
-    allItems.push(...res.json.items);
+    pendingIds = [...nextWave];
   }
-  return allItems;
+  return [...byId.values()];
 }
 
 /**
- * 核验 POST /api/trade/publish 最终状态：仅当无对账差异且本次全部导入月份与全部 batchId 均已处于 published 状态时才视为成功。
+ * 核验 POST /api/trade/publish 最终状态：仅当无对账差异且本次全部导入月份与全部 batchId 均已处于 published 状态（或沿替代链指向已发布终态批次）时才视为成功。
  */
 export function verifyPublishOutcome({
   expectedMonths = [],
@@ -434,26 +452,44 @@ export function verifyPublishOutcome({
       );
     }
     const byId = new Map(batchesAfterPublish.map((b) => [b.batchId, b]));
-    const importedSet = new Set(uniqueImportedIds);
-    const missingBatches = [];
+    const missingBatches = new Set();
     const unpublishedBatches = [];
     for (const bid of uniqueImportedIds) {
-      const rec = byId.get(bid);
-      if (!rec) {
-        missingBatches.push(bid);
-        continue;
+      const visited = new Set();
+      let currId = bid;
+      let resolved = false;
+      while (currId) {
+        if (visited.has(currId)) {
+          unpublishedBatches.push(bid);
+          resolved = true;
+          break;
+        }
+        visited.add(currId);
+        const rec = byId.get(currId);
+        if (!rec) {
+          missingBatches.add(currId);
+          resolved = true;
+          break;
+        }
+        if (rec.publishState === "published") {
+          resolved = true;
+          break;
+        }
+        const nextId = typeof rec.supersededBy === "string" ? rec.supersededBy.trim() : "";
+        if (!nextId) {
+          unpublishedBatches.push(bid);
+          resolved = true;
+          break;
+        }
+        currId = nextId;
       }
-      if (rec.publishState === "published") {
-        continue;
+      if (!resolved) {
+        unpublishedBatches.push(bid);
       }
-      if (rec.supersededBy && importedSet.has(rec.supersededBy) && byId.get(rec.supersededBy)?.publishState === "published") {
-        continue;
-      }
-      unpublishedBatches.push(bid);
     }
-    if (missingBatches.length > 0) {
+    if (missingBatches.size > 0) {
       throw new Error(
-        `未能查到以下导入批次的发布终态（禁止跳过未核验 ID）：[${missingBatches.join(",")}]`,
+        `未能查到以下导入批次（或其替代链后继批次）的发布终态（禁止跳过未核验 ID）：[${[...missingBatches].join(",")}]`,
       );
     }
     if (unpublishedBatches.length > 0) {

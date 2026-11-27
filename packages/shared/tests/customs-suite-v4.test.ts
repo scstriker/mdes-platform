@@ -1310,4 +1310,327 @@ describe("G6 / AC-018：china_customs_suite.user.js v4.0 医疗器械 164 码字
       }
     }
   });
+
+  it("[R4 P1-1] 两个油猴脚本手动采集在预检和生成清单前按官网最新月份截断查询窗口，绝不将未公布月份确认为零", async () => {
+    for (const scriptPath of [TOP_SUITE_PATH, COLLECTOR_COPY_PATH]) {
+      const code = fs.readFileSync(scriptPath, "utf8");
+      const downloads: Array<{ filename: string; text: string }> = [];
+      const fetchedBodies: Array<{ url: string; body: string }> = [];
+      const blobToText = new Map<string, string>();
+      let blobSeq = 0;
+
+      const elementsById = new Map<string, Record<string, unknown>>();
+      const makeEl = (tag: string): Record<string, unknown> => {
+        const listeners = new Map<string, Array<(e?: unknown) => unknown>>();
+        const classSet = new Set<string>();
+        let innerHtmlVal = "";
+        const el: Record<string, unknown> = {
+          tagName: tag.toUpperCase(),
+          id: "",
+          value: "",
+          disabled: false,
+          style: {},
+          dataset: {},
+          classList: {
+            toggle(c: string) {
+              if (classSet.has(c)) classSet.delete(c);
+              else classSet.add(c);
+            },
+            contains(c: string) {
+              return classSet.has(c);
+            },
+          },
+          children: [] as unknown[],
+          appendChild(child: Record<string, unknown>) {
+            (this.children as unknown[]).push(child);
+            if (child.id) elementsById.set(String(child.id), child);
+            return child;
+          },
+          remove() {
+            if (this.id) elementsById.delete(String(this.id));
+          },
+          addEventListener(ev: string, fn: (e?: unknown) => unknown) {
+            const arr = listeners.get(ev) ?? [];
+            arr.push(fn);
+            listeners.set(ev, arr);
+          },
+          async click() {
+            if (tag === "a" && typeof this.download === "string" && typeof this.href === "string") {
+              downloads.push({ filename: this.download, text: blobToText.get(this.href) ?? "" });
+            }
+            for (const fn of listeners.get("click") ?? []) {
+              await fn({ target: this });
+            }
+          },
+        };
+        Object.defineProperty(el, "innerHTML", {
+          get: () => innerHtmlVal,
+          set: (v: string) => {
+            innerHtmlVal = v;
+            for (const m of v.matchAll(/id="([^"]+)"/g)) {
+              if (!elementsById.has(m[1])) {
+                const sub = makeEl("div");
+                sub.id = m[1];
+                if (m[1] === "inp-year") sub.value = "2026";
+                if (m[1] === "inp-m-start") sub.value = "1";
+                if (m[1] === "inp-m-end") sub.value = "12";
+                if (m[1] === "sel-month-flag") sub.value = "1";
+                if (m[1] === "sel-ietype") sub.value = "import";
+                if (m[1] === "sel-grouping") sub.value = "product";
+                if (m[1] === "sel-batch") sub.value = "PILOT";
+                elementsById.set(m[1], sub);
+              }
+            }
+          },
+        });
+        return el;
+      };
+
+      const portalFrameDoc = {
+        getElementById: (id: string) => {
+          if (id === "currentStartTime") return { value: "202504" };
+          if (id === "currentEndTime") return { value: "202610" };
+          return null;
+        },
+      };
+      const fakeDoc = {
+        readyState: "complete",
+        head: makeEl("head"),
+        body: makeEl("body"),
+        createElement: (tag: string) => makeEl(tag),
+        getElementById: (id: string) => elementsById.get(id) ?? null,
+        querySelector: (sel: string) => (sel === "iframe" ? { contentDocument: portalFrameDoc } : null),
+        querySelectorAll: () => [],
+      };
+
+      class FakeBlob {
+        content: string;
+        constructor(parts: unknown[]) {
+          this.content = parts
+            .map((p) => (p instanceof Uint8Array ? Buffer.from(p).toString("utf8") : String(p)))
+            .join("");
+        }
+      }
+
+      const csv2026JanToOct = [
+        "数据年月,商品编码,商品名称,美元",
+        ...Array.from({ length: 10 }, (_, idx) => `2026${String(idx + 1).padStart(2, "0")},90181100,心电图记录仪,100`),
+      ].join("\r\n") + "\r\n";
+
+      const mockFetch = async (url: string, init?: { body?: URLSearchParams | string }) => {
+        const bodyStr = init?.body ? String(init.body) : "";
+        fetchedBodies.push({ url, body: bodyStr });
+        if (url.includes("getQueryDataListByWhere")) {
+          return new Response('<input type="hidden" id="totalSize" value="10">', { status: 200 });
+        }
+        return new Response(new TextEncoder().encode(csv2026JanToOct), { status: 200 });
+      };
+
+      const fakeWindow: Record<string, unknown> = {};
+      fakeWindow.top = fakeWindow;
+      fakeWindow.self = fakeWindow;
+
+      const sandbox: Record<string, unknown> = {
+        window: fakeWindow,
+        document: fakeDoc,
+        Blob: FakeBlob,
+        URL: {
+          createObjectURL: (b: FakeBlob) => {
+            const key = `blob:r4p11/${++blobSeq}`;
+            blobToText.set(key, b.content);
+            return key;
+          },
+          revokeObjectURL: () => {},
+        },
+        TextEncoder,
+        TextDecoder,
+        URLSearchParams,
+        Uint8Array,
+        Uint32Array,
+        DataView,
+        ArrayBuffer,
+        crypto: globalThis.crypto,
+        Buffer,
+        alert: () => {},
+        setTimeout: (fn: () => void) => {
+          fn();
+          return 0;
+        },
+        clearTimeout,
+        console,
+        btoa: (str: string) => Buffer.from(str, "binary").toString("base64"),
+        atob: (b64: string) => Buffer.from(b64, "base64").toString("binary"),
+        fetch: mockFetch,
+      };
+      sandbox.globalThis = sandbox;
+      vm.createContext(sandbox);
+      vm.runInContext(code, sandbox, { filename: path.basename(scriptPath) });
+      await new Promise((resolve) => setTimeout(resolve, 25));
+
+      // 桥接函数单元测试：截断 2026-01..12 -> 2026-01..10，跳过 2026-11..12 与 2027-01..12
+      const bridge = sandbox.__CUSTOMS_SUITE_BRIDGE__ as {
+        clampWindowToLatestPublishedMonth: (opts: {
+          year: number;
+          startMonth: number;
+          endMonth: number;
+          currentEndTime?: string;
+        }) => { endMonth: number; clamped: boolean; skipped: boolean };
+      };
+      expect(bridge.clampWindowToLatestPublishedMonth({ year: 2026, startMonth: 1, endMonth: 12 })).toMatchObject({
+        endMonth: 10,
+        clamped: true,
+        skipped: false,
+      });
+      expect(bridge.clampWindowToLatestPublishedMonth({ year: 2026, startMonth: 11, endMonth: 12 })).toMatchObject({
+        skipped: true,
+      });
+      expect(bridge.clampWindowToLatestPublishedMonth({ year: 2027, startMonth: 1, endMonth: 12 })).toMatchObject({
+        skipped: true,
+      });
+
+      // 手动点击采集 2026 全年（1..12），必须被截断为 2026-01..2026-10，绝不把 2026-11/2026-12 写入清单
+      const startBtn = elementsById.get("btn-start-suite") as { click: () => Promise<void> };
+      await startBtn.click();
+      await new Promise((resolve) => setTimeout(resolve, 25));
+
+      expect(fetchedBodies.length).toBeGreaterThanOrEqual(2);
+      for (const req of fetchedBodies) {
+        const sp = new URLSearchParams(req.body);
+        expect(sp.get("year")).toBe("2026");
+        expect(sp.get("startMonth")).toBe("1");
+        expect(sp.get("endMonth")).toBe("10");
+      }
+
+      const manifestDl = downloads.find((d) => d.filename.endsWith(".manifest.json"));
+      expect(manifestDl).toBeDefined();
+      expect(manifestDl!.filename).toContain("2026_01-10");
+      expect(manifestDl!.filename).not.toContain("2026_01-12");
+      const parsedManifest = JSON.parse(manifestDl!.text) as { months: string[]; probeVerifiedZero?: boolean };
+      expect(parsedManifest.months).toEqual([
+        "2026-01",
+        "2026-02",
+        "2026-03",
+        "2026-04",
+        "2026-05",
+        "2026-06",
+        "2026-07",
+        "2026-08",
+        "2026-09",
+        "2026-10",
+      ]);
+      expect(parsedManifest.months).not.toContain("2026-11");
+      expect(parsedManifest.months).not.toContain("2026-12");
+
+      // 再测试用户手动选择完全未公布的 2026-11..12：不得发任何请求，不得下载任何清单
+      const reqCountBefore = fetchedBodies.length;
+      const dlCountBefore = downloads.length;
+      (elementsById.get("inp-m-start") as { value: string }).value = "11";
+      (elementsById.get("inp-m-end") as { value: string }).value = "12";
+      await startBtn.click();
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      expect(fetchedBodies.length).toBe(reqCountBefore);
+      expect(downloads.length).toBe(dlCountBefore);
+    }
+  });
+
+  it("[R4 P2-2] 三次修订链 A->B->C 发布 C 成功后，verifyPublishOutcome 与 fetchImportedBatchesAfterPublish 沿替代链核验终态", async () => {
+    const importerHref = pathToFileURL(path.resolve(here, "../../../scripts/import-customs-archive.mjs")).href;
+    const importerMod = (await import(importerHref)) as {
+      fetchImportedBatchesAfterPublish: (
+        client: { sendJson: (url: string) => Promise<{ status: number; json: unknown }> },
+        dictVersion: string,
+        importedBatchIds: string[],
+      ) => Promise<Array<{ batchId: string; publishState: string; supersededBy: string | null }>>;
+      verifyPublishOutcome: (args: {
+        expectedMonths: string[];
+        importedBatchIds?: string[];
+        publishResponse: { status: number; json: Record<string, unknown> };
+        batchesAfterPublish?: Array<{ batchId: string; publishState: string; supersededBy: string | null }> | null;
+      }) => void;
+    };
+
+    const pubOk = {
+      status: 200,
+      json: { published: true, publishedMonths: ["2024-01"], reconciliationNotes: {} },
+    };
+
+    // 场景 1：A -> B -> C（A/B 均为 staged，终态 C 为 published）=> 必须核验通过
+    expect(() =>
+      importerMod.verifyPublishOutcome({
+        expectedMonths: ["2024-01"],
+        importedBatchIds: ["batch-A", "batch-B", "batch-C"],
+        publishResponse: pubOk,
+        batchesAfterPublish: [
+          { batchId: "batch-A", publishState: "staged", supersededBy: "batch-B" },
+          { batchId: "batch-B", publishState: "staged", supersededBy: "batch-C" },
+          { batchId: "batch-C", publishState: "published", supersededBy: null },
+        ],
+      }),
+    ).not.toThrow();
+
+    // 场景 2：A -> B -> C 但终态 C 仍为 staged => 必须报错
+    expect(() =>
+      importerMod.verifyPublishOutcome({
+        expectedMonths: ["2024-01"],
+        importedBatchIds: ["batch-A", "batch-B", "batch-C"],
+        publishResponse: pubOk,
+        batchesAfterPublish: [
+          { batchId: "batch-A", publishState: "staged", supersededBy: "batch-B" },
+          { batchId: "batch-B", publishState: "staged", supersededBy: "batch-C" },
+          { batchId: "batch-C", publishState: "staged", supersededBy: null },
+        ],
+      }),
+    ).toThrow(/batch-A/);
+
+    // 场景 3：替代链循环 A -> B -> A 或缺失后继批次 => 必须报错
+    expect(() =>
+      importerMod.verifyPublishOutcome({
+        expectedMonths: ["2024-01"],
+        importedBatchIds: ["batch-A", "batch-B"],
+        publishResponse: pubOk,
+        batchesAfterPublish: [
+          { batchId: "batch-A", publishState: "staged", supersededBy: "batch-B" },
+          { batchId: "batch-B", publishState: "staged", supersededBy: "batch-A" },
+        ],
+      }),
+    ).toThrow(/batch-A/);
+
+    expect(() =>
+      importerMod.verifyPublishOutcome({
+        expectedMonths: ["2024-01"],
+        importedBatchIds: ["batch-A"],
+        publishResponse: pubOk,
+        batchesAfterPublish: [{ batchId: "batch-A", publishState: "staged", supersededBy: "batch-missing-B" }],
+      }),
+    ).toThrow(/batch-missing-B/);
+
+    // 场景 4：fetchImportedBatchesAfterPublish 自动沿 supersededBy 补齐中间及终态批次
+    const store = new Map<string, { batchId: string; publishState: string; supersededBy: string | null }>([
+      ["batch-A", { batchId: "batch-A", publishState: "staged", supersededBy: "batch-B" }],
+      ["batch-B", { batchId: "batch-B", publishState: "staged", supersededBy: "batch-C" }],
+      ["batch-C", { batchId: "batch-C", publishState: "published", supersededBy: null }],
+    ]);
+    const fetched = await importerMod.fetchImportedBatchesAfterPublish(
+      {
+        sendJson: async (url: string) => {
+          const ids = decodeURIComponent(url.split("batchIds=")[1] ?? "").split(",");
+          return {
+            status: 200,
+            json: { items: ids.map((id) => store.get(id)).filter(Boolean) },
+          };
+        },
+      },
+      "202601",
+      ["batch-A"],
+    );
+    expect(fetched.map((x) => x.batchId).sort()).toEqual(["batch-A", "batch-B", "batch-C"]);
+    expect(() =>
+      importerMod.verifyPublishOutcome({
+        expectedMonths: ["2024-01"],
+        importedBatchIds: ["batch-A"],
+        publishResponse: pubOk,
+        batchesAfterPublish: fetched,
+      }),
+    ).not.toThrow();
+  });
 });
