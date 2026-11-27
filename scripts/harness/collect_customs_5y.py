@@ -255,11 +255,26 @@ def verify_exported_csv(
 
     detail_row_count = 0
     summary_row_count = 0
+    summary_usd_sum_dec = Decimal("0")
+    summary_usd_nonzero = False
     usd_sum_dec = Decimal("0")
     returned_set: set[str] = set()
     unexpected_hs8: set[str] = set()
     observed_months: set[str] = set()
     out_of_range_months: set[str] = set()
+
+    def _record_summary_row(row_cells: list[str]) -> None:
+        nonlocal summary_row_count, summary_usd_sum_dec, summary_usd_nonzero
+        summary_row_count += 1
+        raw_sum_usd = (row_cells[usd_col].strip() if 0 <= usd_col < len(row_cells) else "").replace(",", "").strip()
+        if raw_sum_usd:
+            try:
+                val = Decimal(raw_sum_usd)
+                summary_usd_sum_dec += val
+                if val != 0:
+                    summary_usd_nonzero = True
+            except InvalidOperation:
+                summary_usd_nonzero = True
 
     for line_idx, row in enumerate(non_blank[1:], start=2):
         def get_col(col_idx: int) -> str:
@@ -269,7 +284,7 @@ def verify_exported_csv(
         hs8 = _normalize_hs8_cell(raw_hs)
         if not hs8:
             if not raw_hs or raw_hs.lower() in SUMMARY_LABELS or any(c.strip().lower() in SUMMARY_LABELS for c in row):
-                summary_row_count += 1
+                _record_summary_row(row)
                 continue
             raise CustomsExportVerificationError(f"invalid_hs8_at_line_{line_idx}:{raw_hs}")
 
@@ -278,7 +293,7 @@ def verify_exported_csv(
             gn = get_col(group_name_col)
             is_zero_world = gc in ("0", "00", "000") and (gn == "" or gn.lower() in SUMMARY_LABELS)
             if gc.lower() in SUMMARY_LABELS or gn.lower() in SUMMARY_LABELS or is_zero_world:
-                summary_row_count += 1
+                _record_summary_row(row)
                 continue
             if not gc or not gn:
                 raise CustomsExportVerificationError(f"missing_group_cell_at_line_{line_idx}")
@@ -330,10 +345,26 @@ def verify_exported_csv(
             raise CustomsExportVerificationError(
                 f"row_count_mismatch:exported={detail_row_count},summary={summary_row_count},probe_total=0"
             )
-    elif detail_row_count != expected_total and (detail_row_count + summary_row_count) != expected_total:
-        raise CustomsExportVerificationError(
-            f"row_count_mismatch:exported={detail_row_count},summary={summary_row_count},probe_total={expected_total}"
-        )
+    else:
+        if detail_row_count == 0 and (summary_usd_nonzero or summary_row_count > 0):
+            raise CustomsExportVerificationError(
+                f"summary_only_export_rejected:exported=0,summary={summary_row_count},"
+                f"summary_usd={summary_usd_sum_dec},probe_total={expected_total}"
+            )
+        if detail_row_count == 0:
+            raise CustomsExportVerificationError(
+                f"row_count_mismatch:exported=0,summary=0,probe_total={expected_total}"
+            )
+        if detail_row_count != expected_total:
+            if (detail_row_count + summary_row_count) != expected_total:
+                raise CustomsExportVerificationError(
+                    f"row_count_mismatch:exported={detail_row_count},summary={summary_row_count},probe_total={expected_total}"
+                )
+            if summary_row_count == 1 and summary_usd_nonzero and summary_usd_sum_dec != usd_sum_dec:
+                raise CustomsExportVerificationError(
+                    f"summary_total_mismatch:exported={detail_row_count},detail_usd={usd_sum_dec},"
+                    f"summary_usd={summary_usd_sum_dec},probe_total={expected_total}"
+                )
 
     if bridge_inspection and isinstance(bridge_inspection, dict):
         reported_count = bridge_inspection.get("detailRowCount")
@@ -452,6 +483,24 @@ def load_official_dict_batches(dict_csv_path: Path = DEFAULT_DICT_CSV_PATH, grou
     return batches
 
 
+def compute_official_select_table_state(
+    year: int,
+    start_month: int,
+    end_month: int,
+    current_start_time: str = "202504",
+    current_end_time: str = "202610",
+) -> int:
+    select_start = f"{int(year)}{int(start_month):02d}"
+    select_end = f"{int(year)}{int(end_month):02d}"
+    c_start = str(current_start_time or "202504").strip().replace("-", "")
+    c_end = str(current_end_time or "202610").strip().replace("-", "")
+    if select_start >= c_start and c_end >= select_end:
+        return 1
+    if c_start > select_end:
+        return 2
+    return 3
+
+
 def default_end_month_for_year(year: int, latest_complete_month: str = "2026-10") -> int:
     m = re.fullmatch(r"(\d{4})-(0[1-9]|1[0-2])", str(latest_complete_month).strip())
     if not m:
@@ -547,7 +596,10 @@ class SerialCustomsCollector:
                 "circuitBreakRequired": False,
                 "reason": "no_state_matched",
             }
-            for state in candidates:
+            primary_failure: dict[str, Any] | None = None
+            rejected_fallback_zero_states: list[int] = []
+            for idx, state in enumerate(candidates):
+                is_primary = idx == 0
                 probe = self._guard_single_flight_call(
                     lambda st=state: self.transport.probe_count(
                         year=year,
@@ -561,8 +613,35 @@ class SerialCustomsCollector:
                     )
                 )
                 last_probe = probe
-                if probe.get("isHtmlBlocked") or probe.get("circuitBreakRequired") or probe.get("ok"):
+                if probe.get("isHtmlBlocked") or probe.get("circuitBreakRequired"):
                     return probe
+                if probe.get("ok"):
+                    total_val = probe.get("total")
+                    if total_val is not None and int(total_val) == 0 and not is_primary:
+                        # 仅允许该月份所属主库（candidates[0]）查询成功后确认零值，绝不采信备用库的 0 条返回
+                        rejected_fallback_zero_states.append(int(state))
+                        continue
+                    return probe
+                if is_primary:
+                    primary_failure = dict(probe)
+                    if probe.get("transientError"):
+                        # 所属主库遭遇 502/503/504/网络抖动时立即交由外层退避重试主库，绝不改查备用库
+                        return probe
+            if primary_failure is not None:
+                if rejected_fallback_zero_states:
+                    primary_failure["rejectedFallbackZeroStates"] = rejected_fallback_zero_states
+                return primary_failure
+            if rejected_fallback_zero_states:
+                return {
+                    "ok": False,
+                    "state": None,
+                    "total": None,
+                    "isHtmlBlocked": False,
+                    "circuitBreakRequired": False,
+                    "transientError": False,
+                    "reason": "fallback_zero_rejected",
+                    "rejectedFallbackZeroStates": rejected_fallback_zero_states,
+                }
             return last_probe
 
         probe = self._guard_single_flight_call(
@@ -579,6 +658,28 @@ class SerialCustomsCollector:
         extra_reqs = max(0, int(probe.get("requestCount", 1)) - 1)
         if extra_reqs > 0:
             self.rate_policy.record_extra_requests(extra_reqs)
+        if probe.get("ok") and probe.get("total") is not None and int(probe["total"]) == 0:
+            get_anchor = getattr(self.transport, "get_portal_start_anchor", None)
+            if callable(get_anchor):
+                anchor_ym = get_anchor()
+                if isinstance(anchor_ym, str) and re.fullmatch(r"\d{6}", anchor_ym):
+                    expected_state = compute_official_select_table_state(
+                        year,
+                        start_month,
+                        end_month,
+                        current_start_time=anchor_ym,
+                        current_end_time=self.latest_complete_month.replace("-", ""),
+                    )
+                    if probe.get("state") is None or int(probe["state"]) != expected_state:
+                        return {
+                            "ok": False,
+                            "state": None,
+                            "total": None,
+                            "isHtmlBlocked": False,
+                            "circuitBreakRequired": False,
+                            "transientError": False,
+                            "reason": f"fallback_zero_state_mismatch:got={probe.get('state')},expected={expected_state}",
+                        }
         return probe
 
     def collect_task(
@@ -701,6 +802,8 @@ class SerialCustomsCollector:
             has_csv = csv_path.exists()
             has_png = png_path.exists()
             if not (mf_path.exists() and meta_path.exists() and (has_csv or has_png)):
+                return False
+            if has_csv and has_png:
                 return False
             try:
                 existing_mf = json.loads(mf_path.read_text(encoding="utf-8"))
@@ -909,6 +1012,9 @@ class SerialCustomsCollector:
             png_sha = sha256_hex(png_bytes)
             png_path = target_dir / f"{stem}.empty.png"
             png_path.write_bytes(png_bytes)
+            stale_csv_path = target_dir / f"{stem}.raw.csv"
+            if stale_csv_path.exists():
+                stale_csv_path.unlink()
 
             manifest_obj = {
                 "dictVersion": DICT_VERSION,
@@ -1135,6 +1241,9 @@ class SerialCustomsCollector:
         target_dir.mkdir(parents=True, exist_ok=True)
         csv_path = target_dir / f"{stem}.raw.csv"
         csv_path.write_bytes(raw_bytes)
+        stale_png_path = target_dir / f"{stem}.empty.png"
+        if stale_png_path.exists():
+            stale_png_path.unlink()
 
         manifest_obj = {
             "dictVersion": DICT_VERSION,
@@ -1477,7 +1586,13 @@ class BrowserHarnessTransport:
         )
         if isinstance(res, list) and res:
             return [int(x) for x in res]
-        return [2, 1, 3]
+        primary = compute_official_select_table_state(
+            year,
+            start_month,
+            end_month,
+            current_start_time=self.get_portal_start_anchor() or "202504",
+        )
+        return [primary, *[s for s in (1, 2, 3) if s != primary]]
 
     def check_session_ready(self) -> dict[str, Any]:
         payload = json.dumps({"minDelayMs": self._min_delay_ms, "maxDelayMs": self._max_delay_ms})
@@ -1608,11 +1723,14 @@ def resolve_archive_dir(args: argparse.Namespace) -> Path:
 
 
 def resolve_repo_ledger_path(args: argparse.Namespace) -> Path:
-    """Resolve real-time ledger path, isolating --pilot runs so they never overwrite the official ledger."""
+    """Resolve real-time ledger path, isolating --pilot and custom --archive-dir runs from the official ledger."""
     if getattr(args, "repo_ledger", None):
         return Path(args.repo_ledger)
+    archive_dir = resolve_archive_dir(args)
     if getattr(args, "pilot", False):
-        return resolve_archive_dir(args) / "_pilot_ledger.md"
+        return archive_dir / "_pilot_ledger.md"
+    if getattr(args, "archive_dir", None) and archive_dir.resolve() != DEFAULT_ARCHIVE_DIR.resolve():
+        return archive_dir / "_collection_ledger.md"
     return DEFAULT_REPO_LEDGER_PATH
 
 
@@ -1686,7 +1804,7 @@ def parse_cli_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--repo-ledger",
         default=None,
-        help="Path to real-time markdown ledger (defaults to isolated _pilot_ledger.md with --pilot, else docs/海关2022_2026实采进度实时台账.md)",
+        help="Path to real-time markdown ledger (defaults to isolated _pilot_ledger.md with --pilot, _collection_ledger.md with custom --archive-dir, else docs/海关2022_2026实采进度实时台账.md)",
     )
     p.add_argument("--artifact-ledger", default="", help="Optional path to artifact real-time markdown ledger")
     p.add_argument(

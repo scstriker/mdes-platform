@@ -20,7 +20,7 @@ const PLATFORM_ROOT = path.resolve(here, "..");
 const API_ROOT = path.join(PLATFORM_ROOT, "apps", "api");
 const GOLD_STANDARD_PATH = path.join(PLATFORM_ROOT, "data", "gold_standard_2024_37_hs8.json");
 
-function parseArgs(argv) {
+export function parseArgs(argv) {
   const opts = {
     archiveDir: path.join(PLATFORM_ROOT, "data", "customs-raw"),
     target: "local-d1",
@@ -457,34 +457,26 @@ export function verifyPublishOutcome({
     for (const bid of uniqueImportedIds) {
       const visited = new Set();
       let currId = bid;
-      let resolved = false;
       while (currId) {
         if (visited.has(currId)) {
           unpublishedBatches.push(bid);
-          resolved = true;
           break;
         }
         visited.add(currId);
         const rec = byId.get(currId);
         if (!rec) {
           missingBatches.add(currId);
-          resolved = true;
-          break;
-        }
-        if (rec.publishState === "published") {
-          resolved = true;
           break;
         }
         const nextId = typeof rec.supersededBy === "string" ? rec.supersededBy.trim() : "";
-        if (!nextId) {
-          unpublishedBatches.push(bid);
-          resolved = true;
-          break;
+        if (nextId) {
+          currId = nextId;
+          continue;
         }
-        currId = nextId;
-      }
-      if (!resolved) {
-        unpublishedBatches.push(bid);
+        if (rec.publishState !== "published") {
+          unpublishedBatches.push(bid);
+        }
+        break;
       }
     }
     if (missingBatches.size > 0) {
@@ -535,7 +527,7 @@ function normalizeWranglerPersistRoot(persistDir) {
   return resolved;
 }
 
-async function createLocalD1Client(persistDir) {
+export async function createLocalD1Client(persistDir, { writeToken = "", extraVars = [] } = {}) {
   const require = createRequire(import.meta.url);
   const wranglerBin = path.resolve(
     path.dirname(require.resolve("wrangler/package.json")),
@@ -544,6 +536,13 @@ async function createLocalD1Client(persistDir) {
   const persistRoot = normalizeWranglerPersistRoot(persistDir);
   const port = await findFreePort();
   const baseUrl = `http://127.0.0.1:${port}`;
+
+  const extraVarArgs = [];
+  for (const kv of Array.isArray(extraVars) ? extraVars : []) {
+    if (typeof kv === "string" && kv.includes(":")) {
+      extraVarArgs.push("--var", kv);
+    }
+  }
 
   const proc = spawn(
     process.execPath,
@@ -560,6 +559,7 @@ async function createLocalD1Client(persistDir) {
       "IMPORT_MAX_ROWS:100000",
       "--var",
       "ENABLE_TRADE_WRITE:1",
+      ...extraVarArgs,
     ],
     {
       cwd: API_ROOT,
@@ -594,7 +594,7 @@ async function createLocalD1Client(persistDir) {
     throw new Error(`等待本地 wrangler dev (${baseUrl}) 超时: ${stderrTail}`);
   }
 
-  const http = createHttpClient(baseUrl);
+  const http = createHttpClient(baseUrl, { writeToken });
   return {
     sendMultipart: http.sendMultipart,
     sendJson: http.sendJson,
@@ -611,8 +611,9 @@ async function createLocalD1Client(persistDir) {
   };
 }
 
-function createHttpClient(apiUrl, { writeToken = "" } = {}) {
-  const authHeaders = writeToken ? { "x-admin-token": writeToken } : {};
+export function createHttpClient(apiUrl, { writeToken = "" } = {}) {
+  const normalizedToken = String(writeToken || "").trim();
+  const authHeaders = normalizedToken ? { "x-admin-token": normalizedToken } : {};
   return {
     async sendMultipart(pathname, form) {
       const res = await fetch(`${apiUrl}${pathname}`, { method: "POST", headers: authHeaders, body: form });
@@ -629,6 +630,16 @@ function createHttpClient(apiUrl, { writeToken = "" } = {}) {
     },
     async dispose() {},
   };
+}
+
+export async function createImporterClient(
+  opts,
+  { httpFactory = createHttpClient, localD1Factory = createLocalD1Client } = {},
+) {
+  if (opts.target === "http") {
+    return httpFactory(opts.apiUrl, { writeToken: opts.writeToken });
+  }
+  return localD1Factory(opts.persistDir, { writeToken: opts.writeToken });
 }
 
 async function main() {
@@ -658,10 +669,7 @@ async function main() {
     process.exit(1);
   }
 
-  const client =
-    opts.target === "http"
-      ? createHttpClient(opts.apiUrl, { writeToken: opts.writeToken })
-      : await createLocalD1Client(opts.persistDir);
+  const client = await createImporterClient(opts);
 
   try {
     console.log(`[import-archive] 共发现 ${entriesToImport.length} 个可导入采集批次，开始完整度校验与 deferPublish=true 批量暂存...`);

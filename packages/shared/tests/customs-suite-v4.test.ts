@@ -1,10 +1,16 @@
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import vm from "node:vm";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
-import { validateTradeBulkManifest, validateTradeManifest } from "../src/trade";
+import {
+  parseCustomsCsvBytes,
+  parseMultiMonthCustomsCsvBytes,
+  validateTradeBulkManifest,
+  validateTradeManifest,
+} from "../src/trade";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const REPO_DOCS_SUITE_PATH = path.resolve(here, "../../../docs/china_customs_suite.user.js");
@@ -1633,4 +1639,332 @@ describe("G6 / AC-018：china_customs_suite.user.js v4.0 医疗器械 164 码字
       }),
     ).not.toThrow();
   });
+
+  it("[R5 P1-1] 汇总行金额非零且明细为空的 CSV 在油猴预检和共享后端解析器均被拒绝，绝不误判为零", () => {
+    const summaryOnly123 = new TextEncoder().encode("数据年月,商品编码,商品名称,美元\r\n202401,合计,合计,123\r\n");
+
+    for (const scriptPath of [TOP_SUITE_PATH, COLLECTOR_COPY_PATH]) {
+      const sb = loadUserscriptHeadless(scriptPath);
+      const bridge = sb.__CUSTOMS_SUITE_BRIDGE__ as {
+        inspectRawCustomsBytes: (bytes: Uint8Array, hs8: string[]) => { ok: boolean; reason?: string };
+      };
+      const insp = bridge.inspectRawCustomsBytes(summaryOnly123, ["90181100"]);
+      expect(insp.ok).toBe(false);
+      expect(insp.reason).toBe("summary_nonzero_without_detail_rows");
+    }
+
+    const singleParsed = parseCustomsCsvBytes(
+      summaryOnly123,
+      {
+        dictVersion: "202601",
+        month: "2024-01",
+        flow: "import",
+        currency: "USD",
+        grouping: "product",
+        hs8: ["90181100"],
+        emptyHs8: [],
+      },
+      { allowHeaderOnlyEmpty: true },
+    );
+    expect(singleParsed.ok).toBe(false);
+    if (!singleParsed.ok) {
+      expect(singleParsed.error.code).toBe("TRADE_CSV_INVALID");
+    }
+
+    const bulkParsed = parseMultiMonthCustomsCsvBytes(
+      summaryOnly123,
+      {
+        dictVersion: "202601",
+        months: ["2024-01"],
+        flow: "import",
+        currency: "USD",
+        grouping: "product",
+        hs8: ["90181100"],
+        emptyHs8: [],
+        probeVerifiedZero: true,
+      },
+      { allowHeaderOnlyEmpty: true },
+    );
+    expect(bulkParsed.ok).toBe(false);
+    if (!bulkParsed.ok) {
+      expect(bulkParsed.error.code).toBe("TRADE_CSV_INVALID");
+    }
+  });
+
+  it("[R5 P1-2] 历史库查询失败（503/500）时绝不采信当前库等备用库返回的 0 条结果，保留待重试状态", async () => {
+    for (const scriptPath of [TOP_SUITE_PATH, COLLECTOR_COPY_PATH]) {
+      // 场景 1：查询 2024-01，历史库 state=2 返回 503，当前库 state=1 返回 0 -> 必须返回 ok:false, transientError:true，且不降级查 state=1
+      const seenStates503: string[] = [];
+      const fetch503: typeof fetch = async (_url, init) => {
+        const sp = new URLSearchParams(String(init?.body ?? ""));
+        const st = sp.get("selectTableState") ?? "";
+        seenStates503.push(st);
+        if (st === "2") {
+          return new Response("Service Unavailable", { status: 503 });
+        }
+        return new Response(JSON.stringify({ total: 0 }), { status: 200 });
+      };
+      const sb503 = loadUserscriptHeadless(scriptPath, fetch503);
+      const bridge503 = sb503.__CUSTOMS_SUITE_BRIDGE__ as {
+        probeCount: (opts: Record<string, unknown>) => Promise<{
+          ok: boolean;
+          state: number | null;
+          total: number | null;
+          transientError?: boolean;
+          reason?: string;
+          requestCount?: number;
+        }>;
+      };
+      const res503 = await bridge503.probeCount({
+        year: 2024,
+        startMonth: 1,
+        endMonth: 1,
+        monthFlag: "1",
+        flow: "import",
+        grouping: "product",
+        hs8: ["90181100"],
+        skipPoliteWaitForUnitTest: true,
+      });
+      expect(res503.ok).toBe(false);
+      expect(res503.state).toBeNull();
+      expect(res503.total).toBeNull();
+      expect(res503.transientError).toBe(true);
+      expect(res503.reason).toBe("http_503");
+      expect(seenStates503).toEqual(["2"]);
+
+      // 场景 2：查询 2024-01，历史库 state=2 返回 500（非瞬时），备用库 state=1 与 state=3 返回 0 -> 必须拒绝备用库零值
+      const seenStates500: string[] = [];
+      const fetch500: typeof fetch = async (_url, init) => {
+        const sp = new URLSearchParams(String(init?.body ?? ""));
+        const st = sp.get("selectTableState") ?? "";
+        seenStates500.push(st);
+        if (st === "2") {
+          return new Response("Internal Error", { status: 500 });
+        }
+        return new Response(JSON.stringify({ total: 0 }), { status: 200 });
+      };
+      const sb500 = loadUserscriptHeadless(scriptPath, fetch500);
+      const bridge500 = sb500.__CUSTOMS_SUITE_BRIDGE__ as typeof bridge503;
+      const res500 = await bridge500.probeCount({
+        year: 2024,
+        startMonth: 1,
+        endMonth: 1,
+        monthFlag: "1",
+        flow: "import",
+        grouping: "product",
+        hs8: ["90181100"],
+        skipPoliteWaitForUnitTest: true,
+      });
+      expect(res500.ok).toBe(false);
+      expect(res500.state).toBeNull();
+      expect(res500.total).toBeNull();
+      expect(res500.reason).toBe("http_500");
+      expect(seenStates500).toEqual(["2", "1", "3"]);
+
+      // 场景 3：查询 2026-01（属于当前库 state=1），当前库返回 503、历史库 state=2 返回 0 -> 同样必须返回 ok:false
+      const seenStates2026: string[] = [];
+      const fetch2026: typeof fetch = async (_url, init) => {
+        const sp = new URLSearchParams(String(init?.body ?? ""));
+        const st = sp.get("selectTableState") ?? "";
+        seenStates2026.push(st);
+        if (st === "1") {
+          return new Response("Service Unavailable", { status: 503 });
+        }
+        return new Response(JSON.stringify({ total: 0 }), { status: 200 });
+      };
+      const sb2026 = loadUserscriptHeadless(scriptPath, fetch2026);
+      const bridge2026 = sb2026.__CUSTOMS_SUITE_BRIDGE__ as typeof bridge503;
+      const res2026 = await bridge2026.probeCount({
+        year: 2026,
+        startMonth: 1,
+        endMonth: 1,
+        monthFlag: "1",
+        flow: "import",
+        grouping: "product",
+        hs8: ["90181100"],
+        skipPoliteWaitForUnitTest: true,
+      });
+      expect(res2026.ok).toBe(false);
+      expect(res2026.transientError).toBe(true);
+      expect(seenStates2026).toEqual(["1"]);
+    }
+  });
+
+  it("[R5 P2-1] 修订链 A(staged)->B(published)->C(staged) 重放 A 时必须走到终态 C 并因未发布而报错", async () => {
+    const importerHref = pathToFileURL(path.resolve(here, "../../../scripts/import-customs-archive.mjs")).href;
+    const importerMod = (await import(importerHref)) as {
+      verifyPublishOutcome: (args: {
+        expectedMonths: string[];
+        importedBatchIds?: string[];
+        publishResponse: { status: number; json: Record<string, unknown> };
+        batchesAfterPublish?: Array<{ batchId: string; publishState: string; supersededBy: string | null }> | null;
+      }) => void;
+    };
+
+    const pubOk = {
+      status: 200,
+      json: { published: true, publishedMonths: ["2024-01"], reconciliationNotes: {} },
+    };
+
+    // 重放 A：中间批次 B 虽然是 published，但被最新修订 C(staged) 替代 -> 必须走到 C 并拒绝通过
+    expect(() =>
+      importerMod.verifyPublishOutcome({
+        expectedMonths: ["2024-01"],
+        importedBatchIds: ["batch-A"],
+        publishResponse: pubOk,
+        batchesAfterPublish: [
+          { batchId: "batch-A", publishState: "staged", supersededBy: "batch-B" },
+          { batchId: "batch-B", publishState: "published", supersededBy: "batch-C" },
+          { batchId: "batch-C", publishState: "staged", supersededBy: null },
+        ],
+      }),
+    ).toThrow(/batch-A/);
+
+    // 重放已发布的 B 但其被暂存中的 C 替代 -> 同样必须报错
+    expect(() =>
+      importerMod.verifyPublishOutcome({
+        expectedMonths: ["2024-01"],
+        importedBatchIds: ["batch-B"],
+        publishResponse: pubOk,
+        batchesAfterPublish: [
+          { batchId: "batch-B", publishState: "published", supersededBy: "batch-C" },
+          { batchId: "batch-C", publishState: "staged", supersededBy: null },
+        ],
+      }),
+    ).toThrow(/batch-B/);
+
+    // 终态 C 也已发布时 -> 核验通过
+    expect(() =>
+      importerMod.verifyPublishOutcome({
+        expectedMonths: ["2024-01"],
+        importedBatchIds: ["batch-A"],
+        publishResponse: pubOk,
+        batchesAfterPublish: [
+          { batchId: "batch-A", publishState: "staged", supersededBy: "batch-B" },
+          { batchId: "batch-B", publishState: "published", supersededBy: "batch-C" },
+          { batchId: "batch-C", publishState: "published", supersededBy: null },
+        ],
+      }),
+    ).not.toThrow();
+
+    // B 已发布但指向缺失的后继 C -> 必须报错并指出缺失批次 C
+    expect(() =>
+      importerMod.verifyPublishOutcome({
+        expectedMonths: ["2024-01"],
+        importedBatchIds: ["batch-A"],
+        publishResponse: pubOk,
+        batchesAfterPublish: [
+          { batchId: "batch-A", publishState: "staged", supersededBy: "batch-B" },
+          { batchId: "batch-B", publishState: "published", supersededBy: "batch-C-missing" },
+        ],
+      }),
+    ).toThrow(/batch-C-missing/);
+  });
+
+  it("[R5 P2-4] local-d1 导入模式将显式 --write-token 传递给本地客户端并在写请求携带 x-admin-token", async () => {
+    const importerHref = pathToFileURL(path.resolve(here, "../../../scripts/import-customs-archive.mjs")).href;
+    const importerMod = (await import(importerHref)) as {
+      parseArgs: (argv: string[]) => { target: string; persistDir: string; writeToken: string };
+      createHttpClient: (
+        apiUrl: string,
+        opts?: { writeToken?: string },
+      ) => {
+        sendMultipart: (pathname: string, form: FormData) => Promise<{ status: number; json: Record<string, unknown> }>;
+        sendJson: (pathname: string, method?: string, body?: unknown) => Promise<{ status: number; json: Record<string, unknown> }>;
+      };
+      createImporterClient: (
+        opts: { target: string; apiUrl?: string; persistDir: string; writeToken: string },
+        factories?: {
+          httpFactory?: (apiUrl: string, opts?: { writeToken?: string }) => unknown;
+          localD1Factory?: (persistDir: string, opts?: { writeToken?: string }) => Promise<unknown>;
+        },
+      ) => Promise<unknown>;
+      createLocalD1Client: (
+        persistDir: string,
+        opts?: { writeToken?: string; extraVars?: string[] },
+      ) => Promise<{
+        sendJson: (pathname: string, method?: string, body?: unknown) => Promise<{ status: number; json: Record<string, unknown> }>;
+        dispose: () => Promise<void>;
+      }>;
+    };
+
+    // 1) 参数解析与 local-d1 工厂透传 writeToken
+    const parsed = importerMod.parseArgs(["--target", "local-d1", "--persist-dir", "/tmp/d1", "--write-token", "tok-local-99"]);
+    expect(parsed.target).toBe("local-d1");
+    expect(parsed.writeToken).toBe("tok-local-99");
+
+    let capturedLocalArgs: { persistDir: string; writeToken?: string } | null = null;
+    await importerMod.createImporterClient(parsed, {
+      localD1Factory: async (persistDir, opts) => {
+        capturedLocalArgs = { persistDir, writeToken: opts?.writeToken };
+        return { ok: true };
+      },
+    });
+    expect(capturedLocalArgs).toEqual({ persistDir: parsed.persistDir, writeToken: "tok-local-99" });
+
+    // 2) createHttpClient 对 multipart 与 JSON 请求均携带 x-admin-token（否则被模拟 403 门禁拒绝）
+    const seenTokens: Array<string | undefined> = [];
+    const srv = http.createServer((req, res) => {
+      const tok = typeof req.headers["x-admin-token"] === "string" ? req.headers["x-admin-token"] : undefined;
+      seenTokens.push(tok);
+      if (tok !== "tok-local-99") {
+        res.writeHead(403, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: { code: "TRADE_WRITE_DISABLED" } }));
+        return;
+      }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: true }));
+    });
+    await new Promise<void>((resolve) => srv.listen(0, "127.0.0.1", () => resolve()));
+    try {
+      const addr = srv.address();
+      const port = typeof addr === "object" && addr ? addr.port : 0;
+      const baseUrl = `http://127.0.0.1:${port}`;
+
+      const unauth = importerMod.createHttpClient(baseUrl);
+      const r403 = await unauth.sendJson("/api/trade/publish", "POST", { dictVersion: "202601" });
+      expect(r403.status).toBe(403);
+
+      const auth = importerMod.createHttpClient(baseUrl, { writeToken: "tok-local-99" });
+      const form = new FormData();
+      form.append("manifest", "{}");
+      const rMulti = await auth.sendMultipart("/api/trade/import-bulk", form);
+      const rJson = await auth.sendJson("/api/trade/publish", "POST", { dictVersion: "202601" });
+      expect(rMulti.status).toBe(200);
+      expect(rJson.status).toBe(200);
+      expect(seenTokens).toEqual([undefined, "tok-local-99", "tok-local-99"]);
+    } finally {
+      await new Promise<void>((resolve) => srv.close(() => resolve()));
+    }
+
+    // 3) 真实本地 wrangler dev 配置 TRADE_WRITE_TOKEN 时，createLocalD1Client 携带正确 writeToken 放行，缺省令牌被 403 拦截
+    const tmpPersist = fs.mkdtempSync(path.join(os.tmpdir(), "mdes-local-d1-tok-"));
+    const tokenVal = "local-d1-test-write-token";
+    const clientNoTok = await importerMod.createLocalD1Client(tmpPersist, {
+      extraVars: [`TRADE_WRITE_TOKEN:${tokenVal}`],
+    });
+    try {
+      const denied = await clientNoTok.sendJson("/api/trade/publish", "POST", { dictVersion: "202601" });
+      expect(denied.status).toBe(403);
+    } finally {
+      await clientNoTok.dispose();
+    }
+
+    const clientWithTok = await importerMod.createLocalD1Client(tmpPersist, {
+      writeToken: tokenVal,
+      extraVars: [`TRADE_WRITE_TOKEN:${tokenVal}`],
+    });
+    try {
+      const allowed = await clientWithTok.sendJson("/api/trade/publish", "POST", { dictVersion: "202601" });
+      expect(allowed.status).not.toBe(403);
+      expect((allowed.json?.error as { code?: string } | undefined)?.code).not.toBe("TRADE_WRITE_DISABLED");
+    } finally {
+      await clientWithTok.dispose();
+      try {
+        fs.rmSync(tmpPersist, { recursive: true, force: true, maxRetries: 5, retryDelay: 250 });
+      } catch {
+        // Windows 下 workerd 子进程释放 SQLite 临时文件句柄可能略有延迟
+      }
+    }
+  }, 60_000);
 });
