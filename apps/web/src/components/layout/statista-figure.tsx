@@ -170,19 +170,19 @@ export function StatistaFigure({
     <figure
       id={id}
       className={cn(
-        "flex flex-col justify-between border border-border border-t-2 border-t-brand-navy bg-surface",
+        "flex min-w-0 max-w-full flex-col justify-between border border-border border-t-2 border-t-brand-navy bg-surface",
         className,
       )}
     >
-      <div>
+      <div className="min-w-0">
         {/* 1. Header Zone */}
         <div className="flex flex-wrap items-start justify-between gap-3 border-b border-border px-4 py-3.5 md:px-5">
-          <div className="grid min-w-0 flex-1 gap-1">
+          <div className="grid min-w-0 basis-56 flex-1 grid-cols-1 gap-1">
             {eyebrow && <p className="label text-brand-navy">{eyebrow}</p>}
             <h3 className="title-sub text-ink">{title}</h3>
             <p className="body-sm text-ink-muted">{subtitle}</p>
           </div>
-          <div className="flex shrink-0 flex-wrap items-center gap-2">
+          <div className="flex min-w-0 max-w-full flex-wrap items-center gap-2">
             {badge && (
               <Tag size="sm" tone={badge.tone ?? "info"}>
                 {badge.label}
@@ -263,12 +263,12 @@ export function StatistaFigure({
 
       {/* 4. Source & Export Footer Strip */}
       <figcaption className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1.5 border-t border-border bg-surface-sunken px-4 py-2.5 caption text-ink-muted md:px-5">
-        <div className="min-w-0 flex-1">
+        <div className="min-w-0 basis-48 flex-1">
           <span className="font-semibold text-ink">数据来源：</span>
           <span>{source}</span>
           {note && <span> · 注：{note}</span>}
         </div>
-        <div className="flex shrink-0 flex-wrap items-center gap-3">
+        <div className="flex min-w-0 max-w-full flex-wrap items-center gap-3">
           <button
             type="button"
             onClick={handleExportSvg}
@@ -609,16 +609,16 @@ export function StatisticFigure({
       id={id ?? statistic.slug}
       data-statistic-id={statistic.statistic_id}
       className={cn(
-        "flex flex-col justify-between border border-border border-t-2 border-t-brand-navy bg-surface",
+        "flex min-w-0 max-w-full flex-col justify-between border border-border border-t-2 border-t-brand-navy bg-surface",
         className,
       )}
     >
       {inRouter && <RouterNavigateBridge navRef={navRef} />}
 
-      <div>
+      <div className="min-w-0">
         {/* 1. Header Zone */}
         <div className="flex flex-wrap items-start justify-between gap-3 border-b border-border px-4 py-3.5 md:px-5">
-          <div className="grid min-w-0 flex-1 gap-1">
+          <div className="grid min-w-0 basis-56 flex-1 grid-cols-1 gap-1">
             {resolvedEyebrow && <p className="label text-brand-navy">{resolvedEyebrow}</p>}
             <h3 className="title-sub text-ink">
               {resolvedTitleHref ? (
@@ -638,7 +638,7 @@ export function StatisticFigure({
             <p className="body-sm text-ink-muted">{projected.subtitle}</p>
           </div>
 
-          <div className="flex shrink-0 flex-wrap items-center gap-2">
+          <div className="flex min-w-0 max-w-full flex-wrap items-center gap-2">
             <Tag size="sm" tone="info">
               {statistic.summary_kpi.period} · {kpiHeadline}
             </Tag>
@@ -934,7 +934,7 @@ export function StatisticFigure({
 
       {/* 4. Source, Citation, Copy for AI & Multi-Format Export Footer */}
       <figcaption className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 border-t border-border bg-surface-sunken px-4 py-2.5 caption text-ink-muted md:px-5">
-        <div className="min-w-0 flex-1">
+        <div className="min-w-0 basis-48 flex-1">
           <span className="font-semibold text-ink">数据来源：</span>
           {firstSource ? (
             <span>
@@ -947,7 +947,7 @@ export function StatisticFigure({
           <span> · 版本 v{statistic.version}</span>
         </div>
 
-        <div className="flex shrink-0 flex-wrap items-center gap-2">
+        <div className="flex min-w-0 max-w-full flex-wrap items-center gap-2">
           {/* 复制引用 */}
           <DropdownMenu>
             <DropdownMenuTrigger asChild>

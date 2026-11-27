@@ -428,7 +428,7 @@ export const PUBLIC_SEARCH_ITEMS: readonly SearchSuggestionItem[] = [
         { label: "前三大进口来源国", value: h.topOrigins },
         { label: "供应链结构说明", value: h.supplyNote },
       ],
-      keywords: `${h.hsCode} ${h.itemName} ${h.category} ${h.topOrigins} ${h.supplyNote} ${h.cr3}`.toLowerCase(),
+      keywords: `${h.hsCode} ${h.hsCode.replace(/\./g, "")} ${h.itemName} ${h.category} ${h.topOrigins} ${h.supplyNote} ${h.cr3}`.toLowerCase(),
     };
   }),
   ...TRADE_PARTNER_ROWS.map((p): SearchSuggestionItem => {

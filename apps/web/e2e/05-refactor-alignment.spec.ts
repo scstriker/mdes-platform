@@ -50,10 +50,22 @@ test.describe("前端重构专项验收：部委智库门户、同轴范围搜�
     const routes = [
       "/",
       "/search?q=手术",
+      "/statistics",
+      "/statistics/STAT-ENT-UIH-RD-RATIO",
+      "/markets",
+      "/technologies",
       "/products",
+      "/products/umr-jupiter",
       "/enterprises",
+      "/enterprises/united-imaging",
+      "/regulation/registrations",
+      "/institutions",
+      "/policies",
+      "/standards",
+      "/sources",
       "/trade",
       "/reports",
+      "/reports/mdes-2026q3-high-end-imaging-report",
       "/system",
       "/system/01",
       "/system/35",
@@ -78,42 +90,29 @@ test.describe("前端重构专项验收：部委智库门户、同轴范围搜�
     await expect(page).toHaveURL(/\/admin\/observations\?indicator_id=TRD-001$/);
   });
 
-  test("3. 首页轮播、全站跨库检索及子页默认范围搜索建议闭环", async ({ page }) => {
+  test("3. 智库总览首页核心判断与依据图卡、全站跨库检索及子页默认范围搜索闭环", async ({ page }) => {
     await page.goto("/");
     const h1 = page.locator("main h1");
     await expect(h1).toContainText("医疗器械产业运行监测报告");
     await page.waitForLoadState("networkidle");
 
-    // 验证首页图片均完整加载（含 Gemini 多模态视觉图）
-    await expect
-      .poll(async () => {
-        const statuses = await page.locator("main img").evaluateAll((imgs) =>
-          imgs.map((img) => ({
-            complete: (img as HTMLImageElement).complete,
-            w: (img as HTMLImageElement).naturalWidth,
-          })),
-        );
-        return statuses.length >= 4 && statuses.every((s) => s.complete && s.w > 0);
-      })
-      .toBe(true);
-
-    // 验证左侧底缘缩略图、左右轻箭头与右侧分页圆点三向联动切换
-    await page.getByRole("button", { name: /^第 2 帧/ }).click();
-    await expect(h1).toContainText("创新医疗器械审评提速");
-    await page.getByRole("button", { name: "下一帧" }).click();
-    await expect(h1).toContainText("国产占比连续五年攀升至七成");
-    await page.getByRole("button", { name: /^切换到第 4 帧/ }).click();
-    await expect(h1).toContainText("贸易顺差稳步扩大");
+    // 验证智库总览首页左侧「查看依据」直达锁定的统计快照，且首屏趋势图与省域对比图卡完整呈现
+    const evidenceLink = page.getByRole("link", { name: /查看依据/ });
+    await expect(evidenceLink).toBeVisible();
+    await expect(evidenceLink).toHaveAttribute("href", "/statistics/STAT-REG-CLASS3-TREND?v=2026.09.1");
+    await expect(page.locator("#fig-overview-class3-trend")).toBeVisible();
+    await expect(page.locator("#fig-overview-provinces")).toBeVisible();
+    await expect(page.locator("#fig-overview-density")).toBeVisible();
 
     // 验证前台顶部搜索栏选择领域并检索统一进入独立搜索结果页 /search（零无关宏观图表遮挡）
-    const bannerSearch = page.locator("section").first().locator("form[role=search]");
+    const bannerSearch = page.getByRole("region", { name: "全站搜索" }).locator("form[role=search]");
     await bannerSearch.getByLabel("检索范围").selectOption("/products");
-    await bannerSearch.locator("input").first().fill("磁共振");
+    await bannerSearch.locator("#system-indicator-search").fill("磁共振");
     await bannerSearch.getByRole("button", { name: /检索/ }).click();
     await expect(page).toHaveURL(/\/search\?q=.*&scope=products/);
     await expect(page.getByRole("heading", { level: 1, name: /「磁共振」的搜索结果/ })).toBeVisible();
     await expect(page.locator('[data-slot="figure-canvas"]')).toHaveCount(0);
-    await expect(page.locator("main")).toContainText("5.0T 超高场全身磁共振成像系统");
+    await expect(page.locator("main")).toContainText("磁共振成像系统 · uMR Jupiter");
     await expect(page.getByLabel("检索范围")).toHaveValue("/products");
     await expect(page.getByText("领域：注册与产品")).toBeVisible();
   });

@@ -50,9 +50,9 @@ export default function OverviewPage() {
     <div className="w-full bg-surface">
       {/* 第 1 层：本期核心判断（左） + 同版本支撑统计图（右） */}
       <section aria-labelledby="overview-hero-heading" className="border-b border-border bg-surface py-8 md:py-10">
-        <div className="mx-auto grid w-full max-w-content gap-8 px-4 md:px-8 lg:grid-cols-12 lg:items-start">
+        <div className="mx-auto grid w-full max-w-content grid-cols-1 gap-8 px-4 md:px-8 lg:grid-cols-12 lg:items-start">
           {/* 左 5 列：期次、本期总判断、证据要点与「查看依据」 */}
-          <div className="grid content-start gap-5 lg:col-span-5">
+          <div className="grid min-w-0 grid-cols-1 content-start gap-5 lg:col-span-5">
             <div className="flex flex-wrap items-center gap-2">
               <Tag tone="info">{ISSUE.periodCode}</Tag>
               <Tag>{ISSUE.issueNo}</Tag>
@@ -121,7 +121,7 @@ export default function OverviewPage() {
 
       {/* 第 2 层：市场 · 技术 · 产品 · 企业 四组研究问题带 + 贸易与出版物直达 */}
       <section aria-labelledby="overview-questions-heading" className="border-b border-border bg-surface-sunken py-8 md:py-10">
-        <div className="mx-auto grid w-full max-w-content gap-6 px-4 md:px-8">
+        <div className="mx-auto grid w-full max-w-content grid-cols-1 gap-6 px-4 md:px-8">
           <div className="flex flex-wrap items-end justify-between gap-3">
             <div className="grid gap-1">
               <SectionTitle level={2} as="h2" number="一">
@@ -179,8 +179,8 @@ export default function OverviewPage() {
           </div>
 
           {/* 进出口贸易与本期专题出版物横条 */}
-          <div className="grid gap-6 border border-border bg-surface p-5 lg:grid-cols-12 lg:items-center">
-            <div className="grid gap-1.5 lg:col-span-6">
+          <div className="grid grid-cols-1 gap-6 border border-border bg-surface p-5 lg:grid-cols-12 lg:items-center">
+            <div className="grid min-w-0 grid-cols-1 gap-1.5 lg:col-span-6">
               <div className="flex flex-wrap items-center gap-2">
                 <Tag>海关 202601 字典 · 164 项 HS8</Tag>
                 <span className="caption text-ink-muted">V3 指标 38 · 整机与零件分列对账</span>
@@ -200,17 +200,17 @@ export default function OverviewPage() {
               </div>
             </div>
 
-            <div className="border-t border-border pt-4 lg:col-span-6 lg:border-t-0 lg:border-l lg:pt-0 lg:pl-6">
+            <div className="min-w-0 border-t border-border pt-4 lg:col-span-6 lg:border-t-0 lg:border-l lg:pt-0 lg:pl-6">
               {ISSUE.homepageBriefings[0] && (
                 <Link
                   to={ISSUE.homepageBriefings[0].href}
-                  className="group flex items-start gap-4 focus-ring"
+                  className="group flex min-w-0 items-start gap-4 focus-ring"
                 >
                   <ReportCoverThumb
                     variant={ISSUE.homepageBriefings[0].coverVariant}
                     label={ISSUE.homepageBriefings[0].coverLabel}
                   />
-                  <div className="grid min-w-0 flex-1 gap-1">
+                  <div className="grid min-w-0 flex-1 grid-cols-1 gap-1">
                     <div className="flex flex-wrap items-center gap-2 caption text-ink-muted">
                       <span className="font-semibold text-brand-navy">{ISSUE.homepageBriefings[0].issueTag}</span>
                       <span>·</span>
@@ -234,7 +234,7 @@ export default function OverviewPage() {
 
       {/* 第 3 层：最新发布统计成果条 */}
       <section aria-labelledby="overview-latest-stats-heading" className="border-b border-border bg-surface py-8 md:py-10">
-        <div className="mx-auto grid w-full max-w-content gap-5 px-4 md:px-8">
+        <div className="mx-auto grid w-full max-w-content grid-cols-1 gap-5 px-4 md:px-8">
           <div className="flex flex-wrap items-end justify-between gap-3">
             <div className="grid gap-1">
               <SectionTitle level={2} as="h2" number="二">
@@ -255,8 +255,8 @@ export default function OverviewPage() {
                 ? item.summary_kpi.headline_value
                 : `${item.summary_kpi.headline_value} ${item.summary_kpi.unit}`;
               return (
-                <li key={item.statistic_id} className="flex items-start justify-between gap-4 border-b border-border py-3.5 last:border-b-0">
-                  <div className="grid min-w-0 flex-1 gap-1">
+                <li key={item.statistic_id} className="flex min-w-0 items-start justify-between gap-4 border-b border-border py-3.5 last:border-b-0">
+                  <div className="grid min-w-0 flex-1 grid-cols-1 gap-1">
                     <div className="flex flex-wrap items-center gap-2 caption text-ink-muted">
                       <span className="code text-brand-navy">{item.statistic_id}</span>
                       <Tag size="sm">v{item.version}</Tag>
@@ -265,7 +265,7 @@ export default function OverviewPage() {
                     <TextLink to={`/statistics/${encodeURIComponent(item.statistic_id)}`} className="body font-semibold text-ink">
                       {item.title}
                     </TextLink>
-                    <p className="truncate caption text-ink-muted">来源：{item.source_org}</p>
+                    <p className="min-w-0 truncate caption text-ink-muted">来源：{item.source_org}</p>
                   </div>
                   <div className="shrink-0 text-right">
                     <p className="title-nav tabular-nums text-brand-navy">{kpiText}</p>
@@ -282,7 +282,7 @@ export default function OverviewPage() {
 
       {/* 第 4 层：省域产业集聚与持证密度比较（自原企业页迁入，保留时点与生产企业数分母说明） */}
       <section aria-labelledby="overview-provincial-heading" className="bg-surface-sunken py-8 md:py-10">
-        <div className="mx-auto grid w-full max-w-content gap-6 px-4 md:px-8">
+        <div className="mx-auto grid w-full max-w-content grid-cols-1 gap-6 px-4 md:px-8">
           <div className="flex flex-wrap items-end justify-between gap-3">
             <div className="grid gap-1">
               <SectionTitle level={2} as="h2" number="三">
@@ -301,15 +301,16 @@ export default function OverviewPage() {
           <div id="fig-enterprises-provinces" className="sr-only" aria-hidden="true" />
           <div id="fig-enterprises-density" className="sr-only" aria-hidden="true" />
 
-          <div className="grid gap-6 lg:grid-cols-2">
+          <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
             <StatisticFigure
               id="fig-overview-provinces"
               eyebrow="省域对比图 1 · 期末时点存量"
               statistic={provStockStat}
               height={296}
+              className="min-w-0"
             />
 
-            <div className="grid content-start gap-2">
+            <div className="grid min-w-0 grid-cols-1 content-start gap-2">
               <StatisticFigure
                 id="fig-overview-density"
                 eyebrow="省域对比图 2 · 比率与分母核对"
