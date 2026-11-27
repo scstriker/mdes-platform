@@ -963,12 +963,27 @@
     let detailRowCount = 0;
     let summaryRowCount = 0;
     let usdMicrosTotal = 0n;
+    let summaryUsdMicrosTotal = 0n;
+    let summaryUsdNonZero = false;
+
+    const recordSummaryRow = (rowCells) => {
+      summaryRowCount++;
+      const rawSummaryUsd = String(rowCells[usdColIndex] ?? "").trim();
+      if (!rawSummaryUsd) return;
+      const summaryMicros = parseUsdMicrosReadOnly(rawSummaryUsd);
+      if (summaryMicros === null) {
+        summaryUsdNonZero = true;
+      } else {
+        summaryUsdMicrosTotal += summaryMicros;
+        if (summaryMicros !== 0n) summaryUsdNonZero = true;
+      }
+    };
 
     for (let rIdx = 1; rIdx < nonBlank.length; rIdx++) {
       const row = nonBlank[rIdx];
       const hs8 = extractNormalizedHs8Cell(row[hsColIndex]);
       if (!hs8) {
-        summaryRowCount++;
+        recordSummaryRow(row);
         continue;
       }
       const isSecondaryTotal = secondaryLabelIndices.some((cIdx) => {
@@ -976,7 +991,7 @@
         return val === "合计" || val === "总计" || val === "全国合计";
       });
       if (isSecondaryTotal) {
-        summaryRowCount++;
+        recordSummaryRow(row);
         continue;
       }
       if (periodColIndex >= 0) {
@@ -993,6 +1008,19 @@
       if (micros !== null) {
         usdMicrosTotal += micros;
       }
+    }
+
+    if (detailRowCount === 0 && summaryUsdNonZero) {
+      return {
+        ok: false,
+        reason: "summary_nonzero_without_detail_rows",
+        decoderName,
+        byteLength: view.byteLength,
+        headerColumns,
+        detailRowCount: 0,
+        summaryRowCount,
+        summaryUsdSum: formatUsdMicros(summaryUsdMicrosTotal)
+      };
     }
 
     const requestedValid = requestedHs8.map((c) => String(c).trim());
@@ -1348,7 +1376,19 @@
     maxDelayMs = DEFAULT_MAX_INTERVAL_MS,
     skipPoliteWaitForUnitTest = false
   }) {
-    const candidates = stateCandidates || defaultStateCandidatesForYear(year, startMonth, endMonth);
+    const anchors = readPortalTimeAnchors();
+    const effCurrentStartTime = currentStartTime || anchors.currentStartTime;
+    const officialPrimaryState = computeOfficialSelectTableState(
+      year,
+      startMonth,
+      endMonth,
+      effCurrentStartTime,
+      anchors.currentEndTime
+    );
+    const candidates =
+      Array.isArray(stateCandidates) && stateCandidates.length > 0
+        ? stateCandidates.map((x) => Number(x))
+        : [officialPrimaryState, ...[1, 2, 3].filter((x) => x !== officialPrimaryState)];
     const activeFetch = getQueryFrameFetch();
     const useBrowserTimeout =
       typeof window !== "undefined" &&
@@ -1356,7 +1396,10 @@
       typeof AbortSignal.timeout === "function";
     let requestCount = 0;
     let lastTransientReason = null;
+    let primaryFailedReason = null;
+    const rejectedFallbackZeroStates = [];
     for (const state of candidates) {
+      const isOwningState = Number(state) === officialPrimaryState;
       const params = buildAnnualMonthlyParams({
         year,
         startMonth,
@@ -1367,7 +1410,7 @@
         hs8,
         currency: "usd",
         selectTableState: state,
-        currentStartTime,
+        currentStartTime: effCurrentStartTime,
         forListCheck: true
       });
 
@@ -1416,7 +1459,7 @@
             };
           }
           if (!res.ok) {
-            return { halt: false, ok: false, status: res.status };
+            return { halt: false, ok: false, status: res.status, reason: `http_${res.status}` };
           }
           const text = await res.text();
           if (text.length === 0) {
@@ -1450,7 +1493,7 @@
           if (isHtmlErrorResponse(text)) {
             return { halt: true, status: res.status, reason: "html_challenge_or_session_expired" };
           }
-          return { halt: false, ok: false, status: res.status };
+          return { halt: false, ok: false, status: res.status, reason: "unparseable_probe_response" };
         }
       );
 
@@ -1466,6 +1509,11 @@
         };
       }
       if (singleProbe.ok) {
+        if (singleProbe.total === 0 && !isOwningState) {
+          // 仅允许该月份所属主库（officialPrimaryState）查询成功后确认零值，拒绝备用库（如历史月查当前库）返回的假零
+          rejectedFallbackZeroStates.push(Number(state));
+          continue;
+        }
         return {
           ok: true,
           state: singleProbe.state,
@@ -1479,6 +1527,25 @@
       if (singleProbe.transientError) {
         lastTransientReason = singleProbe.reason;
       }
+      if (isOwningState) {
+        primaryFailedReason =
+          singleProbe.reason || (singleProbe.status ? `http_${singleProbe.status}` : "primary_state_failed");
+        if (singleProbe.transientError) {
+          // 所属主库遭遇 502/503/504/网络故障时立即保留待重试状态，绝不改查备用库生成假零凭证
+          return {
+            ok: false,
+            state: null,
+            total: null,
+            isHtmlBlocked: false,
+            circuitBreakRequired: false,
+            transientError: true,
+            reason: singleProbe.reason,
+            primaryState: officialPrimaryState,
+            failedState: Number(state),
+            requestCount
+          };
+        }
+      }
     }
     return {
       ok: false,
@@ -1487,7 +1554,12 @@
       isHtmlBlocked: false,
       circuitBreakRequired: false,
       transientError: Boolean(lastTransientReason),
-      reason: lastTransientReason || "no_state_matched",
+      reason:
+        lastTransientReason ||
+        primaryFailedReason ||
+        (rejectedFallbackZeroStates.length > 0 ? "fallback_zero_rejected" : "no_state_matched"),
+      primaryState: officialPrimaryState,
+      ...(rejectedFallbackZeroStates.length > 0 ? { rejectedFallbackZeroStates } : {}),
       requestCount
     };
   }

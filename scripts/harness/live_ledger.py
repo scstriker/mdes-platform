@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
@@ -131,7 +132,133 @@ class LiveCollectionLedger:
                 pass
         self.render_markdown(sync_tail_from_disk=False)
 
+    @staticmethod
+    def _strip_md_cell(raw: str) -> str:
+        s = raw.strip()
+        if s.startswith("**") and s.endswith("**") and len(s) >= 4:
+            s = s[2:-2].strip()
+        if s.startswith("`") and s.endswith("`") and len(s) >= 2:
+            s = s[1:-1].strip()
+        return s
+
+    @classmethod
+    def _extract_section3_lines(cls, markdown_text: str) -> list[str]:
+        lines = markdown_text.splitlines()
+        sec3_idx: int | None = None
+        for idx, line in enumerate(lines):
+            if line.startswith("## 三、"):
+                sec3_idx = idx
+                break
+        if sec3_idx is None:
+            return []
+        end_idx = len(lines)
+        for idx in range(sec3_idx + 1, len(lines)):
+            if lines[idx].startswith("## "):
+                end_idx = idx
+                break
+        return lines[sec3_idx + 1 : end_idx]
+
+    @classmethod
+    def _parse_records_from_markdown(cls, markdown_text: str) -> tuple[list[dict[str, Any]], int]:
+        """Parse existing Section III detail rows so fresh checkouts or new archive dirs never wipe prior ledger records."""
+        sec3_lines = cls._extract_section3_lines(markdown_text)
+        reverse_flow = {v: k for k, v in FLOW_I_E_MAP.items()}
+        reverse_grouping = {v: k for k, v in GROUPING_FIELD_MAP.items()}
+        parsed: list[dict[str, Any]] = []
+        data_row_candidates = 0
+
+        for line in sec3_lines:
+            stripped = line.strip()
+            if not stripped.startswith("|") or not stripped.endswith("|"):
+                continue
+            cells = [c.strip() for c in stripped.strip("|").split("|")]
+            if len(cells) < 18:
+                continue
+            seq_cell = cls._strip_md_cell(cells[0])
+            if not seq_cell.isdigit():
+                continue
+            data_row_candidates += 1
+
+            stem = cls._strip_md_cell(cells[1])
+            dict_version = cls._strip_md_cell(cells[2])
+            year_raw = cls._strip_md_cell(cells[3])
+            m_months = re.match(r"^`?([^`]+?)`?\s*\((\d+)M\)$", cells[4].strip())
+            flow_raw = cls._strip_md_cell(cells[5])
+            grouping_raw = cls._strip_md_cell(cells[6])
+            batch_key = cls._strip_md_cell(cells[7])
+            hs8_cnt_raw = cls._strip_md_cell(cells[8]).replace(",", "")
+            state_raw = cls._strip_md_cell(cells[9])
+            probe_total_raw = cls._strip_md_cell(cells[10]).replace(",", "")
+            m_status = re.search(r"`(received|confirmed_empty)`", cells[11])
+            m_enc = re.match(r"^`([^`]+)`\s*/\s*`([\d,]+)\s*B`$", cells[12].strip())
+            detail_cnt_raw = cls._strip_md_cell(cells[13]).replace(",", "")
+            m_ret = re.match(r"^`([\d,]+)`\s*/\s*`([\d,]+)`$", cells[14].strip())
+            usd_sum = cls._strip_md_cell(cells[15])
+            sha_raw = cls._strip_md_cell(cells[16]).rstrip("…").rstrip(".")
+            completed_at = cls._strip_md_cell(cells[17])
+
+            if not (stem and dict_version and year_raw.isdigit() and m_months and m_status and m_enc and m_ret):
+                continue
+
+            flow_key = reverse_flow.get(flow_raw) or flow_raw.split()[0]
+            grouping_key = reverse_grouping.get(grouping_raw) or grouping_raw.split()[0]
+            select_state: int | None = None
+            if state_raw and state_raw not in ("None", "-"):
+                try:
+                    select_state = int(state_raw)
+                except ValueError:
+                    select_state = None
+
+            parsed.append(
+                {
+                    "stem": stem,
+                    "dictVersion": dict_version,
+                    "year": int(year_raw),
+                    "monthRange": m_months.group(1).strip(),
+                    "monthsCount": int(m_months.group(2)),
+                    "flow": flow_key,
+                    "grouping": grouping_key,
+                    "batchKey": batch_key,
+                    "requestedHs8Count": int(hs8_cnt_raw),
+                    "selectTableState": select_state,
+                    "officialProbeTotal": int(probe_total_raw),
+                    "status": m_status.group(1),
+                    "encodingName": m_enc.group(1),
+                    "byteLength": int(m_enc.group(2).replace(",", "")),
+                    "detailRowCount": int(detail_cnt_raw),
+                    "returnedHs8Count": int(m_ret.group(1).replace(",", "")),
+                    "emptyHs8Count": int(m_ret.group(2).replace(",", "")),
+                    "usdDetailSum": usd_sum,
+                    "sha256": sha_raw,
+                    "completedAt": completed_at,
+                }
+            )
+        return parsed, data_row_candidates
+
+    def _hydrate_records_from_existing_markdown(self) -> None:
+        candidates = [self.repo_ledger_path]
+        if self.artifact_ledger_path:
+            candidates.append(self.artifact_ledger_path)
+        for path in candidates:
+            if not path.exists():
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except Exception:
+                continue
+            parsed, row_candidates = self._parse_records_from_markdown(text)
+            if parsed:
+                for item in parsed:
+                    self.records_by_stem.setdefault(str(item["stem"]), item)
+                return
+            if row_candidates > 0 and not self.records_by_stem:
+                raise RuntimeError(
+                    f"REFUSING_TO_OVERWRITE_POPULATED_LEDGER: {path} contains {row_candidates} existing detail rows "
+                    "that could not be parsed; use --repo-ledger to write to a separate ledger path."
+                )
+
     def _load_existing(self) -> None:
+        self._hydrate_records_from_existing_markdown()
         if self.state_json_path.exists():
             try:
                 arr = json.loads(self.state_json_path.read_text(encoding="utf-8"))

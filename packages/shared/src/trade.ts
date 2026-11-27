@@ -690,6 +690,17 @@ export function parseCustomsCsvBytes(
   const seenKeys = new Set<string>();
   const rows: ParsedCustomsFactRow[] = [];
   let summaryRowsSkipped = 0;
+  let summaryHasNonZeroUsd = false;
+
+  const recordSkippedSummary = (rawUsdCell: string) => {
+    summaryRowsSkipped += 1;
+    const trimmedUsd = rawUsdCell.trim();
+    if (!trimmedUsd) return;
+    const parsedSummaryUsd = parseUsdToScaled(trimmedUsd);
+    if (!parsedSummaryUsd || parsedSummaryUsd.scaled !== 0n) {
+      summaryHasNonZeroUsd = true;
+    }
+  };
 
   for (const rec of dataRecords) {
     const get = (col: number) => (col >= 0 ? (rec.fields[col] ?? "").trim() : "");
@@ -698,7 +709,7 @@ export function parseCustomsCsvBytes(
 
     // 识别文件级全国合计 / 总计行
     if ((!rawHs && isAggregateLabel(rawName)) || isAggregateLabel(rawHs) || isAggregateLabel(rawName)) {
-      summaryRowsSkipped += 1;
+      recordSkippedSummary(get(usdCol));
       continue;
     }
 
@@ -749,7 +760,7 @@ export function parseCustomsCsvBytes(
       const gn = get(groupNameCol);
       const isZeroWorld = (gc === "0" || gc === "00" || gc === "000") && (gn === "" || isAggregateLabel(gn));
       if (isAggregateLabel(gc) || isAggregateLabel(gn) || isZeroWorld) {
-        summaryRowsSkipped += 1;
+        recordSkippedSummary(get(usdCol));
         continue;
       }
       if (!gc || !gn) {
@@ -833,6 +844,17 @@ export function parseCustomsCsvBytes(
       qty2: q2.value,
       unit2: parseOptionalUnit(get(unit2Col)),
     });
+  }
+
+  if (rows.length === 0 && summaryHasNonZeroUsd) {
+    return {
+      ok: false,
+      error: {
+        status: 400,
+        code: "TRADE_CSV_INVALID",
+        params: { line: 1, field: "summary", reason: "summary row has non-zero USD while detail rows are empty" },
+      },
+    };
   }
 
   if (rows.length === 0 && !options?.allowHeaderOnlyEmpty) {
@@ -988,6 +1010,17 @@ export function parseMultiMonthCustomsCsvBytes(
   const seenKeys = new Set<string>();
   let totalRows = 0;
   let summaryRowsSkipped = 0;
+  let summaryHasNonZeroUsd = false;
+
+  const recordSkippedSummary = (rawUsdCell: string) => {
+    summaryRowsSkipped += 1;
+    const trimmedUsd = rawUsdCell.trim();
+    if (!trimmedUsd) return;
+    const parsedSummaryUsd = parseUsdToScaled(trimmedUsd);
+    if (!parsedSummaryUsd || parsedSummaryUsd.scaled !== 0n) {
+      summaryHasNonZeroUsd = true;
+    }
+  };
 
   for (const rec of dataRecords) {
     const get = (col: number) => (col >= 0 ? (rec.fields[col] ?? "").trim() : "");
@@ -995,7 +1028,7 @@ export function parseMultiMonthCustomsCsvBytes(
     const rawName = get(nameCol);
 
     if ((!rawHs && isAggregateLabel(rawName)) || isAggregateLabel(rawHs) || isAggregateLabel(rawName)) {
-      summaryRowsSkipped += 1;
+      recordSkippedSummary(get(usdCol));
       continue;
     }
 
@@ -1041,7 +1074,7 @@ export function parseMultiMonthCustomsCsvBytes(
       const gn = get(groupNameCol);
       const isZeroWorld = (gc === "0" || gc === "00" || gc === "000") && (gn === "" || isAggregateLabel(gn));
       if (isAggregateLabel(gc) || isAggregateLabel(gn) || isZeroWorld) {
-        summaryRowsSkipped += 1;
+        recordSkippedSummary(get(usdCol));
         continue;
       }
       if (!gc || !gn) {
@@ -1125,6 +1158,17 @@ export function parseMultiMonthCustomsCsvBytes(
       unit2: parseOptionalUnit(get(unit2Col)),
     });
     totalRows += 1;
+  }
+
+  if (totalRows === 0 && summaryHasNonZeroUsd) {
+    return {
+      ok: false,
+      error: {
+        status: 400,
+        code: "TRADE_CSV_INVALID",
+        params: { line: 1, field: "summary", reason: "summary row has non-zero USD while detail rows are empty" },
+      },
+    };
   }
 
   if (totalRows === 0 && !options?.allowHeaderOnlyEmpty && !probeVerifiedZero) {
