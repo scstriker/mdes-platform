@@ -66,11 +66,70 @@ class LiveCollectionLedger:
         self.artifact_ledger_path = Path(artifact_ledger_path) if artifact_ledger_path else None
         self.mode_label = mode_label
         self.state_json_path = self.archive_dir / "_ledger_records.json"
+        self.tail_md_path = self.archive_dir / "_ledger_post_sections.md"
         self.records_by_stem: dict[str, dict[str, Any]] = {}
         self.session_status = "🟢 会话正常（MAX_INFLIGHT=1 单飞串行运行中）"
         self.current_activity = "初始化中..."
+        self.preserved_tail_markdown: str = ""
         self.extra_footer_lines: list[str] = []
         self._load_existing()
+
+    @staticmethod
+    def _extract_preserved_tail(markdown_text: str) -> str:
+        """Extract Section IV+ (e.g. D1 publish verification section) after Section III so progress rewrites never erase it."""
+        lines = markdown_text.splitlines()
+        sec3_idx: int | None = None
+        for idx, line in enumerate(lines):
+            if line.startswith("## 三、"):
+                sec3_idx = idx
+                break
+        if sec3_idx is None:
+            return ""
+        for idx in range(sec3_idx + 1, len(lines)):
+            if lines[idx].startswith("## "):
+                return "\n".join(lines[idx:]).strip()
+        return ""
+
+    def _sync_preserved_tail_from_disk(self) -> None:
+        candidates = [self.repo_ledger_path]
+        if self.artifact_ledger_path:
+            candidates.append(self.artifact_ledger_path)
+        for path in candidates:
+            if path.exists():
+                try:
+                    extracted = self._extract_preserved_tail(path.read_text(encoding="utf-8"))
+                    if extracted:
+                        self.preserved_tail_markdown = extracted
+                        return
+                except Exception:
+                    pass
+        if not self.preserved_tail_markdown and self.tail_md_path.exists():
+            try:
+                cached = self.tail_md_path.read_text(encoding="utf-8").strip()
+                if cached:
+                    self.preserved_tail_markdown = cached
+            except Exception:
+                pass
+
+    def _save_preserved_tail(self) -> None:
+        if not self.preserved_tail_markdown:
+            return
+        try:
+            self._write_atomic(self.tail_md_path, self.preserved_tail_markdown + "\n")
+        except Exception:
+            pass
+
+    def set_publish_verification_section(self, markdown_section: str) -> None:
+        """Persist and attach Section IV+ (D1 publish verification record) to the ledger."""
+        self.preserved_tail_markdown = str(markdown_section or "").strip()
+        if self.preserved_tail_markdown:
+            self._save_preserved_tail()
+        elif self.tail_md_path.exists():
+            try:
+                self.tail_md_path.unlink()
+            except Exception:
+                pass
+        self.render_markdown(sync_tail_from_disk=False)
 
     def _load_existing(self) -> None:
         if self.state_json_path.exists():
@@ -82,6 +141,7 @@ class LiveCollectionLedger:
                             self.records_by_stem[str(item["stem"])] = item
             except Exception:
                 pass
+        self._sync_preserved_tail_from_disk()
 
     def _save_state_json(self) -> None:
         self.archive_dir.mkdir(parents=True, exist_ok=True)
@@ -146,7 +206,7 @@ class LiveCollectionLedger:
         self._save_state_json()
         self.render_markdown()
 
-    def render_markdown(self) -> None:
+    def render_markdown(self, *, sync_tail_from_disk: bool = True) -> None:
         records = list(self.records_by_stem.values())
         records.sort(key=lambda r: (r["year"], r["flow"], r["grouping"], r["batchKey"], r["monthRange"]))
 
@@ -223,31 +283,44 @@ class LiveCollectionLedger:
         except Exception:
             archive_label = self.archive_dir.name
 
-        content = "\n".join(
-            [
-                "# 海关医疗器械（2022–2026）真站低频串行实采实时进度台账",
-                "",
-                f"- **最后刷新时间（UTC+8）**：`{now_cn_str()}`",
-                f"- **当前任务阶段**：{self.mode_label}",
-                f"- **会话与运行状态**：{self.session_status}",
-                f"- **最新动作**：{self.current_activity}",
-                f"- **归档目录**：`{archive_label}`",
-                "- **低频合规参数**：`MAX_INFLIGHT = 1`（全局单飞互斥锁）| `currencyType = usd` | `monthFlag = 1` | 预检间隔 `3.5s–6.5s` | 导出后遵循官网 `13.5s–16.5s` 冷却 | 会话自动保活与失效弹窗提醒",
-                "",
-                "## 一、分年度全局汇总进度（全国 `product` 口径不重复计总额）",
-                "",
-                *summary_lines,
-                "",
-                "## 二、分年度四分组美元总额交叉对账表（`product == partner == regime == region` 实时校验）",
-                "",
-                *recon_lines,
-                "",
-                "## 三、分批次原件获取实时明细台账（严格对齐 `manifest.json` 与后台入库契约）",
-                "",
-                *detail_lines,
-                "",
-                *self.extra_footer_lines,
-            ]
+        if sync_tail_from_disk:
+            self._sync_preserved_tail_from_disk()
+        if self.preserved_tail_markdown:
+            self._save_preserved_tail()
+
+        tail_lines: list[str] = []
+        if self.preserved_tail_markdown:
+            tail_lines.extend(["", self.preserved_tail_markdown])
+        if self.extra_footer_lines:
+            tail_lines.extend(["", *self.extra_footer_lines])
+
+        content = (
+            "\n".join(
+                [
+                    "# 海关医疗器械（2022–2026）真站低频串行实采实时进度台账",
+                    "",
+                    f"- **最后刷新时间（UTC+8）**：`{now_cn_str()}`",
+                    f"- **当前任务阶段**：{self.mode_label}",
+                    f"- **会话与运行状态**：{self.session_status}",
+                    f"- **最新动作**：{self.current_activity}",
+                    f"- **归档目录**：`{archive_label}`",
+                    "- **低频合规参数**：`MAX_INFLIGHT = 1`（全局单飞互斥锁）| `currencyType = usd` | `monthFlag = 1` | 预检间隔 `3.5s–6.5s` | 导出后遵循官网 `13.5s–16.5s` 冷却 | 会话自动保活与失效弹窗提醒",
+                    "",
+                    "## 一、分年度全局汇总进度（全国 `product` 口径不重复计总额）",
+                    "",
+                    *summary_lines,
+                    "",
+                    "## 二、分年度四分组美元总额交叉对账表（`product == partner == regime == region` 实时校验）",
+                    "",
+                    *recon_lines,
+                    "",
+                    "## 三、分批次原件获取实时明细台账（严格对齐 `manifest.json` 与后台入库契约）",
+                    "",
+                    *detail_lines,
+                    *tail_lines,
+                ]
+            ).rstrip("\n")
+            + "\n"
         )
 
         self._write_atomic(self.repo_ledger_path, content)

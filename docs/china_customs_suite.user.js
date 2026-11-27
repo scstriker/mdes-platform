@@ -502,14 +502,111 @@
     try {
       if (typeof document !== "undefined" && document) {
         const ifr = document.querySelector("iframe");
-        const doc = (ifr && ifr.contentDocument) || document;
-        const sEl = doc.getElementById("currentStartTime");
-        const eEl = doc.getElementById("currentEndTime");
-        if (sEl && /^\d{6}$/.test(String(sEl.value || "").trim())) startAnchor = String(sEl.value).trim();
-        if (eEl && /^\d{6}$/.test(String(eEl.value || "").trim())) endAnchor = String(eEl.value).trim();
+        const docs = [];
+        if (ifr && ifr.contentDocument) docs.push(ifr.contentDocument);
+        docs.push(document);
+        for (const doc of docs) {
+          const sEl = doc && typeof doc.getElementById === "function" ? doc.getElementById("currentStartTime") : null;
+          if (sEl && /^\d{6}$/.test(String(sEl.value || "").trim())) {
+            startAnchor = String(sEl.value).trim();
+            break;
+          }
+        }
+        for (const doc of docs) {
+          const eEl = doc && typeof doc.getElementById === "function" ? doc.getElementById("currentEndTime") : null;
+          if (eEl && /^\d{6}$/.test(String(eEl.value || "").trim())) {
+            endAnchor = String(eEl.value).trim();
+            break;
+          }
+        }
       }
     } catch (_) {}
     return { currentStartTime: startAnchor, currentEndTime: endAnchor };
+  }
+
+  function parseLatestPublishedYm(rawEndAnchor) {
+    const cleaned = String(rawEndAnchor ?? "").trim().replace("-", "");
+    if (!/^\d{6}$/.test(cleaned)) return null;
+    const maxYear = Number(cleaned.slice(0, 4));
+    const maxMonth = Number(cleaned.slice(4, 6));
+    if (!Number.isInteger(maxYear) || !Number.isInteger(maxMonth) || maxMonth < 1 || maxMonth > 12) {
+      return null;
+    }
+    return {
+      ym: cleaned,
+      monthStr: `${maxYear}-${String(maxMonth).padStart(2, "0")}`,
+      maxYear,
+      maxMonth
+    };
+  }
+
+  function clampWindowToLatestPublishedMonth({ year, startMonth, endMonth, currentEndTime = null }) {
+    const yr = Number(year);
+    const sm = Number(startMonth);
+    const em = Number(endMonth);
+    if (
+      !Number.isInteger(yr) ||
+      yr < 2000 ||
+      yr > 2100 ||
+      !Number.isInteger(sm) ||
+      !Number.isInteger(em) ||
+      sm < 1 ||
+      em > 12 ||
+      sm > em
+    ) {
+      return {
+        valid: false,
+        reason: "invalid_month_window",
+        year: yr,
+        startMonth: sm,
+        endMonth: em,
+        clamped: false,
+        skipped: true,
+        latestPublishedYm: null,
+        latestPublishedMonth: null
+      };
+    }
+    const anchor = currentEndTime || readPortalTimeAnchors().currentEndTime;
+    const latest = parseLatestPublishedYm(anchor);
+    if (!latest) {
+      return {
+        valid: true,
+        reason: null,
+        year: yr,
+        startMonth: sm,
+        endMonth: em,
+        clamped: false,
+        skipped: false,
+        latestPublishedYm: null,
+        latestPublishedMonth: null
+      };
+    }
+    if (yr > latest.maxYear || (yr === latest.maxYear && sm > latest.maxMonth)) {
+      return {
+        valid: true,
+        reason: "window_after_latest_published_month",
+        year: yr,
+        startMonth: sm,
+        endMonth: 0,
+        clamped: true,
+        skipped: true,
+        latestPublishedYm: latest.ym,
+        latestPublishedMonth: latest.monthStr
+      };
+    }
+    const maxAllowedEnd = yr === latest.maxYear ? latest.maxMonth : 12;
+    const effectiveEnd = Math.min(em, maxAllowedEnd);
+    return {
+      valid: true,
+      reason: effectiveEnd < em ? "end_month_clamped_to_latest_published" : null,
+      year: yr,
+      startMonth: sm,
+      endMonth: effectiveEnd,
+      clamped: effectiveEnd < em,
+      skipped: false,
+      latestPublishedYm: latest.ym,
+      latestPublishedMonth: latest.monthStr
+    };
   }
 
   function getQueryFrameFetch() {
@@ -1558,6 +1655,9 @@
     validateDelayConfig,
     verifyDictionary: verifyEmbeddedDictionary,
     checkSessionReady: probeSessionHealth,
+    readPortalTimeAnchors,
+    parseLatestPublishedYm,
+    clampWindowToLatestPublishedMonth,
     computeOfficialSelectTableState,
     getStateCandidates: defaultStateCandidatesForYear,
     buildAnnualMonthlyParams,
@@ -1592,6 +1692,9 @@
     verifyEmbeddedDictionary,
     parseSingleNaturalMonth,
     expandSingleNaturalMonths,
+    readPortalTimeAnchors,
+    parseLatestPublishedYm,
+    clampWindowToLatestPublishedMonth,
     validateHs8Batch,
     buildAnnualMonthlyParams,
     buildCustomsQueryParams,
@@ -1798,9 +1901,11 @@
 
     try {
       const info = await verifyEmbeddedDictionary();
+      const anchors = readPortalTimeAnchors();
+      const latest = parseLatestPublishedYm(anchors.currentEndTime);
       badgeEl.textContent = `202601 · ${info.hs8Count}码 已校验`;
       appendLog(
-        `字典校验通过: ${info.hs8Count} HS8 / ${info.hs6Count} HS6 / ${info.categoryCount} 大类 | 单飞串行锁已启用`,
+        `字典校验通过: ${info.hs8Count} HS8 / ${info.hs6Count} HS6 / ${info.categoryCount} 大类 | 官网最新公布月份: ${latest ? latest.monthStr : anchors.currentEndTime} | 单飞串行锁已启用`,
         "#86efac"
       );
     } catch (err) {
@@ -1879,20 +1984,47 @@
     }
 
     async function collectWindowRecursive({ year, sMonth, eMonth, monthFlag, flow, grouping, batchKey, hs8 }) {
+      const clamped = clampWindowToLatestPublishedMonth({
+        year,
+        startMonth: sMonth,
+        endMonth: eMonth
+      });
+      if (!clamped.valid) {
+        appendLog(
+          `⚠ [${year} ${sMonth}-${eMonth}月 ${flow}/${grouping}/${batchKey}] 非法统计时间窗，已跳过`,
+          "#fcd34d"
+        );
+        return;
+      }
+      if (clamped.skipped) {
+        appendLog(
+          `⚠ [${year} ${sMonth}-${eMonth}月 ${flow}/${grouping}/${batchKey}] 超出官网最新已公布月份 (${clamped.latestPublishedMonth})，已跳过以防将未公布月份误标为零`,
+          "#fcd34d"
+        );
+        return;
+      }
+      if (clamped.clamped) {
+        appendLog(
+          `⚠ [${year} ${sMonth}-${eMonth}月 ${flow}/${grouping}/${batchKey}] 已按官网最新已公布月份 (${clamped.latestPublishedMonth}) 截断为 ${year}-${String(clamped.startMonth).padStart(2, "0")}..${year}-${String(clamped.endMonth).padStart(2, "0")}`,
+          "#fcd34d"
+        );
+      }
+      const effStart = clamped.startMonth;
+      const effEnd = clamped.endMonth;
       const monthsCovered = Array.from(
-        { length: eMonth - sMonth + 1 },
-        (_, i) => `${year}-${String(sMonth + i).padStart(2, "0")}`
+        { length: effEnd - effStart + 1 },
+        (_, i) => `${year}-${String(effStart + i).padStart(2, "0")}`
       );
       const rangeTag =
         monthFlag === "1"
-          ? `${year}_${String(sMonth).padStart(2, "0")}-${String(eMonth).padStart(2, "0")}`
-          : `${year}-${String(sMonth).padStart(2, "0")}`;
+          ? `${year}_${String(effStart).padStart(2, "0")}-${String(effEnd).padStart(2, "0")}`
+          : `${year}-${String(effStart).padStart(2, "0")}`;
       const stem = `customs_${DICT_VERSION}_${rangeTag}_${flow}_${grouping}_${batchKey}_r01`;
 
       const probe = await probeOfficialCountAndState({
         year,
-        startMonth: sMonth,
-        endMonth: eMonth,
+        startMonth: effStart,
+        endMonth: effEnd,
         monthFlag,
         flow,
         grouping,
@@ -1905,7 +2037,7 @@
       }
       if (!probe.ok) {
         appendLog(
-          `✗ [${year} ${sMonth}-${eMonth}月 ${flow}/${grouping}/${batchKey}] 官网预检未成功 (${probe.reason})，留待补采`,
+          `✗ [${year} ${effStart}-${effEnd}月 ${flow}/${grouping}/${batchKey}] 官网预检未成功 (${probe.reason})，留待补采`,
           "#fca5a5"
         );
         return;
@@ -1916,8 +2048,8 @@
           ? probe.zeroEvidence.queryFingerprint
           : buildZeroQueryFingerprint({
               year,
-              startMonth: sMonth,
-              endMonth: eMonth,
+              startMonth: effStart,
+              endMonth: effEnd,
               monthFlag,
               flow,
               grouping,
@@ -1931,8 +2063,8 @@
 
         await renderEmptyQueryEvidence({
           year,
-          startMonth: sMonth,
-          endMonth: eMonth,
+          startMonth: effStart,
+          endMonth: effEnd,
           monthFlag,
           flow,
           grouping,
@@ -1947,8 +2079,8 @@
         });
         const pngArtifact = await renderEmptyEvidencePngBytes({
           year,
-          startMonth: sMonth,
-          endMonth: eMonth,
+          startMonth: effStart,
+          endMonth: effEnd,
           monthFlag,
           flow,
           grouping,
@@ -1995,22 +2127,22 @@
         await downloadTextFile(`${JSON.stringify(emptyMeta, null, 2)}\n`, `${stem}.meta.json`);
         appendLog(
           pngArtifact
-            ? `○ [${year} ${sMonth}-${eMonth}月 ${flow}/${grouping}/${batchKey}] 官网预检确认 0 条记录，已成套保存 ${stem}.empty.png (SHA256=${pngArtifact.sha256.slice(0, 10)}…) + .manifest.json + .meta.json，可直接归档导入。`
-            : `○ [${year} ${sMonth}-${eMonth}月 ${flow}/${grouping}/${batchKey}] 官网预检确认 0 条记录；当前环境不支持自动生成 PNG，请保存 ${stem}.empty.png 后执行 node scripts/import-customs-archive.mjs --seal-empty-png 写入摘要。`,
+            ? `○ [${year} ${effStart}-${effEnd}月 ${flow}/${grouping}/${batchKey}] 官网预检确认 0 条记录，已成套保存 ${stem}.empty.png (SHA256=${pngArtifact.sha256.slice(0, 10)}…) + .manifest.json + .meta.json，可直接归档导入。`
+            : `○ [${year} ${effStart}-${effEnd}月 ${flow}/${grouping}/${batchKey}] 官网预检确认 0 条记录；当前环境不支持自动生成 PNG，请保存 ${stem}.empty.png 后执行 node scripts/import-customs-archive.mjs --seal-empty-png 写入摘要。`,
           "#fcd34d"
         );
         return;
       }
 
       if (probe.total >= MAX_SAFE_EXPORT_ROWS) {
-        if (sMonth < eMonth) {
-          const mid = Math.floor((sMonth + eMonth) / 2);
+        if (effStart < effEnd) {
+          const mid = Math.floor((effStart + effEnd) / 2);
           appendLog(
-            `↪ 预检 ${probe.total} 行 >= ${MAX_SAFE_EXPORT_ROWS}，自动二分时间窗为 ${sMonth}-${mid}月 与 ${mid + 1}-${eMonth}月`,
+            `↪ 预检 ${probe.total} 行 >= ${MAX_SAFE_EXPORT_ROWS}，自动二分时间窗为 ${effStart}-${mid}月 与 ${mid + 1}-${effEnd}月`,
             "#93c5fd"
           );
-          await collectWindowRecursive({ year, sMonth, eMonth: mid, monthFlag, flow, grouping, batchKey, hs8 });
-          await collectWindowRecursive({ year, sMonth: mid + 1, eMonth, monthFlag, flow, grouping, batchKey, hs8 });
+          await collectWindowRecursive({ year, sMonth: effStart, eMonth: mid, monthFlag, flow, grouping, batchKey, hs8 });
+          await collectWindowRecursive({ year, sMonth: mid + 1, eMonth: effEnd, monthFlag, flow, grouping, batchKey, hs8 });
           return;
         }
         if (hs8.length > 1) {
@@ -2019,16 +2151,16 @@
             `↪ 单月预检 ${probe.total} 行 >= ${MAX_SAFE_EXPORT_ROWS}，自动二分税号组为 ${batchKey}A / ${batchKey}B`,
             "#93c5fd"
           );
-          await collectWindowRecursive({ year, sMonth, eMonth, monthFlag, flow, grouping, batchKey: `${batchKey}A`, hs8: hs8.slice(0, half) });
-          await collectWindowRecursive({ year, sMonth, eMonth, monthFlag, flow, grouping, batchKey: `${batchKey}B`, hs8: hs8.slice(half) });
+          await collectWindowRecursive({ year, sMonth: effStart, eMonth: effEnd, monthFlag, flow, grouping, batchKey: `${batchKey}A`, hs8: hs8.slice(0, half) });
+          await collectWindowRecursive({ year, sMonth: effStart, eMonth: effEnd, monthFlag, flow, grouping, batchKey: `${batchKey}B`, hs8: hs8.slice(half) });
           return;
         }
       }
 
       const exp = await fetchRawExportBase64({
         year,
-        startMonth: sMonth,
-        endMonth: eMonth,
+        startMonth: effStart,
+        endMonth: effEnd,
         monthFlag,
         flow,
         grouping,
@@ -2041,7 +2173,7 @@
         if (exp.circuitBreakRequired) {
           throw new Error(`导出响应触发合规熔断 (${exp.reason})：已立即停止，绝不盲目重试`);
         }
-        appendLog(`✗ [${year} ${sMonth}-${eMonth}月 ${flow}/${grouping}/${batchKey}] 未取得数据 (${exp.reason})，留待补采`, "#fca5a5");
+        appendLog(`✗ [${year} ${effStart}-${effEnd}月 ${flow}/${grouping}/${batchKey}] 未取得数据 (${exp.reason})，留待补采`, "#fca5a5");
         return;
       }
 
@@ -2053,7 +2185,7 @@
 
       if (!rowCountMatched || unexpectedHs8.length > 0 || outOfRangeMonths.length > 0 || missingMonthCol) {
         appendLog(
-          `⚠ [${year} ${sMonth}-${eMonth}月 ${flow}/${grouping}/${batchKey}] 导出核验不一致 (导出 ${exp.inspection.detailRowCount} 行 != 预检 ${probe.total} 行，越界税号=${unexpectedHs8.length}，越界月份=${outOfRangeMonths.length})，拒绝确认零值并留待补采！`,
+          `⚠ [${year} ${effStart}-${effEnd}月 ${flow}/${grouping}/${batchKey}] 导出核验不一致 (导出 ${exp.inspection.detailRowCount} 行 != 预检 ${probe.total} 行，越界税号=${unexpectedHs8.length}，越界月份=${outOfRangeMonths.length})，拒绝确认零值并留待补采！`,
           "#fca5a5"
         );
         return;
@@ -2099,11 +2231,38 @@
     btnStart.addEventListener("click", async () => {
       if (serialFlightState.inFlight) return;
       const year = Number(document.getElementById("inp-year").value);
-      const mStart = Number(document.getElementById("inp-m-start").value);
-      const mEnd = Number(document.getElementById("inp-m-end").value);
+      const rawStart = Number(document.getElementById("inp-m-start").value);
+      const rawEnd = Number(document.getElementById("inp-m-end").value);
       const gran = document.getElementById("sel-month-flag").value;
       const ieSetting = document.getElementById("sel-ietype").value;
       const grpSetting = document.getElementById("sel-grouping").value;
+
+      const clampedWindow = clampWindowToLatestPublishedMonth({
+        year,
+        startMonth: rawStart,
+        endMonth: rawEnd
+      });
+      if (!clampedWindow.valid) {
+        alert(`起止年份或月份非法: ${year} ${rawStart}..${rawEnd}`);
+        return;
+      }
+      if (clampedWindow.skipped) {
+        appendLog(
+          `⚠ 所选区间 ${year}-${String(rawStart).padStart(2, "0")}..${year}-${String(rawEnd).padStart(2, "0")} 晚于官网最新已公布月份 (${clampedWindow.latestPublishedMonth})，已中止采集以防将未公布月份误标为零。`,
+          "#fcd34d"
+        );
+        return;
+      }
+      const mStart = clampedWindow.startMonth;
+      const mEnd = clampedWindow.endMonth;
+      if (clampedWindow.clamped) {
+        const inpEndEl = document.getElementById("inp-m-end");
+        if (inpEndEl) inpEndEl.value = String(mEnd);
+        appendLog(
+          `⚠ 官网最新已公布月份为 ${clampedWindow.latestPublishedMonth}（currentEndTime=${clampedWindow.latestPublishedYm}），已自动将本次查询窗口截断为 ${year}-${String(mStart).padStart(2, "0")}..${year}-${String(mEnd).padStart(2, "0")}。`,
+          "#fcd34d"
+        );
+      }
 
       let batches;
       try {
