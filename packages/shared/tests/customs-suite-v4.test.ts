@@ -3,7 +3,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import vm from "node:vm";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   parseCustomsCsvBytes,
@@ -13,6 +13,13 @@ import {
 } from "../src/trade";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
+/** Vitest on Windows 要求 file:// URL，裸相对路径 dynamic import 会 SyntaxError */
+const IMPORT_CUSTOMS_ARCHIVE_HREF = pathToFileURL(
+  path.resolve(here, "../../../scripts/import-customs-archive.mjs"),
+).href;
+const TRADE_COLLECTION_MANIFEST_HREF = pathToFileURL(
+  path.resolve(here, "../../../scripts/trade-collection-manifest.mjs"),
+).href;
 const REPO_DOCS_SUITE_PATH = path.resolve(here, "../../../docs/china_customs_suite.user.js");
 const OUTER_SUITE_PATH = path.resolve(here, "../../../../docs/china_customs_suite.user.js");
 const COLLECTOR_COPY_PATH = path.resolve(here, "../../../scripts/china_customs_collector.user.js");
@@ -612,7 +619,7 @@ describe("G6 / AC-018：china_customs_suite.user.js v4.0 医疗器械 164 码字
 
   it("[P1-4] import-customs-archive 遇试点与正式 G01 共存同目录时自动跳过被覆盖的试点清单，避免 409 阻断导入", async () => {
     // @ts-expect-error -- CLI 脚本为无声明 .mjs
-    const importerMod = (await import("../../../scripts/import-customs-archive.mjs")) as {
+    const importerMod = (await import(IMPORT_CUSTOMS_ARCHIVE_HREF)) as {
       selectImportableManifestEntries: (
         files: string[],
         opts?: { dictVersion?: string; includePilot?: boolean },
@@ -822,7 +829,7 @@ describe("G6 / AC-018：china_customs_suite.user.js v4.0 医疗器械 164 码字
 
   it("[R2 P1-C / P2-5 / P2-7] 归档导入器核验 CSV 摘要与发布最终状态，字典摘要兼容 LF/CRLF 换行", async () => {
     // @ts-expect-error -- CLI 脚本为无声明 .mjs
-    const importerMod = (await import("../../../scripts/import-customs-archive.mjs")) as {
+    const importerMod = (await import(IMPORT_CUSTOMS_ARCHIVE_HREF)) as {
       verifyArchiveEntryIntegrity: (entry: {
         mfPath: string;
         manifestObj: Record<string, unknown>;
@@ -1093,7 +1100,7 @@ describe("G6 / AC-018：china_customs_suite.user.js v4.0 医疗器械 164 码字
 
       // [P2-7] 字典摘要在 LF 与 CRLF 换行下均精确匹配 EXPECTED_DICT_SHA256
       // @ts-expect-error -- CLI 脚本为无声明 .mjs
-      const manifestTool = (await import("../../../scripts/trade-collection-manifest.mjs")) as {
+      const manifestTool = (await import(TRADE_COLLECTION_MANIFEST_HREF)) as {
         DEFAULT_DICT_PATH: string;
         loadAndVerifyHsDict202601: (p?: string) => { sha256: string; hs8Count: number };
       };
@@ -1111,7 +1118,7 @@ describe("G6 / AC-018：china_customs_suite.user.js v4.0 医疗器械 164 码字
 
   it("[R3 P2-1] 油猴手动采集遇到零结果时自动生成 .empty.png 与配套 emptyPngSha256 / requestedHs8，可直接被归档导入器核验通过", async () => {
     // @ts-expect-error -- CLI 脚本为无声明 .mjs
-    const importerMod = (await import("../../../scripts/import-customs-archive.mjs")) as {
+    const importerMod = (await import(IMPORT_CUSTOMS_ARCHIVE_HREF)) as {
       verifyArchiveEntryIntegrity: (entry: {
         mfPath: string;
         manifestObj: Record<string, unknown>;
@@ -1541,7 +1548,7 @@ describe("G6 / AC-018：china_customs_suite.user.js v4.0 医疗器械 164 码字
 
   it("[R4 P2-2] 三次修订链 A->B->C 发布 C 成功后，verifyPublishOutcome 与 fetchImportedBatchesAfterPublish 沿替代链核验终态", async () => {
     // @ts-expect-error -- CLI 脚本为无声明 .mjs
-    const importerMod = (await import("../../../scripts/import-customs-archive.mjs")) as {
+    const importerMod = (await import(IMPORT_CUSTOMS_ARCHIVE_HREF)) as {
       fetchImportedBatchesAfterPublish: (
         client: { sendJson: (url: string) => Promise<{ status: number; json: unknown }> },
         dictVersion: string,
@@ -1792,7 +1799,7 @@ describe("G6 / AC-018：china_customs_suite.user.js v4.0 医疗器械 164 码字
 
   it("[R5 P2-1] 修订链 A(staged)->B(published)->C(staged) 重放 A 时必须走到终态 C 并因未发布而报错", async () => {
     // @ts-expect-error -- CLI 脚本为无声明 .mjs
-    const importerMod = (await import("../../../scripts/import-customs-archive.mjs")) as {
+    const importerMod = (await import(IMPORT_CUSTOMS_ARCHIVE_HREF)) as {
       verifyPublishOutcome: (args: {
         expectedMonths: string[];
         importedBatchIds?: string[];
@@ -1863,7 +1870,7 @@ describe("G6 / AC-018：china_customs_suite.user.js v4.0 医疗器械 164 码字
 
   it("[R5 P2-4] local-d1 导入模式将显式 --write-token 传递给本地客户端并在写请求携带 x-admin-token", async () => {
     // @ts-expect-error -- CLI 脚本为无声明 .mjs
-    const importerMod = (await import("../../../scripts/import-customs-archive.mjs")) as {
+    const importerMod = (await import(IMPORT_CUSTOMS_ARCHIVE_HREF)) as {
       parseArgs: (argv: string[]) => { target: string; persistDir: string; writeToken: string };
       createHttpClient: (
         apiUrl: string,
