@@ -46,7 +46,7 @@ import {
 import { AppError } from "./errors";
 
 const CHUNK_SIZE = 500;
-const DEFAULT_DICT_VERSION = "202601";
+export const DEFAULT_DICT_VERSION = "202601";
 const TRADE_UNITS: TradeUnitsMeta = {
   amount: "USD",
   displayAmount: "100M_USD",
@@ -3437,9 +3437,57 @@ function buildDerivedObservations(snap: TradeOverviewPublished) {
 
 export async function getTradeOverview(
   db: D1Database,
-  params: { period?: string | null; dictVersion?: string | null },
+  params: { period?: string | null; dictVersion?: string | null; releaseId?: string | null },
 ): Promise<TradeOverviewResponse> {
   const dictVersion = params.dictVersion?.trim() || DEFAULT_DICT_VERSION;
+  const releaseId = params.releaseId?.trim() || null;
+
+  if (releaseId) {
+    let targetPeriod: string;
+    if (params.period != null && params.period.trim() !== "") {
+      const parsed = parseTradePeriod(params.period);
+      if (!parsed) {
+        throw new AppError(400, "TRADE_PERIOD_INVALID", { period: params.period });
+      }
+      targetPeriod = parsed.period;
+    } else {
+      const relRow = await db
+        .prepare("SELECT published_months_json FROM trade_release WHERE dict_version = ?1 AND release_id = ?2")
+        .bind(dictVersion, releaseId)
+        .first<{ published_months_json: string }>();
+      const pubMonths = relRow ? (JSON.parse(relRow.published_months_json) as string[]) : [];
+      const latest = pubMonths[pubMonths.length - 1];
+      if (!latest) {
+        throw new AppError(404, "NOT_FOUND", {
+          resource: "trade_snapshot",
+          id: releaseId,
+          period: "",
+          releaseId,
+        });
+      }
+      targetPeriod = latest;
+    }
+
+    const snapRow = await db
+      .prepare(
+        `SELECT payload_json
+         FROM trade_period_snapshot
+         WHERE dict_version = ?1 AND period = ?2 AND release_id = ?3`,
+      )
+      .bind(dictVersion, targetPeriod, releaseId)
+      .first<{ payload_json: string }>();
+
+    if (!snapRow) {
+      throw new AppError(404, "NOT_FOUND", {
+        resource: "trade_snapshot",
+        id: `${targetPeriod}@${releaseId}`,
+        period: targetPeriod,
+        releaseId,
+      });
+    }
+    const payload = JSON.parse(snapRow.payload_json) as TradeOverviewPublished;
+    return normalizeTradeOverviewSnapshot(payload);
+  }
 
   if (params.period != null && params.period.trim() !== "") {
     const parsed = parseTradePeriod(params.period);

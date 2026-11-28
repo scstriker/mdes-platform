@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 /**
  * 扫描 data/customs-raw/ 归档原件目录，以 deferPublish=true 批量导入到真实后端（本地持久 D1 或指定 API），
  * 随后执行一次 POST /api/trade/publish 完成单次向量化全周期快照发布与 2024 金标准自动核对。

@@ -51,8 +51,9 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
+import { V2_SEED_STATISTICS } from "@mdes/shared";
 import { CLIENT_ERROR_CODES, errorMessage, rowErrorMessage, SERVER_ERROR_CODES, useHealth } from "@/lib/api";
-import { StatistaFigure } from "@/components/layout/statista-figure";
+import { StatisticFigure, StatistaFigure } from "@/components/layout/statista-figure";
 import { baseOption, categoryAxis, LazyChart, valueAxis, type ChartTheme } from "@/lib/charts/lazy-chart";
 import { statistaHorizontalBarOption } from "@/lib/charts/theme";
 import { cn } from "@/lib/utils";
@@ -685,6 +686,20 @@ export function Gallery({ theme }: { theme: "light" | "dark" }) {
           source="中国海关 8 位 HS 编码统计数据"
           note="支持右上角原地切换三线数据表及一键导出矢量 SVG 配图"
         />
+      </Demo>
+
+      <Demo
+        title="StatisticFigure 2.0（标准统计成果容器）"
+        note="6 类视觉语法模板 · 实虚线预测与口径断点标注 · Copy for AI · 离屏白底 SVG/2xPNG 与懒加载 4-Sheet XLSX / 原生 PPTX"
+      >
+        <div className="grid gap-6">
+          <StatisticFigure statistic={V2_SEED_STATISTICS[0]!} />
+          <StatisticFigure statistic={V2_SEED_STATISTICS[4]!} />
+          <StatisticFigure
+            statistic={V2_SEED_STATISTICS[5]!}
+            defaultViewState={{ chartType: "line" }}
+          />
+        </div>
       </Demo>
 
       <ApiErrors />

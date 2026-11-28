@@ -1,5 +1,6 @@
 /** 接口数据类型，前后端共用。字段名与数据库列一致（见 docs/DATA_MODEL.md、docs/API.md）。 */
 import type { RowError } from "./errors";
+import type { UnifiedSearchHit } from "./statistics";
 
 export type Phase = "phase1" | "later";
 
@@ -79,6 +80,7 @@ export type GlobalSearchResult = {
     items: IndicatorListItem[];
     total: number;
   };
+  v2_hits?: UnifiedSearchHit[];
 };
 
 export type ImportStatus = "completed" | "completed_with_errors" | "failed";

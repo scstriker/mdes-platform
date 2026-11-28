@@ -66,7 +66,7 @@ test.describe.serial("PR #2 代码审查缺陷全量回归测试（P1 / P2）", 
     await expect(page).toHaveURL(/\/search\?q=/);
     await expect(page.getByRole("heading", { level: 1, name: /「磁共振」的搜索结果/ })).toBeVisible();
     await expect(page.locator('[data-slot="figure-canvas"]')).toHaveCount(0);
-    await expect(page.locator("main")).toContainText("5.0T 超高场全身磁共振成像系统");
+    await expect(page.locator("main")).toContainText("磁共振成像系统 · uMR Jupiter");
 
     // 在 /search 页内切换至「注册与产品」分栏并再次按回车检索，保留 scope=products 参数且自动展开结构化字段
     await page.getByRole("tab", { name: /注册与产品/ }).click();
@@ -76,9 +76,9 @@ test.describe.serial("PR #2 代码审查缺陷全量回归测试（P1 / P2）", 
     await expect(page).toHaveURL(/\/search\?q=.*&scope=products/);
     await expect(page.locator('[data-slot="figure-canvas"]')).toHaveCount(0);
 
-    // 场景 B：政策与报告页在技术标准分栏（?tab=standards）使用本表局部筛选 GB 9706.1，保留 tab 且自动收起宏观图表
+    // 场景 B：政策与报告页在旧技术标准书签（?tab=standards）使用本页局部筛选 GB 9706.1，保留 tab 且无宏观图表干扰
     await page.goto("/reports?tab=standards");
-    await expect(page.getByRole("tab", { name: /监管年报与技术标准/, selected: true })).toBeVisible();
+    await expect(page.getByRole("heading", { level: 1, name: "官方年报与技术标准资料查询入口" })).toBeVisible();
     await page.locator("#reports-local-filter").fill("GB 9706.1");
     await expect(page).toHaveURL(/tab=standards/);
     await expect(page).toHaveURL(/q=GB\+9706\.1|q=GB%209706\.1/);
@@ -99,7 +99,7 @@ test.describe.serial("PR #2 代码审查缺陷全量回归测试（P1 / P2）", 
   }) => {
     // 非连续多词项：CT 9022.3000 在全站命中后跳转贸易页仍能命中，且自动收起顶部统计图
     await page.goto("/search?q=CT%209022.3000");
-    const tradeJump = page.getByRole("link", { name: /进入进出口贸易专题库深入筛选/ });
+    const tradeJump = page.getByRole("link", { name: /进入进出口贸易深入筛选/ });
     await expect(tradeJump).toBeVisible();
     await tradeJump.click();
 
@@ -110,7 +110,7 @@ test.describe.serial("PR #2 代码审查缺陷全量回归测试（P1 / P2）", 
 
     // 指标目录 canAnswer 字段（「近五年国产第三类」仅出现在 01 指标的 canAnswer 中）
     await page.goto("/search?q=近五年国产第三类");
-    const sysJump = page.getByRole("link", { name: /进入指标目录（方法论与口径）专题库深入筛选/ });
+    const sysJump = page.getByRole("link", { name: /进入指标与口径深入筛选/ });
     await expect(sysJump).toBeVisible();
     await sysJump.click();
 
@@ -196,8 +196,8 @@ test.describe.serial("PR #2 代码审查缺陷全量回归测试（P1 / P2）", 
     await page.goto("/admin/observations?indicator_id=TRD-001&period=2099-12");
     const obsTable = page.getByRole("table", { name: "观测值查询结果" });
     await expect(obsTable.locator("tbody tr")).toHaveCount(1);
-    await expect(obsTable.locator("tbody tr").first()).toContainText("20");
-    await expect(obsTable.locator("tbody tr").first()).not.toContainText("10");
+    const firstRowValueCell = obsTable.locator("tbody tr").first().locator("td").nth(4);
+    await expect(firstRowValueCell).toHaveText("20");
 
     // 第二批：表头不含 value_num（仅含 custom_revised=35），验证缺列时仍保留字段对照面板供手动映射，且默认融合更新不产生重复行
     const csvV2Path = testInfo.outputPath("mapping_upsert_v2.csv");
@@ -219,6 +219,6 @@ test.describe.serial("PR #2 代码审查缺陷全量回归测试（P1 / P2）", 
 
     await page.goto("/admin/observations?indicator_id=TRD-001&period=2099-12");
     await expect(obsTable.locator("tbody tr")).toHaveCount(1);
-    await expect(obsTable.locator("tbody tr").first()).toContainText("35");
+    await expect(firstRowValueCell).toHaveText("35");
   });
 });

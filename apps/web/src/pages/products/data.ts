@@ -170,16 +170,16 @@ export const CATEGORY_OPTIONS: readonly ProductCategory[] = [
 export const PRODUCT_EXPLORER_ROWS: readonly ProductExplorerRow[] = [
   {
     id: "prd-01",
-    certOrCode: "国械注准20263060412",
-    productName: "5.0T 超高场全身磁共振成像系统",
-    specAndScope: "型号 uMR Jupiter 5T · 8通道并行发射超导磁体，适用全身及神经精细磁共振成像",
+    certOrCode: "国械注准20223061141",
+    productName: "磁共振成像系统（uMR Jupiter）",
+    specAndScope: "型号 uMR Jupiter · 5.0T 超导磁体与 8 通道全身并行射频发射（器审受理号 CQZ2200057），适用全身磁共振成像诊断",
     channel: "innov",
     channelLabel: "创新获批",
     category: "医学影像",
-    registrant: "上海联影医疗科技",
+    registrant: "上海联影医疗科技股份有限公司",
     origin: "国产",
     originRegion: "上海",
-    approvalDate: "2026-08-19",
+    approvalDate: "2022-08-24",
   },
   {
     id: "prd-02",

@@ -15,6 +15,9 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseCsvRecords } from "@mdes/shared";
 import { inferSourceKind } from "./inferSourceKind";
+import { seedV2PortalData, seedV2Statements } from "./v2-store";
+
+export { seedV2PortalData };
 
 /** Windows 上 execFileSync("npx") 会 ENOENT（npx.cmd）；直接跑本地 wrangler 入口 */
 function wranglerEntry(): string {
@@ -140,11 +143,16 @@ export function seedStatements(seedPath = SEED_PATH, dictPath = HS_DICT_PATH): s
   return statements;
 }
 
+export async function seedAllToD1(db: D1Database): Promise<void> {
+  await seedV2PortalData(db);
+}
+
 function main() {
   const args = process.argv.slice(2);
   const file = resolve(API_ROOT, ".wrangler/seed.sql");
   mkdirSync(dirname(file), { recursive: true });
-  writeFileSync(file, seedStatements().map((s) => `${s};`).join("\n") + "\n");
+  const allStatements = [...seedStatements(), ...seedV2Statements()];
+  writeFileSync(file, allStatements.map((s) => `${s};`).join("\n") + "\n");
   const target = args.includes("--remote") || args.includes("--local") ? [] : ["--local"];
   execFileSync(
     process.execPath,

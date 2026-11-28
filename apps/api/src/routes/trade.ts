@@ -96,7 +96,7 @@ function isLoopbackHost(rawUrl: string): boolean {
  * - 若配置了 TRADE_WRITE_TOKEN，则强制校验 X-Admin-Token 或 Authorization: Bearer 令牌；
  * - 否则仅在显式开启 ENABLE_TRADE_WRITE=1 且请求来自本机回环（localhost/127.0.0.1/::1）时放行。
  */
-function requireTradeWriteAccess(c: Context<AppEnv>): void {
+export function requireTradeWriteAccess(c: Context<AppEnv>): void {
   const writeFlag = String(c.env.ENABLE_TRADE_WRITE ?? "")
     .trim()
     .toLowerCase();
@@ -237,7 +237,8 @@ export function tradeRoutes(app: Hono<AppEnv>) {
   app.get("/api/trade/overview", async (c) => {
     const period = textParam(c.req.query("period"));
     const dictVersion = textParam(c.req.query("dictVersion"));
-    const overview = await getTradeOverview(c.get("db"), { period, dictVersion });
+    const releaseId = textParam(c.req.query("releaseId"));
+    const overview = await getTradeOverview(c.get("db"), { period, dictVersion, releaseId });
     return c.json(overview);
   });
 

@@ -206,7 +206,7 @@ function BenchmarkTradeFallback({ showEmptyBanner }: { showEmptyBanner?: boolean
     if (!normalizedQ) return HIGH_CONCENTRATION_HS;
     return HIGH_CONCENTRATION_HS.filter((row) =>
       matchesQuery(
-        `${row.hsCode} ${row.itemName} ${row.category} ${row.topOrigins} ${row.supplyNote} ${row.cr3}`,
+        `${row.hsCode} ${row.hsCode.replace(/\./g, "")} ${row.itemName} ${row.category} ${row.topOrigins} ${row.supplyNote} ${row.cr3}`,
         normalizedQ,
       ),
     );

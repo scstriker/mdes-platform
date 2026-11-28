@@ -1,11 +1,11 @@
-import { Suspense } from "react";
-import { Link, Outlet, ScrollRestoration, useLocation, useMatches } from "react-router";
+import { Suspense, useEffect } from "react";
+import { Link, Outlet, ScrollRestoration, useLocation, useMatches, useNavigate } from "react-router";
 import { AppFooter, AppHeader, TabBar } from "@/components/itei";
 import { PublicationFooter } from "@/components/layout/publication-footer";
 import { ScopedSearchBar } from "@/components/layout/scoped-search-bar";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useDocumentTitle } from "@/lib/theme";
-import { MOBILE_NAV, PRODUCT_NAME, PUBLIC_NAV, isCurrent } from "./nav";
+import { MOBILE_NAV, PRODUCT_NAME, PUBLIC_NAV, REFERENCE_NAV, isCurrent } from "./nav";
 import { ThemeMenu } from "./theme-menu";
 
 export type RouteHandle = { title?: string };
@@ -16,14 +16,50 @@ export type RouteHandle = { title?: string };
  * - 「数据管理」从顶栏移除并下沉至页脚右侧工具链接，保持公开智库门户纯净庄重。
  */
 export function AppShell() {
-  const { pathname } = useLocation();
+  const { pathname, hash } = useLocation();
+  const navigate = useNavigate();
   const matches = useMatches();
   const title = [...matches].reverse().find((m) => (m.handle as RouteHandle | undefined)?.title)?.handle as
     | RouteHandle
     | undefined;
   useDocumentTitle(title?.title ? `${title.title} · ${PRODUCT_NAME}` : PRODUCT_NAME);
+
+  // 历史旧版锚点书签零闪烁平滑重定向
+  useEffect(() => {
+    if (!hash) return;
+    if (pathname === "/products" && hash === "#fig-products-trend") {
+      void navigate("/statistics/STAT-REG-CLASS3-TREND", { replace: true });
+      return;
+    }
+    if (pathname === "/enterprises") {
+      if (hash === "#institutions-directory") {
+        void navigate("/institutions", { replace: true });
+      } else if (hash === "#fig-enterprises-provinces") {
+        void navigate("/#fig-overview-provinces", { replace: true });
+      } else if (hash === "#fig-enterprises-density") {
+        void navigate("/#fig-overview-density", { replace: true });
+      }
+    }
+  }, [pathname, hash, navigate]);
+
   const nav = PUBLIC_NAV.map((item) => ({ ...item, current: isCurrent(item.href, pathname) }));
-  const mobileNav = MOBILE_NAV.map((item) => ({ ...item, current: isCurrent(item.href, pathname) }));
+  const referenceNav = REFERENCE_NAV.map((item) => ({ ...item, current: isCurrent(item.href, pathname) }));
+  const directMobileMatched = MOBILE_NAV.some(
+    (item) => !item.href.startsWith("#") && isCurrent(item.href, pathname),
+  );
+  const anySecondaryMatched =
+    !directMobileMatched &&
+    (nav.some((item) => item.current) || referenceNav.some((item) => item.current));
+
+  const mobileNav = MOBILE_NAV.map((item) => ({
+    ...item,
+    current: item.href === "#all" ? anySecondaryMatched : isCurrent(item.href, pathname),
+  }));
+
+  const drawerGroups = [
+    { title: "产业研究栏目", items: nav },
+    { title: "资料查询与口径", items: referenceNav },
+  ];
 
   return (
     <div className="flex min-h-dvh flex-col bg-surface pb-tabbar text-ink md:pb-0">
@@ -33,7 +69,7 @@ export function AppShell() {
       >
         跳到主要内容
       </a>
-      <AppHeader title={PRODUCT_NAME} nav={nav} actions={<ThemeMenu />} />
+      <AppHeader title={PRODUCT_NAME} nav={nav} referenceNav={referenceNav} actions={<ThemeMenu />} />
       {import.meta.env.MODE === "demo" && (
         <p role="note" className="border-b border-border bg-info-bg px-4 py-1.5 text-center caption text-ink md:px-6">
           离线演示版：采用本所标准样例序列运行，数据变更暂存于当前浏览器会话。
@@ -51,6 +87,10 @@ export function AppShell() {
         center="机械工业仪器仪表综合技术经济研究所（ITEI）"
         right={
           <>
+            <Link to="/statistics" className="text-on-brand underline-offset-4 hover:underline focus-ring">
+              统计成果库
+            </Link>
+            {" · "}
             <Link to="/system" className="text-on-brand underline-offset-4 hover:underline focus-ring">
               统计口径
             </Link>
@@ -61,7 +101,7 @@ export function AppShell() {
           </>
         }
       />
-      <TabBar nav={mobileNav} />
+      <TabBar nav={mobileNav} drawerGroups={drawerGroups} />
       <ScrollRestoration />
     </div>
   );

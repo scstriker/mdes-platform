@@ -289,7 +289,7 @@ test.describe.serial("G4 / AC-016：38号海关原件向导 → 贸易专题 / �
     await page.goto("/search?q=90181100");
     await expect(page.locator("main")).toContainText("90181100 心电图记录仪");
     await expect(page.locator("main")).toContainText(publishedReleaseId);
-    await page.getByRole("link", { name: /进入进出口贸易专题库深入筛选/ }).click();
+    await page.getByRole("link", { name: /进入进出口贸易深入筛选/ }).click();
     await expect(page).toHaveURL(/\/trade\?.*q=90181100/);
     await expect(page.locator("main table")).toContainText("90181100");
     await expect(page.locator("main table")).toContainText("191,363,479 台");

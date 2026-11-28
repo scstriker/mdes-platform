@@ -67,6 +67,7 @@ export default defineConfig(({ mode }) => ({
       "echarts/core",
       "echarts/charts",
       "echarts/components",
+      "echarts/features",
       "echarts/renderers",
       "clsx",
       "tailwind-merge",
@@ -84,6 +85,7 @@ export default defineConfig(({ mode }) => ({
     },
   },
   // 演示版：打成一个 JS 包、资源全部内联，再由 scripts/inline-demo.mjs 合成单个 HTML
+  // 标准生产版 / E2E 版：依靠动态 import() 原生分包并禁止首屏预加载重型导出器 chunk（write-excel-file / pptxgenjs）
   build:
     mode === "demo"
       ? {
@@ -94,9 +96,12 @@ export default defineConfig(({ mode }) => ({
           chunkSizeWarningLimit: 4096,
           rollupOptions: { output: { inlineDynamicImports: true } },
         }
-      : mode === "e2e"
-        ? {
-            outDir: "dist-e2e",
-          }
-        : undefined,
+      : {
+          ...(mode === "e2e" ? { outDir: "dist-e2e" } : {}),
+          modulePreload: {
+            resolveDependencies(_filename, deps) {
+              return deps.filter((dep) => !dep.includes("export-xlsx") && !dep.includes("export-pptx"));
+            },
+          },
+        },
 }));

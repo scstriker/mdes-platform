@@ -1,5 +1,9 @@
 import { request } from "./client";
 import type {
+  CatalogDetailResponse,
+  CatalogKind,
+  CatalogPage,
+  CatalogQuery,
   Cluster,
   CsvWriteMode,
   GlobalSearchResult,
@@ -11,6 +15,11 @@ import type {
   ObservationPage,
   ObservationQuery,
   Phase,
+  Statistic,
+  StatisticDetailResponse,
+  StatisticListPage,
+  StatisticListQuery,
+  StatisticVersionsResponse,
   Stats,
   TradeBatchListItem,
   TradeCoverageMatrixResponse,
@@ -55,7 +64,7 @@ export const api = {
       body: JSON.stringify(payload),
     });
   },
-  tradeOverview: (params: { period?: string; dictVersion?: string } = {}, o?: Opts) =>
+  tradeOverview: (params: { period?: string; dictVersion?: string; releaseId?: string } = {}, o?: Opts) =>
     request<TradeOverviewResponse>("/api/trade/overview", { ...o, query: params }),
   tradePeriods: (params: { dictVersion?: string } = {}, o?: Opts) =>
     request<TradePeriodsMeta>("/api/trade/periods", { ...o, query: params }),
@@ -88,4 +97,39 @@ export const api = {
     }
     return request<TradeImportResponse>("/api/trade/import", { ...o, method: "POST", body: fd });
   },
+  statistics: (params: StatisticListQuery = {}, o?: Opts) =>
+    request<StatisticListPage>("/api/statistics", {
+      ...o,
+      query: {
+        q: params.q,
+        topic: params.topic,
+        v3_seq: params.v3_seq,
+        entity: params.entity,
+        has_forecast: params.has_forecast === undefined ? undefined : params.has_forecast ? "1" : "0",
+        has_break: params.has_break === undefined ? undefined : params.has_break ? "1" : "0",
+        limit: params.limit,
+        offset: params.offset,
+      },
+    }),
+  statisticDetail: (id: string, params: { v?: string } = {}, o?: Opts) =>
+    request<StatisticDetailResponse>(`/api/statistics/${encodeURIComponent(id)}`, {
+      ...o,
+      query: { v: params.v },
+    }),
+  statisticRaw: (id: string, params: { v?: string } = {}, o?: Opts) =>
+    request<Statistic>(`/api/statistics/${encodeURIComponent(id)}`, {
+      ...o,
+      query: { v: params.v, raw: "1" },
+    }),
+  statisticVersions: (id: string, o?: Opts) =>
+    request<StatisticVersionsResponse>(`/api/statistics/${encodeURIComponent(id)}/versions`, o),
+  publishStatistic: (statistic: Statistic, o?: Opts) =>
+    request<{ ok: boolean; statistic_id: string; version: string; latest_version: string; content_hash: string }>(
+      "/api/statistics/publish",
+      { ...o, method: "POST", json: statistic },
+    ),
+  catalog: (params: CatalogQuery = {}, o?: Opts) =>
+    request<CatalogPage>("/api/catalog", { ...o, query: params }),
+  catalogDetail: (kind: CatalogKind, slug: string, o?: Opts) =>
+    request<CatalogDetailResponse>(`/api/catalog/${encodeURIComponent(kind)}/${encodeURIComponent(slug)}`, o),
 };

@@ -8,6 +8,7 @@ import {
 import { parseJson } from "../db";
 import { intParam, textParam } from "../errors";
 import type { AppEnv } from "../env";
+import { ensureV2SeededOnce, prepareV2SearchStatements } from "../v2-store";
 import { bindIfNeeded, buildObservationWhere } from "./observations";
 
 export const SEARCH_LIMIT_DEFAULT = 12;
@@ -19,8 +20,8 @@ const INDICATOR_HAYSTACK_SQL =
 export function searchRoutes(app: Hono<AppEnv>) {
   /**
    * 全站动态数据库统一检索接口：
-   * 同时检索已入库的实时观测值（observation 关联 indicator）与底层工程指标元数据，
-   * 观测值匹配规则与 GET /api/observations?q=... 完全同源，确保结果总数严格一致。
+   * 同时检索已入库的实时观测值（observation 关联 indicator）、底层工程指标元数据，
+   * 以及经 search_fts FTS5 + 精确编号/旧别名加权召回的 V2 单项统计与一等公民实体（v2_hits）。
    */
   app.get("/api/search", async (c) => {
     const rawQ = textParam(c.req.query("q")) ?? "";
@@ -35,11 +36,14 @@ export function searchRoutes(app: Hono<AppEnv>) {
         query: "",
         observations: { items: [], total: 0 },
         indicators: { items: [], total: 0 },
+        v2_hits: [],
       };
       return c.json(empty);
     }
 
     const db = c.get("db");
+    await ensureV2SeededOnce(db);
+
     const obsQuery = buildObservationWhere({ q: rawQ });
 
     const indClauses = tokens.map(() => `instr(${INDICATOR_HAYSTACK_SQL}, ?) > 0`);
@@ -84,12 +88,17 @@ export function searchRoutes(app: Hono<AppEnv>) {
       .prepare(`select count(*) as total from indicator i ${indWhere}`)
       .bind(...tokens);
 
-    const [obsRows, obsCount, indRows, indCount] = await db.batch<Record<string, unknown>>([
+    const v2Search = prepareV2SearchStatements(db, rawQ, limit);
+
+    const batchResults = await db.batch<Record<string, unknown>>([
       obsItemsStmt,
       obsCountStmt,
       indItemsStmt,
       indCountStmt,
+      ...v2Search.stmts,
     ]);
+
+    const [obsRows, obsCount, indRows, indCount] = batchResults;
 
     const body: GlobalSearchResult = {
       query: rawQ,
@@ -104,6 +113,7 @@ export function searchRoutes(app: Hono<AppEnv>) {
         items: indRows.results as unknown as IndicatorListItem[],
         total: Number(indCount.results[0]?.total ?? 0),
       },
+      v2_hits: v2Search.parseResults(batchResults.slice(4)),
     };
     return c.json(body);
   });

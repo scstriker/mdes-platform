@@ -147,16 +147,29 @@ export function ScopedSearchBar({ mode = "public", className }: ScopedSearchBarP
 
     if (mode === "public") {
       const pub = indexMod.queryPublicSuggestions(trimmed, scope as PublicSearchScope, liveTrade.data);
+      const serverV2 = (livePublicSearch.data?.v2_hits ?? []).map((h) =>
+        indexMod.mapUnifiedV2HitToSuggestion(h, trimmed),
+      );
+      const seenIds = new Set(pub.scopedMatches.map((m) => m.id));
+      const mergedScoped = [...pub.scopedMatches];
+      for (const hit of serverV2) {
+        if (seenIds.has(hit.id)) continue;
+        if (scope === "/search" || hit.scope === scope) {
+          mergedScoped.push(hit);
+          seenIds.add(hit.id);
+        }
+      }
+
       const liveObsTotal = livePublicSearch.data?.observations.total ?? 0;
       const liveMatches = (livePublicSearch.data?.observations.items ?? [])
         .slice(0, 3)
         .map((hit) => indexMod.mapObservationHitToSuggestion(hit, trimmed));
       return {
-        scopedMatches: pub.scopedMatches,
+        scopedMatches: mergedScoped.slice(0, 6),
         liveMatches,
         secondaryMatches: pub.indicatorMatches,
         secondaryTitle: "关联指标口径与方法论",
-        globalTotal: pub.globalTotal,
+        globalTotal: Math.max(pub.globalTotal, mergedScoped.length),
         liveObsTotal,
       };
     }

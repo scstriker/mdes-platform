@@ -1,5 +1,7 @@
 export type PublicSearchScope =
   | "/search"
+  | "/statistics"
+  | "/markets"
   | "/products"
   | "/enterprises"
   | "/trade"
@@ -8,6 +10,8 @@ export type PublicSearchScope =
 
 export type PublicScopeParam =
   | "all"
+  | "statistics"
+  | "markets"
   | "products"
   | "enterprises"
   | "trade"
@@ -46,8 +50,10 @@ export type SearchSuggestionItem = {
   keywords: string;
   /** 供搜索结果页内联展开展示完整结构化档案字段 */
   fields?: readonly SearchDetailField[];
-  /** 可选：指向所属专题栏目名录区的二级跳转链接 */
+  /** 指向一等公民实体页、统计工作台或资料查询页的直达链接 */
   subpageHref?: string;
+  /** 可选：命中废止或误写别名时的提示 */
+  aliasNote?: string;
 };
 
 export const PUBLIC_SCOPES: readonly ScopeMeta<PublicSearchScope>[] = [
@@ -55,50 +61,72 @@ export const PUBLIC_SCOPES: readonly ScopeMeta<PublicSearchScope>[] = [
     scope: "/search",
     label: "全站跨库检索",
     shortLabel: "全站跨库",
-    placeholder: "检索器械名称、注册证号、企业与临床机构、HS税号、政策标准或指标…",
+    placeholder: "检索统计图表、产品型号(uMR Jupiter)、注册证号、企业与检验院、HS税号或YY/GB标准…",
     hotQueries: [
-      { label: "磁共振", query: "磁共振" },
+      { label: "uMR Jupiter", query: "uMR Jupiter" },
+      { label: "国械注准20223061141", query: "国械注准20223061141" },
+      { label: "YY 9706.233-2021", query: "YY 9706.233-2021" },
+      { label: "湖北省医疗器械质量监督检验研究院", query: "湖北省医疗器械质量监督检验研究院" },
+      { label: "联影医疗", query: "联影医疗" },
       { label: "手术机器人", query: "手术机器人" },
-      { label: "迈瑞医疗", query: "迈瑞医疗" },
-      { label: "CT 球管", query: "CT 球管" },
-      { label: "设备更新", query: "设备更新" },
-      { label: "GB 9706.1", query: "GB 9706.1" },
+    ],
+  },
+  {
+    scope: "/statistics",
+    label: "统计成果库",
+    shortLabel: "统计成果库",
+    placeholder: "检索已发布统计标题、核心读数、研发占比、进口规模或三类首次注册趋势…",
+    hotQueries: [
+      { label: "联影研发投入占比", query: "联影医疗研发投入" },
+      { label: "磁共振整机与零件进口", query: "90181310" },
+      { label: "三类首次注册趋势", query: "第三类医疗器械首次注册" },
+      { label: "医用磁共振市场规模", query: "医用磁共振成像设备市场规模" },
+    ],
+  },
+  {
+    scope: "/markets",
+    label: "市场与技术",
+    shortLabel: "市场与技术",
+    placeholder: "检索公立医院公开招采项目（如 WXZB(2024)-016）或核心技术路线…",
+    hotQueries: [
+      { label: "西安交大二附院 5T 采购", query: "WXZB(2024)-016" },
+      { label: "5T 超高场磁共振技术", query: "超高场磁共振" },
     ],
   },
   {
     scope: "/products",
     label: "注册与产品",
     shortLabel: "注册与产品",
-    placeholder: "检索器械名称、注册证号、UDI条码、规格型号或注册人…",
+    placeholder: "检索产品型号（uMR Jupiter）、注册证号（国械注准20223061141）、受理号或 UDI…",
     hotQueries: [
+      { label: "uMR Jupiter", query: "uMR Jupiter" },
+      { label: "国械注准20223061141", query: "国械注准20223061141" },
+      { label: "图迈 MT-1000", query: "MT-1000" },
       { label: "5.0T 磁共振", query: "磁共振" },
       { label: "手术系统", query: "手术" },
-      { label: "人工心脏", query: "人工心脏" },
-      { label: "联影医疗", query: "联影" },
-      { label: "基因突变伴随诊断", query: "伴随诊断" },
     ],
   },
   {
     scope: "/enterprises",
     label: "企业与机构",
     shortLabel: "企业与机构",
-    placeholder: "检索重点企业、证券代码、创新中心、检验院或临床试验医院…",
+    placeholder: "检索重点企业、证券代码、检验检测研究院或临床试验医院…",
     hotQueries: [
-      { label: "迈瑞医疗", query: "迈瑞" },
       { label: "联影医疗", query: "联影" },
-      { label: "单项冠军", query: "单项冠军" },
-      { label: "国家临床医学研究中心", query: "临床医学研究中心" },
-      { label: "医疗器械检验院", query: "检验" },
+      { label: "迈瑞医疗", query: "迈瑞" },
+      { label: "湖北省器检院", query: "湖北省医疗器械质量监督检验研究院" },
+      { label: "北京协和医院", query: "协和医院" },
+      { label: "国家高性能医疗器械创新中心", query: "国家高性能医疗器械创新中心" },
     ],
   },
   {
     scope: "/trade",
     label: "进出口贸易",
     shortLabel: "进出口贸易",
-    placeholder: "检索医疗器械五大品类、海关 HS 税号（如 9022.3000）或贸易伙伴国…",
+    placeholder: "检索医疗器械海关品类、HS 税号（如 90181310、9022.3000）或贸易伙伴国…",
     hotQueries: [
       { label: "CT 球管 9022.3000", query: "9022.3000" },
-      { label: "3.0T 磁共振", query: "9018.1310" },
+      { label: "磁共振 9018.1310", query: "9018.1310" },
       { label: "诊断与治疗设备", query: "诊断与治疗" },
       { label: "内窥镜核心组件", query: "内窥镜" },
       { label: "德国", query: "德国" },
@@ -108,25 +136,25 @@ export const PUBLIC_SCOPES: readonly ScopeMeta<PublicSearchScope>[] = [
     scope: "/reports",
     label: "政策与报告",
     shortLabel: "政策与报告",
-    placeholder: "检索智库监测报告、政策发文字号、审查指导原则或 GB/YY 标准号…",
+    placeholder: "检索研究报告、产业政策文号、YY/GB 标准号或官方统计年报…",
     hotQueries: [
-      { label: "季度运行监测报告", query: "运行监测报告" },
-      { label: "设备更新改造", query: "设备更新" },
-      { label: "人工智能指导原则", query: "人工智能" },
-      { label: "GB 9706.1", query: "GB 9706.1" },
-      { label: "手术机器人标准", query: "手术机器人" },
+      { label: "YY 9706.233-2021", query: "YY 9706.233-2021" },
+      { label: "国发〔2024〕7号", query: "国发〔2024〕7号" },
+      { label: "2025 注册工作报告", query: "2025 年度医疗器械注册工作报告" },
+      { label: "高端医学影像专题报告", query: "高端医学影像装备运行监测" },
+      { label: "GB 9706.1-2020", query: "GB 9706.1-2020" },
     ],
   },
   {
     scope: "/system",
-    label: "指标目录",
-    shortLabel: "指标目录",
+    label: "指标与口径",
+    shortLabel: "指标与口径",
     placeholder: "检索三级指标序号、指标名称、数据来源或典型研判问题…",
     hotQueries: [
       { label: "01 注册与备案明细", query: "注册与备案" },
       { label: "02 创新医疗器械", query: "创新医疗器械" },
-      { label: "13 上市企业", query: "上市企业" },
-      { label: "24 审查指导原则", query: "指导原则" },
+      { label: "15 上市企业研发投入", query: "研发投入" },
+      { label: "37 国家与行业标准", query: "国家与行业标准" },
       { label: "38 进出口贸易", query: "进出口贸易" },
     ],
   },
@@ -194,6 +222,8 @@ export const ADMIN_SCOPES: readonly ScopeMeta<AdminSearchScope>[] = [
 
 const SCOPE_TO_PARAM: Record<PublicSearchScope, Exclude<PublicScopeParam, "observations">> = {
   "/search": "all",
+  "/statistics": "statistics",
+  "/markets": "markets",
   "/products": "products",
   "/enterprises": "enterprises",
   "/trade": "trade",
@@ -203,12 +233,16 @@ const SCOPE_TO_PARAM: Record<PublicSearchScope, Exclude<PublicScopeParam, "obser
 
 const PARAM_TO_SCOPE: Record<string, PublicSearchScope> = {
   all: "/search",
+  statistics: "/statistics",
+  markets: "/markets",
   products: "/products",
   enterprises: "/enterprises",
   trade: "/trade",
   reports: "/reports",
   system: "/system",
   "/search": "/search",
+  "/statistics": "/statistics",
+  "/markets": "/markets",
   "/products": "/products",
   "/enterprises": "/enterprises",
   "/trade": "/trade",

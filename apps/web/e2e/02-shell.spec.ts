@@ -4,8 +4,12 @@ import { useTheme } from "./support";
 /** 新外框要解决的四个问题（ADR-002「现状」），外加路由与主题 */
 test.describe("外框 · 桌面", () => {
   test("页眉导航标出当前页；深链与未知路径", async ({ page }) => {
+    const headerNavCurrent = page.getByRole("banner").getByRole("navigation", { name: "主导航" }).locator("[aria-current=page]");
+    await page.goto("/markets");
+    await expect(headerNavCurrent).toHaveText("市场");
+    await expect(page.getByRole("heading", { level: 1 })).toContainText("品类市场");
     await page.goto("/system");
-    await expect(page.locator("header nav [aria-current=page]")).toHaveText("指标目录");
+    await expect(headerNavCurrent).toHaveText("资料查询");
     await expect(page.getByRole("heading", { level: 1 })).toContainText("指标目录");
     await page.goto("/no-such-page");
     await expect(page.getByRole("heading", { level: 1 })).toHaveText("页面不存在");
@@ -51,9 +55,21 @@ test.describe("外框 · 窄屏", () => {
     await expect(tabbar).toHaveCount(1);
     await expect(tabbar).toBeVisible();
     await expect(page.getByRole("contentinfo")).toBeHidden();
-    await tabbar.getByRole("link", { name: "指标目录" }).tap();
+    expect(await page.evaluate(() => window.innerWidth)).toBe(390);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+    for (const label of ["总览", "市场", "产品", "贸易", "全部"]) {
+      await expect(tabbar.getByText(label, { exact: true })).toBeVisible();
+    }
+    await tabbar.getByRole("link", { name: "贸易" }).tap();
+    await expect(page).toHaveURL(/\/trade$/);
+    await expect(tabbar.locator("[aria-current=page]")).toHaveText("贸易");
+
+    await tabbar.getByRole("button", { name: "全部" }).tap();
+    const drawer = page.getByRole("dialog", { name: "全站导航目录" });
+    await expect(drawer).toBeVisible();
+    await drawer.getByRole("link", { name: "指标与口径" }).tap();
     await expect(page).toHaveURL(/\/system$/);
-    await expect(tabbar.locator("[aria-current=page]")).toHaveText("指标目录");
+    await expect(page.getByRole("heading", { level: 1 })).toContainText("指标目录");
   });
 
   test("观测值页：窄屏只露出「指标」，其余条件收进「更多条件」", async ({ page }) => {
