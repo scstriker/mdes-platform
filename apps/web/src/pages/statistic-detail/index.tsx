@@ -563,19 +563,19 @@ export default function StatisticDetailPage() {
           {/* 禁止推断红线 */}
           <section aria-labelledby="sec-prohibited" className="grid gap-3">
             <div className="border-b border-border-strong pb-2">
-              <h2 id="sec-prohibited" className="title-sub text-danger">
+              <h2 id="sec-prohibited" className="title-sub text-brand-navy">
                 使用限制与禁止推断红线
               </h2>
             </div>
-            <div role="note" className="border border-border border-l-4 border-l-danger bg-danger-bg/40 p-4">
+            <div role="note" className="border border-border border-l-4 border-l-danger bg-surface-sunken p-4">
               <ul className="grid gap-2.5">
                 {stat.methodology.prohibited_inferences.map((rule, idx) => (
                   <li key={idx} className="flex items-start gap-2.5 body-sm text-ink">
-                    <span className="shrink-0 bg-danger px-1.5 py-0.5 caption font-semibold text-on-brand">
+                    <span className="shrink-0 border border-border-strong bg-surface px-1.5 py-0.5 caption font-semibold text-brand-navy">
                       红线 {idx + 1}
                     </span>
                     <span>
-                      <strong className="font-semibold text-danger">禁止推断：</strong>
+                      <strong className="font-semibold text-ink">禁止推断：</strong>
                       {rule}
                     </span>
                   </li>

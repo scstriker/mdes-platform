@@ -196,8 +196,8 @@ test.describe.serial("PR #2 代码审查缺陷全量回归测试（P1 / P2）", 
     await page.goto("/admin/observations?indicator_id=TRD-001&period=2099-12");
     const obsTable = page.getByRole("table", { name: "观测值查询结果" });
     await expect(obsTable.locator("tbody tr")).toHaveCount(1);
-    await expect(obsTable.locator("tbody tr").first()).toContainText("20");
-    await expect(obsTable.locator("tbody tr").first()).not.toContainText("10");
+    const firstRowValueCell = obsTable.locator("tbody tr").first().locator("td").nth(4);
+    await expect(firstRowValueCell).toHaveText("20");
 
     // 第二批：表头不含 value_num（仅含 custom_revised=35），验证缺列时仍保留字段对照面板供手动映射，且默认融合更新不产生重复行
     const csvV2Path = testInfo.outputPath("mapping_upsert_v2.csv");
@@ -219,6 +219,6 @@ test.describe.serial("PR #2 代码审查缺陷全量回归测试（P1 / P2）", 
 
     await page.goto("/admin/observations?indicator_id=TRD-001&period=2099-12");
     await expect(obsTable.locator("tbody tr")).toHaveCount(1);
-    await expect(obsTable.locator("tbody tr").first()).toContainText("35");
+    await expect(firstRowValueCell).toHaveText("35");
   });
 });

@@ -206,6 +206,23 @@ test.describe.serial("MDES V2 全站改造五项端到端验收、旧书签迁�
     await expect(
       freshPage.getByText("您正在查看历史归档版本 2026.06.1，最新已发布版本为 2026.09.1"),
     ).toBeVisible();
+
+    // 3b) 锁版故障防护：当报告锁定的统计快照接口返回 500/404 时，严禁回退至本地未锁版 seed 数据或伪报「版本永久锁定」
+    const faultPage = await freshContext.newPage();
+    await faultPage.route("**/api/statistics/STAT-ENT-UIH-RD-RATIO*", (route) =>
+      route.fulfill({
+        status: 404,
+        contentType: "application/json",
+        body: JSON.stringify({ error: { code: "NOT_FOUND", message: "missing locked version", params: {} } }),
+      }),
+    );
+    await faultPage.goto("/reports/mdes-2026q3-high-end-imaging-report");
+    await expect(
+      faultPage.locator("#ch-1").getByText("缺少或无法核验锁定的统计版本快照 STAT-ENT-UIH-RD-RATIO@v2026.06.1"),
+    ).toBeVisible();
+    await expect(faultPage.locator("#ch-1").getByText("版本永久锁定：v2026.06.1")).toHaveCount(0);
+    await expect(faultPage.locator("#ch-1 #fig-report-stat-ent-uih-rd-ratio")).toHaveCount(0);
+    await faultPage.close();
     await freshContext.close();
 
     // 4) 标准纠偏案例：检索历史误写号 GB 9706.233-2020，提示现行规范编号为强制性行业标准 YY 9706.233-2021
@@ -263,12 +280,29 @@ test.describe.serial("MDES V2 全站改造五项端到端验收、旧书签迁�
     await expect(page.getByRole("tab", { name: "优先审批", selected: true })).toBeVisible();
     await expect(page.locator("main")).toContainText("儿童先天性心脏病可降解封堵系统优先审批决定");
 
-    // C. 旧链接抽查 2：/enterprises?group=ashare&province=上海 -> 精确筛选上海 A 股企业（联影医疗 & 奕瑞科技）
+    // C. 旧链接抽查 2 + 2–5 家企业多维横向对标核验：/enterprises?group=ashare&province=上海 -> 精确筛选上海 A 股企业（联影医疗 & 奕瑞科技）
     await page.goto("/enterprises?group=ashare&province=上海");
     const entTable = page.getByRole("table", { name: "医疗器械重点企业名录" });
     await expect(entTable).toContainText("上海联影医疗科技股份有限公司");
     await expect(entTable).toContainText("上海奕瑞光电子科技股份有限公司");
     await expect(entTable).not.toContainText("深圳迈瑞生物医疗电子股份有限公司");
+
+    // 勾选 2 家上海 A 股企业启动双企横向对比，并验证 5 家上限样本加载与清除
+    await page.getByRole("checkbox", { name: /勾选 上海联影医疗科技股份有限公司 加入多企业对标/ }).click();
+    await expect(page.getByText(/已选 1 家企业：上海联影医疗科技股份有限公司/)).toBeVisible();
+    await page.getByRole("checkbox", { name: /勾选 上海奕瑞光电子科技股份有限公司 加入多企业对标/ }).click();
+    const benchPanel = page.locator("#enterprise-benchmark-panel");
+    await expect(benchPanel).toBeVisible();
+    await expect(benchPanel).toContainText("多企业横向对标（已选 2/5 家）");
+    await expect(benchPanel.locator("tbody tr")).toHaveCount(2);
+    await expect(benchPanel).toContainText("18.99%");
+
+    await benchPanel.getByRole("button", { name: "清除企业对标" }).click();
+    await expect(benchPanel).toHaveCount(0);
+    await page.getByRole("button", { name: "重置筛选" }).click();
+    await page.getByRole("button", { name: /加载 5 家影像龙头对标样本/ }).click();
+    await expect(benchPanel).toContainText("多企业横向对标（已选 5/5 家）");
+    await expect(benchPanel.locator("tbody tr")).toHaveCount(5);
 
     // D. 旧链接抽查 3：/reports?tab=standards -> 呈现「官方年报」与「技术标准」双独立入口
     await page.goto("/reports?tab=standards");

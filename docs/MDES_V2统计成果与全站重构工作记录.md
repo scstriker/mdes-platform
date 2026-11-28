@@ -22,8 +22,8 @@
 ### 2. 数据与存储定案：双平面 D1 存储（`0010` 迁移）+ 列式不可变快照 + Worker 零解析直通
 - **修正迁移编号冲突**：远端 `main` 已占用 `0001..0009`，新增迁移定为 `apps/api/migrations/0010_v2_statistics_entities.sql`，向后兼容扩展 `observation` 表（`value_type`、`forecast_as_of`、`revision_id`）。
 - **平面一（实体与检索索引层）**：建立 `statistic_def`（内联 `< 1 KB` `summary_kpi_json`，列表与专题卡片免读完整数据包）、`catalog_record`（统一索引型号/注册/企业/机构/政策/标准/来源/招采/技术/报告 10 类对象）、`entity_relation` 关系图谱及 SQLite `FTS5` 虚拟表 `search_fts`（含中日文分词索引与旧别名优先召回）。
-- **平面二（列式不可变快照层）**：`statistic_version(statistic_id, version)` 采用 OWID 列式数组 + OECD SDMX 状态码（`A` 实际 / `E` 估算 / `F` 预测 + `forecast_as_of` / `P` 非完整期）。Hono Worker 在 `?raw=1` 快照通道直接以 `new Response(verRow.payload_json)` 原样流式返回并输出强 `ETag`（省去 `JSON.parse + JSON.stringify` CPU 开销），主键查询恒定 `rows_read = 1`。
-- **海关贸易历史版本锁版补齐**：扩展 `GET /api/trade/overview?releaseId=...` 查询 `trade_period_snapshot`（`rows_read = 1`），并提供共享层零拷贝适配器 `adaptTradeSnapshotToStatistics`，使研究报告、品类市场与 `/statistics` 直接消费已发布海关快照而不重复落表。
+- **平面二（列式不可变快照层）**：`statistic_version(statistic_id, version)` 采用 OWID 列式数组 + OECD SDMX 状态码（`A` 实际 / `E` 估算 / `F` 预测 + `forecast_as_of` / `P` 非完整期）。Hono Worker 在 `?raw=1` 快照通道直接以 `new Response(verRow.payload_json)` 原样流式返回，在默认 SPA 详情通道通过 SQLite `json_extract` 仅提取轻量 `related_statistic_ids` 并直接拼装 `rawEnvelope`（双通道均免除对含大型列式 `dataset` 的 `payload_json` 执行 `JSON.parse / JSON.stringify`），主键查询恒定 `rows_read = 1`。
+- **海关贸易历史版本锁版与离线同构**：复用 `trade.ts` 的 `DEFAULT_DICT_VERSION`，扩展 `GET /api/trade/overview?releaseId=...` 查询 `trade_period_snapshot`（`rows_read = 1`），并提供共享层零拷贝适配器 `adaptTradeSnapshotToStatistics` 同时接入线上 Worker 与离线 `demo-api.ts`（支持 `/api/statistics` 列表/详情、`/versions` 历史发布序列及 `?v=<period>.<releasePrefix>` 精确回查 `trade_period_snapshot` 历史锁版）。研究报告详情页对锁版统计禁用本地未锁版种子回退，接口报错或版本不一致时显式告警而绝不静默漂移。
 
 ### 3. 图表生命周期与出版导出定案：零首屏增量，用 `22 KB` 轻量方案淘汰 `280 KB` 重型库
 - **ECharts 6.1 三阶段生命周期（`chart.tsx`）**：挂载仅执行一次 `echarts.init`，筛选/排序/图形切换调用 `chart.setOption(..., { replaceMerge: ["series", "xAxis", "yAxis"], lazyUpdate: true })` 并开启 `UniversalTransition` 平滑形变，彻底消除反复 `dispose()` 重建；`ResizeObserver` 经 `requestAnimationFrame` 与非零尺寸守卫保护，自动响应 `prefers-reduced-motion: reduce`。
@@ -66,7 +66,8 @@
 | **Batch 2** | `@mdes/shared` 列式 `Statistic` 与实体契约、核验样板种子库、D1 `0010` 双平面 + FTS5 迁移、`/api/statistics` 零解析直通、`/api/catalog`、`/api/trade/overview?releaseId=`、`demo-api.ts` 同构 | Miniflare D1 断言 `statistic_version` 与 `trade_period_snapshot` 均恒定 `rows_read = 1`；全量 API 集成测试 74/74 通过 | `7dc840e` |
 | **Batch 3** | `chart.tsx` 三阶段实例复用、6 类统计语法模板、离屏白底 SVG/2xPNG、动态分包 `write-excel-file` 4-Sheet XLSX & `pptxgenjs` 原生 PPTX、`StatisticFigure 2.0`、`/__design` 展示 | Spy 断言筛选/切图零 `dispose` 重建；XLSX 4-Sheet 与 PPTX `ppt/charts/chart1.xml` 二进制结构校验通过；`style-rules.test.ts` 13/13 通过 | `38e3f4c` |
 | **Batch 4** | 7+7 导航与移动端 5 项底栏、旧书签 `loader`/锚点迁移、`/statistics` 及 `:id` 工作台、`/markets`、`/technologies`、`/products` 及 `:slug` 双型号比较、`/enterprises` 及 `:slug` 8 模块档案、5 大资料查询页、智库首页、锁版 `/reports` | 全仓 Vitest 26 套件 186/186 通过；生产构建与离线单文件 `dist-demo/mdes-demo.html`（`2.96 MB`）构建通过 | `4b443f6` |
-| **Batch 5** | 新增 `08-v2-portal-acceptance.spec.ts` 端到端验收套件、扩展 `02/04/05/06/07` E2E 与 28 路由无障碍矩阵、修复窄屏工具栏弹性换行与无点号 HS8 深链匹配、回填全套工作记录收口 | **Playwright E2E `149/149` 全绿**（含 **112 项**桌面/手机 × 浅深主题 WCAG 2.1 AA 零违规扫描）；**全仓单测 `186/186` 全绿** | 本批收口提交 |
+| **Batch 5** | 新增 `08-v2-portal-acceptance.spec.ts` 端到端验收套件、扩展 `02/04/05/06/07` E2E 与 28 路由无障碍矩阵、修复窄屏工具栏弹性换行与无点号 HS8 深链匹配、回填全套工作记录收口 | Playwright E2E 与全仓单测通过 | `90ab36d` |
+| **Batch 6** | **PR #5 独立审查全部 1 项 P1 + 6 项 P2 缺陷修复与跨平台硬化**：新增 `.gitattributes` 锁定全仓 LF 换行并重整索引（根治 Windows `core.autocrlf=true` 干净检出下 `tokens:check` 与 `trade-g5` 字典哈希失败并消除 CRLF diff 噪声）；`report-detail` 移除未锁版 seed 回退并区分 loading/error/版本漂移；`demo-api.ts` 合并海关快照适配统计与历史 `?v=`；`statistics.ts` 复用 `DEFAULT_DICT_VERSION`、实现贸易适配统计历史 `?v=` 锁版并在默认详情路径免除 `payload_json` 解析；`customs-suite-v4` 改用静态相对导入；扩展 `04-a11y` 至 **35 路由（140 项 WCAG 扫描）**、收紧 `06` 数值单元格断言、补齐 2–5 家企业横向对比与锁版容错 E2E、更新 `ADR-005` 为已采纳 | **`tokens:check` 通过**；**全仓单测 `27` 套件 `188/188` 全绿**；**Playwright E2E `177/177` 全绿（含 140 项 WCAG 2.1 AA 零违规）** | 本批审查修复提交 |
 
 ---
 
@@ -76,10 +77,10 @@
 - **首屏入口零导出库污染**：`dist/index.html`（`0.68 kB` gzip）与全站样式 `index.css`（`11.26 kB` gzip，较重构前 `12.17 kB` 进一步缩减）完全不含任何导出库预加载；`export-xlsx-*.js` 独立异步包仅 **`22.05 kB` gzip**，`export-pptx-*.js`（`2.28 kB` gzip）+ `pptxgen.es-*.js`（`126.77 kB` gzip）仅在点击导出 PPT 时异步拉取；全部 12 个新增路由页面均按路由拆分为 `3–10 kB` gzip 轻量异步块。
 - **D1 查询复杂度恒定 `O(1)`**：`apps/api/tests/v2-statistics-catalog.test.ts` 在真实 Miniflare D1 上验证 `GET /api/statistics/:id`（含 `?v=` 历史版本）与 `GET /api/trade/overview?period=2024&releaseId=...` 均走主键/唯一索引，`meta.rows_read === 1`。
 - **单测与端到端门禁全绿**：
-  - `npm run tokens:check -w @mdes/web`：通过（`token 产物与 tokens.json 一致`）
-  - `npm test`：**`26` 个测试文件，`186` 项测试全部通过**（`@mdes/shared` 49 项、`@mdes/api` 74 项、`@mdes/web` 63 项）
-  - `npm run build` & `npm run build:demo -w @mdes/web`：0 告警错误，离线演示单文件 `mdes-demo.html` 正常产出
-  - `npm run e2e`：**`8` 个 E2E 规格文件，`149` 项端到端用例全部通过**（含 28 路由 × `1440×900` / `390×844` × 浅色 / 深色共 `112` 项 `@axe-core/playwright` WCAG 2.1 A/AA 扫描零违规）
+  - `npm run tokens:check -w @mdes/web`：通过（`token 产物与 tokens.json 一致`，且由根目录 `.gitattributes` 锁定跨平台 LF 检出）
+  - `npm test`：**`27` 个测试文件，`188` 项测试全部通过**（`@mdes/shared` 49 项、`@mdes/api` 74 项、`@mdes/web` 65 项）
+  - `npm run build` & `npm run build:demo -w @mdes/web`：0 错误，离线演示单文件 `mdes-demo.html`（`2.97 MB`）正常产出
+  - `npm run e2e`：**`8` 个 E2E 规格文件，`177` 项端到端用例全部通过**（含 **35 路由** × `1440×900` / `390×844` × 浅色 / 深色共 **`140` 项** `@axe-core/playwright` WCAG 2.1 A/AA 扫描零违规，完整覆盖 `/technologies`、`/policies`、`/sources`、锁版报告详情、历史 `?v=` 统计及多企业/双型号对比态）
 
 ### 2. 五项核心业务验收任务与旧书签抽查逐项核验结果（`08-v2-portal-acceptance.spec.ts`）
 1. **按型号查采购与双型号对比**：全站检索 `uMR Jupiter` → 进入 `/products/umr-jupiter` 核对西安交大二附院 `WXZB(2024)-016`（`1 套`、`人民币 4,980 万元`、成交公告链接）与实际应用区深圳龙华区中心医院（`2024-08-10` 启用）；点击「与 uMR 880 比较」核对 `5.0 T` vs `3.0 T` 参数及出处；从 `/markets?category=mri&region=陕西&period=2024` 筛选命中同一 `WXZB(2024)-016` 项目 —— **自动化验证通过**。

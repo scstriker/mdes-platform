@@ -1,6 +1,6 @@
 # ADR-005　列式不可变统计快照、一等公民拆页与零首屏出版导出栈
 
-**状态**　实施中，2026-11-27。承接 [ADR-002 界面技术栈](ADR-002-ui-stack.md)、[ADR-003 Cloudflare D1 选型](ADR-003-cloudflare-d1.md) 与 [ADR-004 海关贸易快照发布](ADR-004-trade-publication.md)。
+**状态**　已采纳（Accepted），2026-11-28（初拟 2026-11-27）。承接 [ADR-002 界面技术栈](ADR-002-ui-stack.md)、[ADR-003 Cloudflare D1 选型](ADR-003-cloudflare-d1.md) 与 [ADR-004 海关贸易快照发布](ADR-004-trade-publication.md)。
 
 ## 背景
 
@@ -9,9 +9,10 @@
 ## 决定
 
 1. **信息架构与领域拆页**：桌面主导航设为 **产业总览、市场、技术、产品、企业、进出口贸易、研究报告** 七项；页眉「资料查询」菜单收纳 **统计成果库、注册与准入、机构名录、产业政策、技术标准、官方来源、指标与口径** 七项；手机底栏固定为 **总览、市场、产品、贸易、全部**。型号、企业、报告、单项统计各自拥有独立稳定地址，旧书签由路由 `loader` 同步重定向。
-2. **D1 双平面存储与零解析直通（`0010` 迁移）**：
+2. **D1 双平面存储、零数据包解析信封与双路径历史锁版（`0010` 迁移）**：
    - 平面一：`statistic_def`（内联 `< 1 KB` `summary_kpi_json`）、`catalog_record`（统一索引型号/注册/企业/机构/政策/标准/来源/招采/技术/报告）、`entity_relation` 及 SQLite `FTS5` 全文索引 `search_fts`。
-   - 平面二：`statistic_version` 按 `(statistic_id, version)` 主键保存列式数据数组与 SDMX 观测状态码（`A` 实际 / `E` 估算 / `F` 预测 / `P` 非完整期）及 `methodology_breaks`。Worker 命中后直接以 `new Response(payload_json)` 原样流式返回并附 `ETag`，单次请求恒定 `rows_read = 1`；`GET /api/trade/overview` 扩展 `?releaseId=` 读取 `trade_period_snapshot` 以锁定报告历史引用。
+   - 平面二：`statistic_version` 按 `(statistic_id, version)` 主键保存列式数据数组与 SDMX 观测状态码（`A` 实际 / `E` 估算 / `F` 预测 / `P` 非完整期）及 `methodology_breaks`，单次主键查询恒定 `rows_read = 1`。`?raw=1`（或 `application/vnd.mdes.statistic.raw+json`）直接以 `new Response(payload_json)` 原样返回快照字节；SPA 默认详情读路径通过 SQLite `json_extract` 仅提取轻量 `related_statistic_ids`，在 Worker JS 层不对含大型列式 `dataset` 的 `payload_json` 执行 `JSON.parse / JSON.stringify`，直接拼装外层信封并输出强 `ETag`。
+   - 海关贸易一等公民统计适配与版本锁：复用 `trade.ts` 的 `DEFAULT_DICT_VERSION`，将已发布海关快照通过 `adaptTradeSnapshotToStatistics` 同时合并入线上 Worker 与离线 `demo-api` 的 `/api/statistics` 列表/详情/版本接口；当请求携带历史 `?v=<period>.<releasePrefix>`（或 `GET /api/trade/overview?releaseId=`）时，精确回查 `trade_release` 与 `trade_period_snapshot`（唯一索引 `rows_read = 1`）。研究报告详情页对锁版统计禁用未锁版种子回退，接口失败或版本不匹配时显式告警而绝不静默漂移。
 3. **图表生命周期与零首屏出版导出**：
    - `chart.tsx` 挂载仅初始化一次，数据与视图变更调用 `setOption(opt, { replaceMerge: ['series', 'xAxis', 'yAxis'], lazyUpdate: true })`，主题切换直接刷新 Token 配置。
    - 矢量与位图导出采用浏览器内存态离屏 ECharts SVG 实例（注入 `tokens.flat.json` 浅色出版常量，免疫深色主题与表格态卸载）。

@@ -320,10 +320,45 @@ describe("V2 单项统计双平面快照、一等公民目录、历史贸易版�
       releaseId: "rel-does-not-exist",
     });
 
-    // 已发布海关快照自动合并进 GET /api/statistics
+    // 已发布海关快照自动合并进 GET /api/statistics，且一等公民统计路径支持历史 ?v= 锁版与版本列表
     const statsRes = await h.request("/api/statistics?topic=trade");
     const statsPage = (await statsRes.json()) as StatisticListPage;
     expect(statsPage.items.some((i) => i.statistic_id === "STAT-TRD-OVERALL-ANNUAL")).toBe(true);
+
+    const release2 = snap2.releaseId;
+    const expectedLatestTradeVer = `2024-12.${release2.slice(0, 8)}`;
+    const expectedHistTradeVer = `2024-12.${release1.slice(0, 8)}`;
+
+    const trdLatestRes = await h.request("/api/statistics/STAT-TRD-OVERALL-ANNUAL");
+    expect(trdLatestRes.status).toBe(200);
+    const trdLatest = (await trdLatestRes.json()) as StatisticDetailResponse;
+    expect(trdLatest.statistic.version).toBe(expectedLatestTradeVer);
+    expect(trdLatest.latest_version).toBe(expectedLatestTradeVer);
+    expect(trdLatest.is_historical_version).toBe(false);
+    expect(trdLatest.statistic.summary_kpi.headline_value).toBe((snap2.totals.totalUsd / 1e8).toFixed(2));
+
+    const trdHistRes = await h.request(
+      `/api/statistics/STAT-TRD-OVERALL-ANNUAL?v=${encodeURIComponent(expectedHistTradeVer)}`,
+    );
+    expect(trdHistRes.status).toBe(200);
+    expect(trdHistRes.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
+    const trdHist = (await trdHistRes.json()) as StatisticDetailResponse;
+    expect(trdHist.statistic.version).toBe(expectedHistTradeVer);
+    expect(trdHist.latest_version).toBe(expectedLatestTradeVer);
+    expect(trdHist.is_historical_version).toBe(true);
+    expect(trdHist.statistic.dataset.series[0]?.values[0]).toBe(
+      Math.round((snap1.annualTrend[0]!.exportUsd / 1e8) * 100) / 100,
+    );
+
+    const trdVersRes = await h.request("/api/statistics/STAT-TRD-OVERALL-ANNUAL/versions");
+    expect(trdVersRes.status).toBe(200);
+    const trdVers = (await trdVersRes.json()) as StatisticVersionsResponse;
+    expect(trdVers.latest_version).toBe(expectedLatestTradeVer);
+    expect(trdVers.items[0]?.version).toBe(expectedLatestTradeVer);
+    expect(trdVers.items.map((v) => v.version)).toContain(expectedHistTradeVer);
+
+    const trdMissRes = await h.request("/api/statistics/STAT-TRD-OVERALL-ANNUAL?v=2024-12.deadbeef");
+    expect(trdMissRes.status).toBe(404);
   }, 45_000);
 
   it("GET /api/search 经 search_fts 精确召回 uMR Jupiter、湖北省医疗器械质量监督检验研究院与旧标准别名 v2_hits", async () => {

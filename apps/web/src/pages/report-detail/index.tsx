@@ -1,13 +1,9 @@
 import { useCallback, useMemo, useState } from "react";
 import { Link, useParams } from "react-router";
-import { IconCheck, IconCopy, IconExternalLink, IconLock } from "@tabler/icons-react";
-import {
-  V2_HISTORICAL_STATISTIC_VERSIONS,
-  V2_SEED_CATALOG_RECORDS,
-  V2_SEED_STATISTICS,
-  type CatalogRecord,
-  type ReportChapterSpec,
-  type Statistic,
+import { IconCheck, IconCopy, IconExternalLink, IconLock, IconRefresh } from "@tabler/icons-react";
+import type {
+  CatalogRecord,
+  ReportChapterSpec,
 } from "@mdes/shared";
 import {
   Breadcrumbs,
@@ -18,22 +14,16 @@ import {
   Tag,
   TextLink,
 } from "@/components/itei";
+import { QueryError } from "@/components/layout/query-error";
 import { StatisticFigure } from "@/components/layout/statista-figure";
 import { Button } from "@/components/ui/button";
-import { useCatalogDetail, useStatisticDetail } from "@/lib/api/queries";
+import { Skeleton } from "@/components/ui/skeleton";
+import { ApiError, describeError, useCatalogDetail, useStatisticDetail } from "@/lib/api";
 
 const LEGACY_REPORT_SLUG_MAP: Record<string, string> = {
   "rep-brf-01": "mdes-2026q3-high-end-imaging-report",
   "rep-brf-02": "mdes-2026q2-customs-supply-chain-briefing",
 };
-
-function findSeedPinnedStatistic(statisticId: string, version: string): Statistic | undefined {
-  const all = [...V2_SEED_STATISTICS, ...V2_HISTORICAL_STATISTIC_VERSIONS];
-  return (
-    all.find((s) => s.statistic_id === statisticId && s.version === version) ??
-    V2_SEED_STATISTICS.find((s) => s.statistic_id === statisticId)
-  );
-}
 
 function ReportPinnedStatisticBlock({
   statisticId,
@@ -45,15 +35,43 @@ function ReportPinnedStatisticBlock({
   const detailQuery = useStatisticDetail(statisticId, pinnedVersion);
   const pinnedHref = `/statistics/${encodeURIComponent(statisticId)}?v=${encodeURIComponent(pinnedVersion)}`;
 
-  const statistic = useMemo(
-    () => detailQuery.data?.statistic ?? findSeedPinnedStatistic(statisticId, pinnedVersion),
-    [detailQuery.data, statisticId, pinnedVersion],
-  );
-
-  if (!statistic) {
+  if (detailQuery.isPending) {
     return (
-      <Notice tone="danger" title={`缺少锁定的统计版本快照 ${statisticId}@${pinnedVersion}`}>
-        未能读取该章节出版时绑定的统计快照（目标版本：{pinnedVersion}）。
+      <div
+        aria-busy="true"
+        aria-label={`正在加载锁定统计快照 ${statisticId}@v${pinnedVersion}`}
+        className="grid gap-3 border border-border bg-surface p-4"
+      >
+        <Skeleton className="h-5 w-64" />
+        <Skeleton className="h-72 w-full" />
+      </div>
+    );
+  }
+
+  const statistic = detailQuery.data?.statistic;
+  if (detailQuery.isError || !statistic || statistic.version !== pinnedVersion) {
+    const errText = detailQuery.isError
+      ? describeError(detailQuery.error)
+      : statistic && statistic.version !== pinnedVersion
+        ? `服务端返回版本 v${statistic.version} 与出版锁定版本 v${pinnedVersion} 不一致，已拒绝渲染以防数据漂移。`
+        : `未找到目标锁定版本 v${pinnedVersion}。`;
+    return (
+      <Notice
+        tone="danger"
+        title={`缺少或无法核验锁定的统计版本快照 ${statisticId}@v${pinnedVersion}`}
+        action={
+          <div className="flex flex-wrap items-center gap-2">
+            <Button variant="secondary" size="sm" onClick={() => void detailQuery.refetch()}>
+              <IconRefresh size={14} aria-hidden="true" />
+              重试读取
+            </Button>
+            <Button asChild variant="ghost" size="sm">
+              <Link to={pinnedHref}>前往统计工作台核查</Link>
+            </Button>
+          </div>
+        }
+      >
+        为严格兑现出版物锁版抗修订漂移承诺，在锁定快照加载失败或版本缺失时禁用本地未锁版种子回退。原因：{errText}
       </Notice>
     );
   }
@@ -111,15 +129,7 @@ export default function ReportDetailPage() {
   const detailQuery = useCatalogDetail("report", resolvedSlug);
   const [copiedReportCitation, setCopiedReportCitation] = useState(false);
 
-  const record = useMemo<CatalogRecord | undefined>(() => {
-    if (detailQuery.data?.record) return detailQuery.data.record;
-    if (!resolvedSlug) return undefined;
-    return V2_SEED_CATALOG_RECORDS.find(
-      (r) =>
-        r.kind === "report" &&
-        (r.slug === resolvedSlug || r.id === resolvedSlug || (r.legacy_aliases ?? []).includes(resolvedSlug)),
-    );
-  }, [detailQuery.data, resolvedSlug]);
+  const record: CatalogRecord | undefined = detailQuery.data?.record;
 
   const d = record?.detail ?? {};
   const issueLabel = typeof d.issue_label === "string" ? d.issue_label : (record?.period ?? "");
@@ -144,6 +154,26 @@ export default function ReportDetailPage() {
       // 忽略受限剪贴板异常
     }
   }, [reportCitationText]);
+
+  if (detailQuery.isPending) {
+    return (
+      <div className="mx-auto grid w-full max-w-content gap-6 px-4 py-10 md:px-8" aria-busy="true">
+        <Skeleton className="h-6 w-48" />
+        <Skeleton className="h-12 w-3/4" />
+        <Skeleton className="h-28 w-full" />
+        <Skeleton className="h-96 w-full" />
+      </div>
+    );
+  }
+
+  if (detailQuery.isError && !(detailQuery.error instanceof ApiError && detailQuery.error.status === 404)) {
+    return (
+      <div className="mx-auto grid w-full max-w-content gap-6 px-4 py-10 md:px-8">
+        <Breadcrumbs items={[{ label: "研究报告", href: "/reports" }, { label: slug ?? "报告加载异常" }]} />
+        <QueryError error={detailQuery.error} onRetry={() => void detailQuery.refetch()} />
+      </div>
+    );
+  }
 
   if (!record) {
     return (

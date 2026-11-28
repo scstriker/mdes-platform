@@ -4,12 +4,14 @@
  * 导入用 @mdes/shared 的同一套解析器；数据只在内存里，刷新页面即重置。
  */
 import {
+  adaptTradeSnapshotToStatistics,
   buildCatalogRecordHref,
   canonicalizeDimsJson,
   detectCatalogAliasCorrection,
   errorBody,
   matchesQuery,
   normalizeAliasKey,
+  normalizeTradeOverviewSnapshot,
   observationMatchesQuery,
   parseObservationCsv,
   parseTradePeriod,
@@ -36,9 +38,11 @@ import {
   type StatisticDetailResponse,
   type StatisticListItem,
   type StatisticListPage,
+  type StatisticVersionEntry,
   type StatisticVersionsResponse,
   type Stats,
   type TradeOverviewEmpty,
+  type TradeOverviewPublished,
   type UnifiedSearchHit,
 } from "@mdes/shared";
 import seed from "../../../../data/indicators_seed.json";
@@ -112,6 +116,281 @@ for (const hist of V2_HISTORICAL_STATISTIC_VERSIONS) {
 }
 
 const catalogRecords: CatalogRecord[] = [...V2_SEED_CATALOG_RECORDS];
+
+const DEMO_DICT_VERSION = "202601";
+
+type DemoTradeReleaseEntry = {
+  releaseId: string;
+  dictVersion: string;
+  publishedMonths: string[];
+  availablePeriods: string[];
+  createdAt: string;
+};
+
+function makeDemoTradeSnapshot(opts: {
+  period: string;
+  releaseId: string;
+  availablePeriods: string[];
+  months: string[];
+  totals: TradeOverviewPublished["totals"];
+  annualTrend: TradeOverviewPublished["annualTrend"];
+  headline: string;
+  multiYearParagraph: string;
+}): TradeOverviewPublished {
+  return {
+    status: "published",
+    period: opts.period,
+    source: "china_customs",
+    dictVersion: DEMO_DICT_VERSION,
+    releaseId: opts.releaseId,
+    units: {
+      amount: "USD",
+      displayAmount: "100M_USD",
+      share: "PCT",
+      cr: "PCT",
+      hhi: "0_10000",
+    },
+    availablePeriods: opts.availablePeriods,
+    coverage: {
+      months: opts.months,
+      expectedMonths: opts.months.length,
+      coveredMonths: opts.months.length,
+      applicableHs8Count: 164,
+      coveredHs8Count: 164,
+      notApplicableHs8Count: 0,
+    },
+    sourceBatches: [],
+    totals: opts.totals,
+    groupingTotals: {
+      product: { importUsd: opts.totals.importUsd, exportUsd: opts.totals.exportUsd },
+      partner: { importUsd: opts.totals.importUsd, exportUsd: opts.totals.exportUsd, count: 180 },
+      regime: { importUsd: opts.totals.importUsd, exportUsd: opts.totals.exportUsd, count: 16 },
+      region: { importUsd: opts.totals.importUsd, exportUsd: opts.totals.exportUsd, count: 31 },
+    },
+    concentration: {
+      import: { cr1: 28.4, cr3: 63.2, cr5: 76.5, hhi: 1780, partnerCount: 142 },
+      export: { cr1: 24.1, cr3: 42.8, cr5: 53.6, hhi: 980, partnerCount: 196 },
+    },
+    trend: [],
+    annualTrend: opts.annualTrend,
+    narrativeSummary: {
+      headline: opts.headline,
+      scaleParagraph: opts.headline,
+      multiYearParagraph: opts.multiYearParagraph,
+      structureParagraph: "医用诊断装备与高值耗材构成双边进出口主力品类。",
+      concentrationAlert: "高端影像关键部件进口来源维持较高集中度。",
+    },
+    categories: [],
+    partners: [],
+    regimes: [],
+    regions: [],
+    hsItems: [],
+  };
+}
+
+const DEMO_ANNUAL_2022_2025: TradeOverviewPublished["annualTrend"] = [
+  {
+    period: "2022",
+    year: 2022,
+    coveredMonths: 12,
+    importUsd: 54_180_000_000,
+    exportUsd: 71_620_000_000,
+    totalUsd: 125_800_000_000,
+    balanceUsd: 17_440_000_000,
+    importYoyPct: null,
+    exportYoyPct: null,
+    totalYoyPct: null,
+    isPartial: false,
+  },
+  {
+    period: "2023",
+    year: 2023,
+    coveredMonths: 12,
+    importUsd: 52_460_000_000,
+    exportUsd: 68_940_000_000,
+    totalUsd: 121_400_000_000,
+    balanceUsd: 16_480_000_000,
+    importYoyPct: -3.17,
+    exportYoyPct: -3.74,
+    totalYoyPct: -3.5,
+    isPartial: false,
+  },
+  {
+    period: "2024",
+    year: 2024,
+    coveredMonths: 12,
+    importUsd: 49_820_000_000,
+    exportUsd: 70_850_000_000,
+    totalUsd: 120_670_000_000,
+    balanceUsd: 21_030_000_000,
+    importYoyPct: -5.03,
+    exportYoyPct: 2.77,
+    totalYoyPct: -0.6,
+    isPartial: false,
+  },
+  {
+    period: "2025",
+    year: 2025,
+    coveredMonths: 12,
+    importUsd: 48_950_000_000,
+    exportUsd: 73_420_000_000,
+    totalUsd: 122_370_000_000,
+    balanceUsd: 24_470_000_000,
+    importYoyPct: -1.75,
+    exportYoyPct: 3.63,
+    totalYoyPct: 1.41,
+    isPartial: false,
+  },
+];
+
+const DEMO_TRADE_RELEASE_HIST_ID = "11111111-2222-3333-4444-555555555555";
+const DEMO_TRADE_RELEASE_LATEST_ID = "20bd2985-105c-4927-982a-cbd68a71562b";
+
+const demoTradeReleases: DemoTradeReleaseEntry[] = [
+  {
+    releaseId: DEMO_TRADE_RELEASE_LATEST_ID,
+    dictVersion: DEMO_DICT_VERSION,
+    publishedMonths: ["2025-12", "2026-10"],
+    availablePeriods: ["2022", "2023", "2024", "2025", "2026-YTD-10", "2026-10"],
+    createdAt: "2026-11-26T12:00:00Z",
+  },
+  {
+    releaseId: DEMO_TRADE_RELEASE_HIST_ID,
+    dictVersion: DEMO_DICT_VERSION,
+    publishedMonths: ["2025-12"],
+    availablePeriods: ["2022", "2023", "2024", "2025", "2025-12"],
+    createdAt: "2026-02-15T08:00:00Z",
+  },
+];
+
+const demoTradeSnapshotHist2025 = makeDemoTradeSnapshot({
+  period: "2025-12",
+  releaseId: DEMO_TRADE_RELEASE_HIST_ID,
+  availablePeriods: ["2022", "2023", "2024", "2025", "2025-12"],
+  months: ["2025-12"],
+  totals: {
+    importUsd: 48_950_000_000,
+    exportUsd: 73_420_000_000,
+    totalUsd: 122_370_000_000,
+    balanceUsd: 24_470_000_000,
+    importYoyPct: -1.75,
+    exportYoyPct: 3.63,
+    totalYoyPct: 1.41,
+  },
+  annualTrend: DEMO_ANNUAL_2022_2025,
+  headline: "2025 年中国医疗器械海关进出口总额 1,223.70 亿美元，贸易顺差扩大至 244.70 亿美元。",
+  multiYearParagraph: "2022–2025 年中国医疗器械出口稳步回升，贸易顺差由 174.40 亿美元扩大至 244.70 亿美元。",
+});
+
+const demoTradeSnapshotLatest = makeDemoTradeSnapshot({
+  period: "2026-10",
+  releaseId: DEMO_TRADE_RELEASE_LATEST_ID,
+  availablePeriods: ["2022", "2023", "2024", "2025", "2026-YTD-10", "2026-10"],
+  months: ["2026-10"],
+  totals: {
+    importUsd: 41_229_739_608,
+    exportUsd: 48_029_554_383,
+    totalUsd: 89_259_293_991,
+    balanceUsd: 6_799_814_775,
+    importYoyPct: -1.12,
+    exportYoyPct: 5.48,
+    totalYoyPct: 2.34,
+  },
+  annualTrend: [
+    ...DEMO_ANNUAL_2022_2025,
+    {
+      period: "2026-YTD-10",
+      year: 2026,
+      coveredMonths: 10,
+      importUsd: 41_229_739_608,
+      exportUsd: 48_029_554_383,
+      totalUsd: 89_259_293_991,
+      balanceUsd: 6_799_814_775,
+      importYoyPct: -1.12,
+      exportYoyPct: 5.48,
+      totalYoyPct: 2.34,
+      isPartial: true,
+    },
+  ],
+  headline: "2026 年 1–10 月中国医疗器械进出口累计 892.59 亿美元，同窗口同比增长 2.34%。",
+  multiYearParagraph:
+    "2022–2025 完整年度及 2026 年前 10 个月，中国医疗器械出口保持韧性增长，高端影像与诊断装备国产替代带动贸易顺差持续走阔。",
+});
+
+const demoTradePeriodSnapshots = new Map<string, TradeOverviewPublished>([
+  [`${DEMO_DICT_VERSION}|2025-12|${DEMO_TRADE_RELEASE_HIST_ID}`, demoTradeSnapshotHist2025],
+  [`${DEMO_DICT_VERSION}|2025|${DEMO_TRADE_RELEASE_HIST_ID}`, { ...demoTradeSnapshotHist2025, period: "2025" }],
+  [`${DEMO_DICT_VERSION}|2026-10|${DEMO_TRADE_RELEASE_LATEST_ID}`, demoTradeSnapshotLatest],
+  [`${DEMO_DICT_VERSION}|2024|${DEMO_TRADE_RELEASE_LATEST_ID}`, { ...demoTradeSnapshotLatest, period: "2024" }],
+]);
+
+function loadDemoAdaptedTradeStatistics(dictVersion = DEMO_DICT_VERSION): Statistic[] {
+  if (dictVersion !== DEMO_DICT_VERSION) return [];
+  return adaptTradeSnapshotToStatistics(normalizeTradeOverviewSnapshot({ ...demoTradeSnapshotLatest }));
+}
+
+function loadDemoHistoricalAdaptedTradeStatistics(
+  requestedVersion: string,
+  dictVersion = DEMO_DICT_VERSION,
+): Statistic[] {
+  const trimmed = requestedVersion.trim();
+  if (!trimmed || dictVersion !== DEMO_DICT_VERSION) return [];
+
+  let targetPeriod: string | null = null;
+  let releaseToken = trimmed;
+  const dotIdx = trimmed.lastIndexOf(".");
+  if (dotIdx > 0) {
+    const candidatePeriod = trimmed.slice(0, dotIdx);
+    const candidateRelease = trimmed.slice(dotIdx + 1);
+    if (parseTradePeriod(candidatePeriod) && /^[0-9a-zA-Z_-]{8,}$/.test(candidateRelease)) {
+      targetPeriod = candidatePeriod;
+      releaseToken = candidateRelease;
+    }
+  }
+
+  const rel = demoTradeReleases.find(
+    (r) => r.dictVersion === dictVersion && (r.releaseId === releaseToken || r.releaseId.startsWith(releaseToken)),
+  );
+  if (!rel) return [];
+
+  if (!targetPeriod) {
+    targetPeriod = [...rel.publishedMonths].sort().at(-1) ?? null;
+  }
+  if (!targetPeriod) return [];
+
+  const snap = demoTradePeriodSnapshots.get(`${dictVersion}|${targetPeriod}|${rel.releaseId}`);
+  if (!snap) return [];
+  return adaptTradeSnapshotToStatistics(normalizeTradeOverviewSnapshot({ ...snap, availablePeriods: rel.availablePeriods }));
+}
+
+function listDemoAdaptedTradeStatisticVersions(
+  latestAdapted: Statistic,
+  dictVersion = DEMO_DICT_VERSION,
+): StatisticVersionEntry[] {
+  const seen = new Set<string>();
+  const entries: StatisticVersionEntry[] = [];
+  for (const rel of demoTradeReleases) {
+    if (rel.dictVersion !== dictVersion) continue;
+    const latestMonth = [...rel.publishedMonths].sort().at(-1);
+    if (!latestMonth) continue;
+    const version = `${latestMonth}.${rel.releaseId.slice(0, 8)}`;
+    if (seen.has(version)) continue;
+    seen.add(version);
+    entries.push({
+      version,
+      content_hash: version === latestAdapted.version ? latestAdapted.content_hash : `trd-annual-${rel.releaseId}`,
+      published_at: version === latestAdapted.version ? latestAdapted.published_at : rel.createdAt,
+    });
+  }
+  if (!seen.has(latestAdapted.version)) {
+    entries.unshift({
+      version: latestAdapted.version,
+      content_hash: latestAdapted.content_hash,
+      published_at: latestAdapted.published_at,
+    });
+  }
+  return entries;
+}
 
 function resolveDemoStatId(idOrSlug: string): string | null {
   if (latestStatById.has(idOrSlug)) return idOrSlug;
@@ -211,7 +490,14 @@ function searchDemoV2Hits(rawQ: string, limit: number): UnifiedSearchHit[] {
     }
   }
 
-  for (const stat of latestStatById.values()) {
+  const demoStatsForSearch = [
+    ...latestStatById.values(),
+    ...loadDemoAdaptedTradeStatistics().filter(
+      (s) => !latestStatById.has(s.statistic_id) && !statIdBySlug.has(s.slug),
+    ),
+  ];
+
+  for (const stat of demoStatsForSearch) {
     const item = toStatisticListItem(stat, stat.version);
     let priority = 0;
     if (
@@ -444,7 +730,13 @@ async function handle(
     const offset = int(q.get("offset"), 0, 0);
 
     const paddedV3 = v3Seq && /^\d+$/.test(v3Seq) ? v3Seq.padStart(2, "0") : v3Seq;
-    const allItems = [...latestStatById.values()]
+    const mergedStats: Statistic[] = [
+      ...latestStatById.values(),
+      ...loadDemoAdaptedTradeStatistics().filter(
+        (s) => !latestStatById.has(s.statistic_id) && !statIdBySlug.has(s.slug),
+      ),
+    ];
+    const allItems = mergedStats
       .map((s) => toStatisticListItem(s, s.version))
       .filter((item) => {
         if (topic && !item.topic_tags.some((t) => t.toLowerCase() === topic.toLowerCase())) return false;
@@ -493,7 +785,18 @@ async function handle(
   if (method === "GET" && statVersionsMatch) {
     const rawId = decodeURIComponent(statVersionsMatch[1]!);
     const statId = resolveDemoStatId(rawId);
-    if (!statId) return fail(404, "NOT_FOUND", { resource: "statistic", id: rawId });
+    if (!statId) {
+      const adapted = loadDemoAdaptedTradeStatistics().find((s) => s.statistic_id === rawId || s.slug === rawId);
+      if (adapted) {
+        const resp: StatisticVersionsResponse = {
+          statistic_id: adapted.statistic_id,
+          latest_version: adapted.version,
+          items: listDemoAdaptedTradeStatisticVersions(adapted),
+        };
+        return json(resp);
+      }
+      return fail(404, "NOT_FOUND", { resource: "statistic", id: rawId });
+    }
     const latest = latestStatById.get(statId)!;
     const vMap = statVersionsById.get(statId) ?? new Map<string, Statistic>();
     const items = [...vMap.values()]
@@ -510,11 +813,52 @@ async function handle(
   const statDetailMatch = path.match(/^\/api\/statistics\/([^/]+)$/);
   if (method === "GET" && statDetailMatch) {
     const rawId = decodeURIComponent(statDetailMatch[1]!);
+    const requestedVersion = text(q, "v") ?? text(q, "version");
     const statId = resolveDemoStatId(rawId);
-    if (!statId) return fail(404, "NOT_FOUND", { resource: "statistic", id: rawId });
+
+    if (!statId) {
+      const latestAdapted = loadDemoAdaptedTradeStatistics().find((s) => s.statistic_id === rawId || s.slug === rawId);
+      let targetAdapted: Statistic | undefined =
+        !requestedVersion || (latestAdapted && requestedVersion === latestAdapted.version)
+          ? latestAdapted
+          : undefined;
+
+      if (requestedVersion && !targetAdapted) {
+        const histList = loadDemoHistoricalAdaptedTradeStatistics(requestedVersion);
+        targetAdapted = histList.find((s) => s.statistic_id === rawId || s.slug === rawId);
+        if (!targetAdapted) {
+          if (!latestAdapted) return fail(404, "NOT_FOUND", { resource: "statistic", id: rawId });
+          return fail(404, "NOT_FOUND", { resource: "statistic_version", id: rawId, version: requestedVersion });
+        }
+      }
+
+      if (!targetAdapted) return fail(404, "NOT_FOUND", { resource: "statistic", id: rawId });
+
+      const latestVer = latestAdapted?.version ?? targetAdapted.version;
+      const etag = `"${targetAdapted.content_hash}"`;
+      const cacheControl = requestedVersion ? "public, max-age=31536000, immutable" : "public, max-age=60";
+      const inm = reqHeaders.get("if-none-match");
+      if (inm && inm.split(",").map((s) => s.trim()).includes(etag)) {
+        return new Response(null, { status: 304, headers: { ETag: etag, "Cache-Control": cacheControl } });
+      }
+      if (q.get("raw") === "1" || q.get("raw") === "true") {
+        return json(targetAdapted, 200, { ETag: etag, "Cache-Control": cacheControl });
+      }
+      const related: StatisticListItem[] = targetAdapted.related_statistic_ids
+        .map((rid) => latestStatById.get(rid))
+        .filter((s): s is Statistic => Boolean(s))
+        .map((s) => toStatisticListItem(s, s.version));
+
+      const detailBody: StatisticDetailResponse = {
+        statistic: targetAdapted,
+        latest_version: latestVer,
+        is_historical_version: targetAdapted.version !== latestVer,
+        related,
+      };
+      return json(detailBody, 200, { ETag: etag, "Cache-Control": cacheControl });
+    }
 
     const latest = latestStatById.get(statId)!;
-    const requestedVersion = text(q, "v") ?? text(q, "version");
     const targetVersion = requestedVersion ?? latest.version;
     const found = statVersionsById.get(statId)?.get(targetVersion);
     if (!found) {
@@ -734,7 +1078,12 @@ async function handle(
       return fail(400, "TRADE_PERIOD_INVALID", { period: reqPeriod });
     }
     if (releaseId) {
-      const pid = reqPeriod ?? "";
+      const rel = demoTradeReleases.find((r) => r.dictVersion === dictVersion && r.releaseId === releaseId);
+      const pid = reqPeriod ?? (rel ? ([...rel.publishedMonths].sort().at(-1) ?? "") : "");
+      const pinnedSnap = pid ? demoTradePeriodSnapshots.get(`${dictVersion}|${pid}|${releaseId}`) : undefined;
+      if (pinnedSnap) {
+        return json(normalizeTradeOverviewSnapshot({ ...pinnedSnap }));
+      }
       return fail(404, "NOT_FOUND", {
         resource: "trade_snapshot",
         id: pid ? `${pid}@${releaseId}` : releaseId,

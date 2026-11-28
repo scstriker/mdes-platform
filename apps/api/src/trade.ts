@@ -46,7 +46,7 @@ import {
 import { AppError } from "./errors";
 
 const CHUNK_SIZE = 500;
-const DEFAULT_DICT_VERSION = "202601";
+export const DEFAULT_DICT_VERSION = "202601";
 const TRADE_UNITS: TradeUnitsMeta = {
   amount: "USD",
   displayAmount: "100M_USD",
